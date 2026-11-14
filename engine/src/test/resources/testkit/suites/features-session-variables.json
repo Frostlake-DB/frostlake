@@ -25,7 +25,7 @@
       {"sql": "SET to_remove = 99"},
       {"sql": "UNSET to_remove"},
       {"sql": "SHOW VARIABLES"},
-      {"sql": "SELECT COUNT_IF(UPPER(\"name\") = 'TO_REMOVE') FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))",
+      {"sql": "SELECT COUNT(*) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE UPPER(\"name\") = 'TO_REMOVE'",
        "expect": {"value": "0"}}
     ]},
     {"name": "unset-multiple-variables", "steps": [
