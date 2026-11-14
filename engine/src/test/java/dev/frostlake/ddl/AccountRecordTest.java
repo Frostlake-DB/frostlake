@@ -76,6 +76,8 @@ public class AccountRecordTest extends BaseDatabaseTest {
     }
     @Test
     public void anAccountIsCreatedListedDroppedAndRestored() {
+        // The organization's administrator creates, drops and restores its accounts.
+        engine.execute("USE ROLE ORGADMIN");
         final int before = rows("SHOW ACCOUNTS", "account_name").size();
         final String created;
         try {
@@ -108,16 +110,17 @@ public class AccountRecordTest extends BaseDatabaseTest {
         engine.executeQuery("UNDROP ACCOUNT acc_one");
         assertEquals(List.of("ACC_ONE"), rows("SHOW ACCOUNTS LIKE 'ACC_ONE'", "account_name"));
         assertTrue(refusal("UNDROP ACCOUNT acc_one").contains("already exists"));
-        // An account that is not there is refused as one the role may not operate on.
+        // An account that is not there is one that does not exist.
         assertTrue(refusal("UNDROP ACCOUNT no_such_account").contains(
-            "Insufficient privileges to operate on account 'NO_SUCH_ACCOUNT'."));
+            "Account 'NO_SUCH_ACCOUNT' does not exist or not authorized."));
     }
 
     @Test
     public void createAccountRequiresItsOptionsAndAValidEdition() {
+        engine.execute("USE ROLE ORGADMIN");
         final String missing = refusal("CREATE ACCOUNT acc_two ADMIN_NAME = admin EMAIL = 'e@x.io'");
         requireAccountManagement(missing);
-        assertEquals("SQL compilation error:\nMissing option(s): [ADMIN_PASSWORD, EDITION].", missing);
+        assertEquals("SQL compilation error:\nMissing option(s): [ADMIN_PASSWORD, EDITION]", missing);
         assertTrue(refusal("""
             CREATE ACCOUNT acc_two ADMIN_NAME = a ADMIN_PASSWORD = 'p' EMAIL = 'e' EDITION = PLATINUM""")
             .contains("EDITION"));

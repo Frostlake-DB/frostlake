@@ -164,9 +164,11 @@ public class KeyListingOrderTest extends MeasuredCellsTestSupport {
                 "PK902X|ID|FK902A|P|1|C1 ;; PK902X|ID|FK902A|Q|1|C2 ;; PK902Y|ID|FK902B|S|1|Q0 ;; "
                 + "PK902X|ID|FK902B|T|1|Q2 ;; PK902X|ID|FK902C|U|1|Q1 ;; PK902M|B|FK902M|X|2|M1 ;; "
                 + "PK902M|A|FK902M|Y|1|M1 ;; PK902X|ID|FK902M|Z|1|M0"},
+            // Keys of different tables come in an order the account does not keep from one run to the next, so the
+            // keys are read in an order of their own.
             {"SHOW PRIMARY KEYS IN SCHEMA test_db.test_schema ->> SELECT \"table_name\", \"column_name\", "
-                + "\"key_sequence\" FROM $1 WHERE \"table_name\" LIKE 'PK902%'",
-                "PK902M|A|1 ;; PK902M|B|2 ;; PK902Y|ID|1 ;; PK902X|ID|1"},
+                + "\"key_sequence\" FROM $1 WHERE \"table_name\" LIKE 'PK902%' ORDER BY 1, 3",
+                "PK902M|A|1 ;; PK902M|B|2 ;; PK902X|ID|1 ;; PK902Y|ID|1"},
         });
     }
 

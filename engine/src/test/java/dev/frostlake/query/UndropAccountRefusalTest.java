@@ -18,9 +18,10 @@ package dev.frostlake.query;
 import org.junit.jupiter.api.Test;
 
 /**
- * UNDROP ACCOUNT of an account that is not there is refused as an account the role may not operate on, by the
- * organization privilege it would need on the current account; a qualified name is refused for its qualifier,
- * and the statement's own faults where they stand. Every answer is live-verified.
+ * UNDROP ACCOUNT is the organization's administrator's: any other role is refused as one that may not operate on the
+ * account, naming no privilege, whether the account is there or not; to the administrator, an account that is not
+ * there does not exist, its name as resolved and unquoted. A qualified name is refused for its qualifier, and the
+ * statement's own faults where they stand. Every answer is live-verified.
  */
 public class UndropAccountRefusalTest extends MeasuredCellsTestSupport {
 
@@ -28,13 +29,11 @@ public class UndropAccountRefusalTest extends MeasuredCellsTestSupport {
     public void anAccountThatIsNotThereIsNotTheRolesToRestore() {
         engine.execute(
             "CREATE OR REPLACE TABLE t (a INT)");
-        assertAnswer(
-            "REFUSED SQL access control error: | Insufficient privileges to operate on account 'NOSUCH_ACCT_W7'. "
-                + "Your primary role <ROLE> must have MANAGE ACCOUNTS granted on ACCOUNT <ACCOUNT>.",
+        assertAnswer("REFUSED SQL access control error: | Insufficient privileges to operate on account "
+                + "'NOSUCH_ACCT_W7'.",
             "UNDROP ACCOUNT nosuch_acct_w7");
-        assertAnswer(
-            "REFUSED SQL access control error: | Insufficient privileges to operate on account 'nosuch_acct_w7'. "
-                + "Your primary role <ROLE> must have MANAGE ACCOUNTS granted on ACCOUNT <ACCOUNT>.",
+        assertAnswer("REFUSED SQL access control error: | Insufficient privileges to operate on account "
+                + "'nosuch_acct_w7'.",
             "UNDROP ACCOUNT \"nosuch_acct_w7\"");
         assertAnswer(
             "REFUSED Cannot specify qualifier for account.",
@@ -45,5 +44,14 @@ public class UndropAccountRefusalTest extends MeasuredCellsTestSupport {
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 30 unexpected 'x'.",
             "UNDROP ACCOUNT nosuch_acct_w7 x");
+    }
+
+    @Test
+    public void toTheOrganizationsAdministratorAMissingAccountDoesNotExist() {
+        engine.execute("USE ROLE ORGADMIN");
+        assertAnswer("REFUSED SQL compilation error: | Account 'NOSUCH_ACCT_W7' does not exist or not authorized.",
+            "UNDROP ACCOUNT nosuch_acct_w7");
+        assertAnswer("REFUSED SQL compilation error: | Account 'nosuch_acct_w7' does not exist or not authorized.",
+            "UNDROP ACCOUNT \"nosuch_acct_w7\"");
     }
 }

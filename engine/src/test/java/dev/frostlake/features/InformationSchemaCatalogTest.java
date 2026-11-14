@@ -270,13 +270,14 @@ public class InformationSchemaCatalogTest extends BaseDatabaseTest {
     /** An unmodeled view answers with its live column shape and no rows. */
     @Test
     public void anUnmodeledViewIsEmptyWithItsLiveShape() {
-        final ResultSet rs = engine.executeQuery("SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS");
+        final ResultSet rs = engine.executeQuery("SELECT * FROM INFORMATION_SCHEMA.BACKUP_POLICIES");
         assertEquals(0, rs.getRowCount());
         final Set<String> columns = new HashSet<>();
         for (int i = 0; i < rs.getColumns().size(); i++) {
             columns.add(rs.getColumns().get(i).getName());
         }
-        assertEquals(new HashSet<>(Arrays.asList("CONSTRAINT_CATALOG", "CONSTRAINT_SCHEMA",
-            "CONSTRAINT_TABLE", "CONSTRAINT_NAME", "CHECK_CLAUSE")), columns);
+        assertEquals(new HashSet<>(Arrays.asList("BACKUP_POLICY_NAME", "BACKUP_POLICY_SCHEMA", "BACKUP_POLICY_CATALOG",
+            "SCHEDULE", "EXPIRE_AFTER_DAYS", "HAS_RETENTION_LOCK", "OWNER", "OWNER_ROLE_TYPE", "CREATED",
+            "LAST_ALTERED", "COMMENT")), columns);
     }
 }

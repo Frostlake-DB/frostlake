@@ -75,9 +75,12 @@ public class NoCurrentSchemaRefusalsTest extends MeasuredCellsTestSupport {
         assertAnswer("REFUSED SQL compilation error: | Object 'NCS_T' does not exist or not authorized. Your primary "
                 + "role <ROLE> must have at least one privilege granted on TABLE NCS_T.",
             "SELECT * FROM ncs_t");
-        assertAnswer("REFUSED Cannot perform ALTER. This session does not have a current schema. Call 'USE SCHEMA', "
-                + "or use a qualified name.",
+        assertAnswer("REFUSED Cannot perform ALTER COLUMN COMMENT. This session does not have a current schema. Call "
+                + "'USE SCHEMA', or use a qualified name.",
             "COMMENT ON COLUMN ncs_t.a IS 'x'");
+        assertAnswer("REFUSED Cannot perform ALTER OBJECT COMMENT. This session does not have a current schema. Call "
+                + "'USE SCHEMA', or use a qualified name.",
+            "ALTER TABLE ncs_t SET COMMENT = 'x'");
         assertAnswer("", "SHOW TABLES");
         assertAnswer("REFUSED SQL compilation error: | Unknown function QT_F.", "SELECT qt_f()");
         assertAnswer("", "LIST @test_schema.qt_st");

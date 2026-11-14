@@ -826,9 +826,14 @@ public class ShowCommandHandler implements CommandHandler {
                 // The organization's listing reads a LIKE, and no STARTS WITH after one (live-verified).
                 throw SyntaxAfter.unexpected(ctx.stringText());
             }
-            // Only the organization account lists the organization's accounts, which this account is not: the
-            // listing is refused whatever the role, LIKE or no LIKE (live-verified).
-            throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
+            // The organization's accounts are listed to its administrator alone, any other role refused as an
+            // operation on the account's own system, naming no privilege; and only the organization account lists
+            // any, which this account is not, so the administrator reads SHOW ACCOUNTS's columns and no row
+            // (live-verified).
+            if (!actsAsOrganizationAdministrator()) {
+                throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
+            }
+            return new ResultSet(showExecutor.showAccounts().getColumns(), new ArrayList<Row>());
         } else if (ctx.ACCOUNTS() != null) {
             if (ctx.showAccountsScope() != null) {
                 // The listing takes no scope: an IN with nothing after it is unfinished, any other is refused whole.
@@ -837,6 +842,23 @@ public class ShowCommandHandler implements CommandHandler {
                 }
                 throw new RuntimeException(SqlCompilationError.of(
                     "Unsupported statement type. correct syntax: 'SHOW ACCOUNTS'."));
+            }
+            // What the listing answers depends on the session's roles (live-verified): the organization's
+            // administrator reads every column, HISTORY included; the account's administrator five of them and no
+            // HISTORY, refused as an operation on the account's own system; any other role is refused, naming the
+            // CREATE LISTING the listing needs.
+            if (!actsAsOrganizationAdministrator()) {
+                if (ctx.HISTORY() != null) {
+                    throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
+                }
+                final SecurityManager security = queryExecutor.getSecurityManager();
+                if (!security.actsAsAccountAdministrator()) {
+                    throw new PrivilegeRefusal(SqlAccessControlError.accountListingRefused(
+                        security.getSessionContext().getCurrentRole(),
+                        security.getSessionContext().isSecondaryRolesInUse(), catalog.getAccountLocator()));
+                }
+                return showExecutor.accountsAsAccountAdministrator(catalog.getAccountDirectory().accounts(),
+                    catalog.getAccountDirectory().managedAccounts().size());
             }
             return showExecutor.showAccounts(ctx.HISTORY() != null, catalog.getAccountDirectory().accounts(),
                 catalog.getAccountDirectory().managedAccounts().size());
@@ -852,6 +874,12 @@ public class ShowCommandHandler implements CommandHandler {
         }
 
         throw new RuntimeException("Unsupported SHOW statement");
+    }
+
+    /** Whether the session acts as its organization's administrator; a session with no security model does. */
+    private boolean actsAsOrganizationAdministrator() {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.actsAsOrganizationAdministrator();
     }
 
     /**

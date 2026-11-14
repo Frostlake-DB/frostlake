@@ -58,6 +58,8 @@ public class AppObjectCommandHandler {
 
     /** The main file a Streamlit app runs when its statement names none. */
     private static final String DEFAULT_MAIN_FILE = "streamlit_app.py";
+    /** The runtime that runs a Streamlit app on warehouses: a new app runs on it only when its statement names it. */
+    private static final String WAREHOUSE_RUNTIME = "SYSTEM$WAREHOUSE_RUNTIME";
     /** The main file a notebook created FROM a location without MAIN_FILE is taken to run. */
     private static final String DEFAULT_NOTEBOOK_FILE = "notebook_app.ipynb";
 
@@ -200,6 +202,14 @@ public class AppObjectCommandHandler {
                 }
             }
             if (ctx.FROM() != null) {
+                // Its query warehouse is judged first, then the runtime its IMPORTS need, then its main file
+                // (live-verified).
+                for (final FrostlakeParser.StreamlitOptionContext option : ctx.streamlitOption()) {
+                    if (option.QUERY_WAREHOUSE() != null) {
+                        queryWarehouse(option.identifier(0));
+                    }
+                }
+                requireWarehouseRuntimeForImports(kind, nameCtx, ctx.streamlitOption());
                 String mainFile = DEFAULT_MAIN_FILE;
                 for (final FrostlakeParser.StreamlitOptionContext option : ctx.streamlitOption()) {
                     if (option.MAIN_FILE() != null) {
@@ -543,6 +553,31 @@ public class AppObjectCommandHandler {
      * A query warehouse, which must exist: {@code The specified warehouse X does not exist or the current role does
      * not have access. …}, the sentence the account answers for notebooks and Streamlit apps alike.
      */
+    /**
+     * Refuses IMPORTS on a new app created FROM a location that does not run on warehouses: such an app runs on the
+     * container runtime unless RUNTIME_NAME names the warehouse runtime, and only an app running on warehouses takes
+     * IMPORTS. An app that replaces one of its name runs on warehouses, and so does one created with ROOT_LOCATION
+     * (live-verified).
+     */
+    private void requireWarehouseRuntimeForImports(final AppObjectKind kind,
+                                                   final FrostlakeParser.QualifiedNameContext nameCtx,
+                                                   final List<FrostlakeParser.StreamlitOptionContext> options) {
+        boolean imports = false;
+        String runtime = null;
+        for (final FrostlakeParser.StreamlitOptionContext option : options) {
+            if (option.IMPORTS() != null) {
+                imports = true;
+            } else if (option.RUNTIME_NAME() != null) {
+                runtime = literal(option.STRING_LITERAL(0));
+            }
+        }
+        if (imports && !WAREHOUSE_RUNTIME.equals(runtime)
+                && schemaOf(nameCtx).getAppObjects().get(kind, nameOf(nameCtx)) == null) {
+            throw new RuntimeException("This has IMPORTS set - but IMPORTS are only supported by Streamlit "
+                + "applications running on warehouses.");
+        }
+    }
+
     private String queryWarehouse(final FrostlakeParser.IdentifierContext name) {
         final String warehouse = SqlIdentifiers.canonical(name);
         if (!catalog.hasWarehouseExact(warehouse)) {

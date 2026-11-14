@@ -47,6 +47,11 @@ public class LiveAccountStatementsTest {
         assertEquals("REVOKE", LiveAccountStatements.heldBack("REVOKE SELECT ON TABLE t FROM ROLE r"));
         assertEquals("USE ROLE", LiveAccountStatements.heldBack("use role accountadmin"));
         assertEquals("USE SECONDARY ROLES", LiveAccountStatements.heldBack("USE SECONDARY ROLES NONE"));
+        assertEquals("CREATE ACCOUNT", LiveAccountStatements.heldBack("CREATE ACCOUNT a ADMIN_NAME = x"));
+        assertEquals("CREATE ACCOUNT", LiveAccountStatements.neverSent("create account a admin_name = x"));
+        assertEquals(null, LiveAccountStatements.heldBack("CREATE MANAGED ACCOUNT r ADMIN_NAME = x"));
+        assertEquals(null, LiveAccountStatements.neverSent("CREATE ROLE r"));
+        assertEquals(null, LiveAccountStatements.heldBack("SHOW ACCOUNTS"));
         assertEquals("CREATE ROLE", LiveAccountStatements.heldBack("CREATE ROLE IF NOT EXISTS r COMMENT = 'x'"));
         assertEquals("CREATE USER", LiveAccountStatements.heldBack("create or replace user u PASSWORD = 'p'"));
         assertEquals("CREATE DATABASE ROLE", LiveAccountStatements.heldBack("CREATE DATABASE ROLE test_db.dr"));

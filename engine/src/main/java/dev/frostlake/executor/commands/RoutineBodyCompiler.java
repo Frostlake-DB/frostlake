@@ -477,9 +477,10 @@ final class RoutineBodyCompiler {
      * @param routineName   the routine's own unqualified name, so the validator can see a self-call.
      */
     /**
-     * A function's expression or query that writes the caret between two values, or two signs in a row, is refused as
-     * the function's compilation failing, by the operator alone (see {@link CaretOperator}) or the invalid function
-     * the signs make (see {@link DoubledSigns}); a block's is refused bare.
+     * A function's expression that writes the caret between two values, or two signs in a row, is refused as the
+     * function's compilation failing, by the operator alone (see {@link CaretOperator}) or the invalid function the
+     * signs make (see {@link DoubledSigns}); a query's, a table function's too, and a block's are refused bare
+     * (live-verified).
      */
     private static void rejectCaret(final ParseTree body) {
         try {
@@ -685,7 +686,7 @@ final class RoutineBodyCompiler {
         }
         final FrostlakeParser.SqlScriptContext queryBody = queryExecutor.queryStatementOf(trimmed);
         if (queryBody != null) {
-            rejectCaret(queryBody);
+            DoubledSigns.rejectWithOperators(queryBody);
             rejectQueryBodyEnding(body);
             rejectIntoClauses(queryBody);
             rejectUnknownTypedLiteral(queryBody);
@@ -836,10 +837,9 @@ final class RoutineBodyCompiler {
     }
 
     /**
-     * A query or block body's bare stages, judged at CREATE in the frame the body compiles in, its places the untrimmed
-     * body's own: a table function's query inside the frame of parentheses an expression body has — "Compilation of
-     * SQL UDF failed: " before the refusal, a place on the first line moved by one — and a scalar function's query or
-     * block as a statement of its own, neither (live-verified). An expression body is judged once it reads as one.
+     * A query or block body's bare stages, judged at CREATE as a statement of its own, its places the untrimmed body's:
+     * a query, a table function's as a scalar function's, and a scalar function's block, with no "Compilation of SQL
+     * UDF failed: " before the refusal (live-verified). An expression body is judged once it reads as one.
      *
      * @param script        the body as parsed before any stage in it is judged, or null when it does not parse
      * @param body          the body's text
@@ -852,11 +852,7 @@ final class RoutineBodyCompiler {
         }
         final FrostlakeParser.StatementContext statement = script.flowChain().get(0).statement().get(0);
         if (statement.queryStatement() != null) {
-            if (tableFunction) {
-                StageArgumentSyntax.requireFramedPlacement(statement);
-            } else {
-                StageArgumentSyntax.requirePlacement(statement, body);
-            }
+            StageArgumentSyntax.requirePlacement(statement, body);
         } else if (!tableFunction && statement.proceduralStatement() != null
                 && statement.proceduralStatement().beginEndBlock() != null) {
             StageArgumentSyntax.requirePlacement(statement, body);

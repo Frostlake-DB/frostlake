@@ -71,6 +71,10 @@ public class DoubledSignPlacesTest extends MeasuredCellsTestSupport {
             {"SELECT - -1 ^ 2", "REFUSED Unsupported feature '^'."},
             {"CREATE OR REPLACE FUNCTION df929() RETURNS INT AS '- -1'",
                 "REFUSED Compilation of SQL UDF failed: SQL compilation error: | invalid function '-'"},
+            {"CREATE OR REPLACE FUNCTION df929() RETURNS INT AS 'SELECT - -1'",
+                "REFUSED SQL compilation error: | invalid function '-'"},
+            {"CREATE OR REPLACE FUNCTION df929() RETURNS TABLE (n INT) AS 'SELECT - -1'",
+                "REFUSED SQL compilation error: | invalid function '-'"},
             {"CREATE OR REPLACE PROCEDURE dp929() RETURNS INT LANGUAGE SQL AS 'BEGIN IF (FALSE) THEN RETURN - "
                 + "-1; END IF; RETURN 1; END'",
                 "REFUSED SQL compilation error: | invalid function '-'"},

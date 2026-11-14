@@ -57,6 +57,17 @@ public class EngineConfig {
      * 240), and a client that sets CLIENT_SESSION_KEEP_ALIVE sends heartbeats that count as activity.
      */
     public static final String PROP_HTTP_SESSION_IDLE_TIMEOUT_MINUTES = "http.session.idleTimeoutMinutes";
+    /**
+     * The port of the server's HTTPS listener, which serves every endpoint the plain one serves - what a Snowflake
+     * driver connects to with its default {@code ssl=on}. None by default; it needs {@link #PROP_HTTP_TLS_KEYSTORE}.
+     */
+    public static final String PROP_HTTP_TLS_PORT = "http.tls.port";
+    /** The keystore holding the HTTPS listener's key and certificate. */
+    public static final String PROP_HTTP_TLS_KEYSTORE = "http.tls.keystore";
+    /** The keystore's password, which is also its key's. */
+    public static final String PROP_HTTP_TLS_KEYSTORE_PASSWORD = "http.tls.keystorePassword";
+    /** The keystore's type: PKCS12 by default, JKS for an older one. */
+    public static final String PROP_HTTP_TLS_KEYSTORE_TYPE = "http.tls.keystoreType";
     public static final String PROP_DATABASE_DEFAULT = "database.default";
     public static final String PROP_SCHEMA_DEFAULT = "schema.default";
     public static final String PROP_ACCOUNT_ID = "account.id";
@@ -257,6 +268,27 @@ public class EngineConfig {
 
     public String getHttpHost() {
         return getProperty(PROP_HTTP_HOST, DEFAULT_HTTP_HOST);
+    }
+
+    /**
+     * The HTTPS listener's port, or -1 where none is configured.
+     *
+     * @return the port
+     */
+    public int getHttpTlsPort() {
+        return getIntProperty(PROP_HTTP_TLS_PORT, -1);
+    }
+
+    public String getHttpTlsKeystore() {
+        return getProperty(PROP_HTTP_TLS_KEYSTORE, "");
+    }
+
+    public String getHttpTlsKeystorePassword() {
+        return getProperty(PROP_HTTP_TLS_KEYSTORE_PASSWORD, "");
+    }
+
+    public String getHttpTlsKeystoreType() {
+        return getProperty(PROP_HTTP_TLS_KEYSTORE_TYPE, "PKCS12");
     }
 
     /**

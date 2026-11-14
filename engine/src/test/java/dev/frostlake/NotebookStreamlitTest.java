@@ -165,7 +165,8 @@ public class NotebookStreamlitTest extends BaseDatabaseTest {
             + " FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE) SINGLE = TRUE OVERWRITE = TRUE");
         try {
             engine.execute("CREATE STREAMLIT app FROM '@stg/app' MAIN_FILE = 'streamlit_app.py'"
-                + " QUERY_WAREHOUSE = fl_app_wh1 IMPORTS = ('@stg/lib.py') EXTERNAL_ACCESS_INTEGRATIONS = (ext1)");
+                + " QUERY_WAREHOUSE = fl_app_wh1 RUNTIME_NAME = 'SYSTEM$WAREHOUSE_RUNTIME'"
+                + " IMPORTS = ('@stg/lib.py') EXTERNAL_ACCESS_INTEGRATIONS = (ext1)");
         } catch (final RuntimeException refused) {
             if (!isLiveSnowflake()) {
                 throw refused;

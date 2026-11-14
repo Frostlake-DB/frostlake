@@ -43,7 +43,7 @@ public class InformationSchemaPackagesTest extends MeasuredCellsTestSupport {
                 + "SYSTEM$TYPEOF(runtime_version) FROM information_schema.packages LIMIT 1",
                 "VARCHAR[LOB]|VARCHAR[LOB]|VARCHAR[LOB]|VARCHAR[LOB]"},
             {"SELECT COUNT(*) FROM information_schema.packages WHERE language = 'java' AND runtime_version IS NULL",
-                "54"},
+                "55"},
             {"SELECT package_name, version FROM information_schema.packages WHERE language = 'java' ORDER BY "
                 + "package_name, version",
                 "com.snowflake:snowpark|1.10.0 ;; com.snowflake:snowpark|1.11.0 ;; com.snowflake:snowpark|1.12.0 ;; "
@@ -56,6 +56,7 @@ public class InformationSchemaPackagesTest extends MeasuredCellsTestSupport {
                 + "com.snowflake:snowpark|1.7.2 ;; com.snowflake:snowpark|1.8.0 ;; com.snowflake:snowpark|1.9.0 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.0 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.1 ;; "
+                + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.10 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.4 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.5 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.6 ;; "
@@ -79,7 +80,7 @@ public class InformationSchemaPackagesTest extends MeasuredCellsTestSupport {
             {"SELECT language, COUNT(*), COUNT(DISTINCT package_name), COUNT(runtime_version), MIN(runtime_version), "
                 + "MAX(runtime_version) FROM information_schema.packages WHERE language <> 'python' GROUP BY language "
                 + "ORDER BY language",
-                "java|54|11|0|null|null ;; scala|54|11|0|null|null"},
+                "java|55|11|0|null|null ;; scala|55|11|0|null|null"},
             {"SELECT package_name, version FROM information_schema.packages WHERE language = 'scala' ORDER BY "
                 + "package_name, version",
                 "com.snowflake:snowpark|1.10.0 ;; com.snowflake:snowpark|1.11.0 ;; com.snowflake:snowpark|1.12.0 ;; "
@@ -92,6 +93,7 @@ public class InformationSchemaPackagesTest extends MeasuredCellsTestSupport {
                 + "com.snowflake:snowpark|1.7.2 ;; com.snowflake:snowpark|1.8.0 ;; com.snowflake:snowpark|1.9.0 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.0 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.1 ;; "
+                + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.10 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.4 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.5 ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.6 ;; "
@@ -123,6 +125,7 @@ public class InformationSchemaPackagesTest extends MeasuredCellsTestSupport {
                 + "'%datasource%' ORDER BY version",
                 "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.0|java|null ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.1|java|null ;; "
+                + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.10|java|null ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.4|java|null ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.5|java|null ;; "
                 + "com.snowflake:snowpark-spark-datasource-extensions_2.12|3.5.7.6|java|null ;; "

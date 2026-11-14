@@ -19,6 +19,14 @@ http.rest.resultRetentionMs=3600000
 # (a session policy's SESSION_IDLE_TIMEOUT_MINS defaults to 240). 0 keeps every session until it is released. A
 # client that sets CLIENT_SESSION_KEEP_ALIVE sends heartbeats, which count as activity.
 http.session.idleTimeoutMinutes=240
+# An HTTPS listener beside the plain one, serving the same endpoints - what the Snowflake JDBC driver connects to with
+# its default ssl=on. It needs a keystore holding the server's key and certificate (PKCS12 by default); the driver must
+# trust the certificate (javax.net.ssl.trustStore) and, for a certificate no OCSP responder knows, connect with
+# disableOCSPChecks=true.
+# http.tls.port=18443
+# http.tls.keystore=/path/to/server.p12
+# http.tls.keystorePassword=changeit
+# http.tls.keystoreType=PKCS12
 
 # Database Defaults — where every fresh session starts (the engine's bootstrap session and each
 # HTTP session alike). A non-default database is created on first boot, so this is the way to give

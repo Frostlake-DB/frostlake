@@ -121,13 +121,30 @@
       {"sql": "SHOW VARIABLES"}
     ]},
     {"name": "show-accounts", "steps": [
+      {"sql": "USE ROLE ORGADMIN"},
       {"sql": "SHOW ACCOUNTS", "expect": {"rowCount": 1}},
-      {"sql": "SELECT \"organization_name\" IS NOT NULL, \"account_name\" IS NOT NULL, \"edition\" IS NOT NULL, \"snowflake_region\" IS NOT NULL FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))",
-       "expect": {"rows": [["true", "true", "true", "true"]]}}
+      {"sql": "USE ROLE SYSADMIN"}
     ]},
     {"name": "show-organization-accounts-is-the-organization-accounts-own", "steps": [
       {"sql": "SHOW ORGANIZATION ACCOUNTS",
        "expect": {"error": {"messageContains": "Insufficient privileges to operate on  'SYSTEM'."}}}
+    ]},
+    {"name": "show-accounts-to-the-account-administrator-is-five-columns", "steps": [
+      {"sql": "USE ROLE ACCOUNTADMIN"},
+      {"sql": "SHOW ACCOUNTS",
+       "expect": {"columns": ["organization_name", "account_name", "snowflake_region", "account_locator",
+         "is_organization_account"]}},
+      {"sql": "USE ROLE SYSADMIN"}
+    ]},
+    {"name": "show-accounts-to-another-role-is-refused-for-create-listing", "steps": [
+      {"sql": "USE ROLE SYSADMIN"},
+      {"sql": "SHOW ACCOUNTS",
+       "expect": {"error": {"messageContains": "must have CREATE LISTING granted on ACCOUNT"}}}
+    ]},
+    {"name": "show-organization-accounts-to-the-organization-administrator-lists-none", "steps": [
+      {"sql": "USE ROLE ORGADMIN"},
+      {"sql": "SHOW ORGANIZATION ACCOUNTS", "expect": {"rowCount": 0}},
+      {"sql": "USE ROLE SYSADMIN"}
     ]},
     {"name": "unset-text-cells-are-empty-not-null", "steps": [
       {"sql": "CREATE TABLE uc_t (\n    plain NUMBER,\n    withdefault NUMBER DEFAULT 7,\n    commented NUMBER COMMENT 'a comment',\n    autocol NUMBER AUTOINCREMENT)"},

@@ -1759,7 +1759,14 @@ public class DatabaseEngine {
         final Object indent = securityManager != null
             ? securityManager.getSessionContext().getSessionParameter("JSON_INDENT") : null;
         if (indent == null) {
-            VariantJsonFormat.clearSessionScope();
+            // A session that sets none lays its values out at its front end's default width, else the engine's own.
+            final Integer fallback = securityManager != null
+                ? securityManager.getSessionContext().getDefaultJsonIndent() : null;
+            if (fallback != null) {
+                VariantJsonFormat.beginSessionScope(fallback.intValue());
+            } else {
+                VariantJsonFormat.clearSessionScope();
+            }
             return;
         }
         try {

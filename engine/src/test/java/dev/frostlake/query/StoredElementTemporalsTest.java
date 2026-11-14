@@ -300,27 +300,29 @@ public class StoredElementTemporalsTest extends MeasuredCellsTestSupport {
     }
 
     /**
-     * A ROLLUP, a CUBE and GROUPING SETS of more than one set give each key its set's value, so none reads the stored
-     * element, however the key is written; GROUPING SETS of one set reads it as a GROUP BY does.
+     * A ROLLUP, a CUBE and GROUPING SETS of more than one set compute each key over the rows as a GROUP BY does, so a
+     * key's conversion reads the stored element, however the key is written, the grand total's row NULL.
      */
     @Test
-    public void severalGroupingSetsReadNoStoredElement() {
+    public void severalGroupingSetsReadTheStoredElementToo() {
         assertAnswer("Statement executed successfully.", "ALTER SESSION SET TIMEZONE = 'America/Los_Angeles'");
         assertAnswer("Table VA successfully created.", "CREATE OR REPLACE TABLE va (i INT, a ARRAY)");
         assertAnswer("1", "INSERT INTO va SELECT 0, ARRAY_CONSTRUCT(1)");
-        final String refused = "REFUSED Failed to cast variant value 1 to DATE";
-        assertAnswer(refused, "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0]::DATE)");
-        assertAnswer(refused, "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (1)");
-        assertAnswer(refused, "SELECT a[0]::DATE AS d FROM va GROUP BY ROLLUP (d)");
-        assertAnswer(refused, "SELECT a[0]::DATE FROM va GROUP BY CUBE (a[0]::DATE)");
-        assertAnswer(refused, "SELECT a[0]::DATE FROM va GROUP BY GROUPING SETS ((a[0]::DATE), ())");
-        assertAnswer(refused, "SELECT a[0]::DATE, COUNT(*) FROM va GROUP BY ROLLUP (a[0]::DATE)");
-        assertAnswer(refused, "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0]::DATE, i)");
-        assertAnswer(refused, "SELECT TO_DATE(a[0]) FROM va GROUP BY ROLLUP (TO_DATE(a[0]))");
-        assertAnswer("REFUSED Failed to cast variant value 1 to TIME",
-            "SELECT a[0]::TIME FROM va GROUP BY ROLLUP (a[0]::TIME)");
+        final String rolled = "1970-01-02 ;; null";
+        assertAnswer(rolled, "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0]::DATE)");
+        assertAnswer(rolled, "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (1)");
+        assertAnswer(rolled, "SELECT a[0]::DATE AS d FROM va GROUP BY ROLLUP (d)");
+        assertAnswer(rolled, "SELECT a[0]::DATE FROM va GROUP BY CUBE (a[0]::DATE)");
+        assertAnswer(rolled, "SELECT a[0]::DATE FROM va GROUP BY GROUPING SETS ((a[0]::DATE), ())");
+        assertAnswer("1970-01-02|1 ;; null|1", "SELECT a[0]::DATE, COUNT(*) FROM va GROUP BY ROLLUP (a[0]::DATE)");
+        assertAnswer("1970-01-02 ;; 1970-01-02 ;; null", "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0]::DATE, i)");
+        assertAnswer(rolled, "SELECT TO_DATE(a[0]) FROM va GROUP BY ROLLUP (TO_DATE(a[0]))");
+        assertAnswer("00:00:01 ;; null", "SELECT a[0]::TIME FROM va GROUP BY ROLLUP (a[0]::TIME)");
         assertAnswer("1970-01-02", "SELECT a[0]::DATE FROM va GROUP BY GROUPING SETS ((a[0]::DATE))");
         assertAnswer("1970-01-02", "SELECT a[0]::DATE FROM va GROUP BY GROUPING SETS (1)");
+        // A conversion outside every key reads the grouped value, and is refused.
+        assertAnswer("REFUSED Failed to cast variant value 1 to DATE",
+            "SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0])");
     }
 
     /**

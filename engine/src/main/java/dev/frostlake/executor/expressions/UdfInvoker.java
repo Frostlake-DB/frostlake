@@ -973,16 +973,12 @@ final class UdfInvoker {
     }
 
     /**
-     * A scripting-block UDF may not RETURN a DECFLOAT, which is told on the call, in lower case; a function so
-     * declared is created without complaint (live-verified). A semi-structured return is refused at CREATE, and a
-     * restored function of that shape on its call. A DECFLOAT or a semi-structured PARAMETER is fine; only the
-     * return type is refused.
+     * A scripting-block UDF may not RETURN a semi-structured value: one is refused at CREATE, and a restored function
+     * of that shape on its call. A semi-structured PARAMETER is fine; only the return type is refused. A DECFLOAT
+     * return is answered as any other (live-verified).
      */
     private void rejectUnsupportedScriptingReturnType(final Function function) {
         final DataType returnType = function.getReturnType();
-        if (NumericType.isDecfloat(returnType)) {
-            throw new RuntimeException("Unsupported return type for Snowscript UDF: decfloat");
-        }
         if (returnType != null && returnType.getCategory() == TypeCategory.SEMI_STRUCTURED) {
             throw new RuntimeException("Unsupported return type for Snowscript UDF: "
                 + returnType.getName().toUpperCase(Locale.ROOT));

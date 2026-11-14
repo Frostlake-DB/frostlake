@@ -118,6 +118,12 @@ public class ShowModifierSyntaxTest extends BaseDatabaseTest {
     public void listingsThatReadTheModifiersRunThem() {
         assertEquals("rows 0", answer("SHOW HYBRID TABLES LIKE 'FL_NO_SUCH%' LIMIT 1"));
         assertEquals("rows 0", answer("SHOW HYBRID TABLES LIKE 'FL_NO_SUCH%' STARTS WITH 'A'"));
+    }
+
+    @Test
+    public void theAccountListingReadsTheModifiers() {
+        // The account's administrator reads the listing.
+        engine.execute("USE ROLE ACCOUNTADMIN");
         assertEquals("rows 1", answer("SHOW ACCOUNTS LIMIT 1"));
         assertEquals("rows 1", answer("SHOW ACCOUNTS STARTS WITH 'A'"));
     }

@@ -20,7 +20,10 @@ import dev.frostlake.executor.SqlAccessControlError;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.parser.FrostlakeParser;
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The names a statement sets or unsets on a database, a schema or a table, judged before any is applied (all
@@ -28,12 +31,21 @@ import java.util.List;
  * property of its kind, the first of a table hashed by name; then a parameter of another level is refused — by ALTER
  * as an operation the role may not run on the object, whatever the value ({@code SET TIMEZONE = 'UTC'} on a schema is
  * "Insufficient privileges to operate on schema 'TEST_SCHEMA'."), by CREATE as {@code cannot set parameter
- * 'TIMEZONE' at 'SCHEMA'}.
+ * 'TIMEZONE' at 'SCHEMA'}. A change of a table's, a schema's or a database's comment beside nothing but parameters is
+ * judged as CREATE judges its parameters: SET COMMENT = 'k' TIMEZONE = 'UTC' on a schema is {@code cannot set parameter
+ * 'TIMEZONE' at 'SCHEMA'}, its SET or UNSET alike.
  */
 final class ParameterLevels {
 
     /** The property naming a container's classification profile, which no parameter list holds. */
     static final String CLASSIFICATION_PROFILE = "CLASSIFICATION_PROFILE";
+
+    /** The kinds whose comment, changed beside parameters alone, has those parameters judged as CREATE judges them. */
+    private static final Set<String> COMMENTED_KINDS = new HashSet<>(Arrays.asList("TABLE", "SCHEMA", "DATABASE"));
+
+    /** A table's own properties that are no parameters: one of them beside the comment makes the change a plain one. */
+    private static final Set<String> OWN_PROPERTIES = new HashSet<>(Arrays.asList("CHANGE_TRACKING",
+        "DATA_METRIC_SCHEDULE", "ENABLE_SCHEMA_EVOLUTION", "ERROR_LOGGING", "ROW_TIMESTAMP", CLASSIFICATION_PROFILE));
 
     private ParameterLevels() {
     }
@@ -95,6 +107,7 @@ final class ParameterLevels {
                 }
             }
         }
+        final boolean commentChange = isCommentChange(names, kind);
         for (final Integer i : order) {
             final String canonical = ParameterRegistry.canonical(names.get(i));
             if (ParameterRegistry.isUnsettable(kind, canonical)) {
@@ -104,9 +117,38 @@ final class ParameterLevels {
             }
             // A parameter the level takes no value of is unset all the same (live-verified).
             if (!taken.get(i).booleanValue() && !(values == null && ParameterRegistry.takesNoValue(kind, canonical))) {
+                if (commentChange) {
+                    // Beside the comment alone, a parameter of another level is CREATE's refusal (live-verified).
+                    throw new RuntimeException(SqlCompilationError.of("cannot set parameter '" + canonical
+                        + "' at '" + kind + "'"));
+                }
                 throw new RuntimeException(SqlAccessControlError.insufficientPrivileges(privilegeKind, objectName));
             }
         }
+    }
+
+    /**
+     * Whether an ALTER's names change a table's, a schema's or a database's comment beside nothing but parameters and
+     * the staged COPY defaults.
+     *
+     * @param names the names as written
+     * @param kind  the object's kind
+     * @return whether they do
+     */
+    private static boolean isCommentChange(final List<String> names, final String kind) {
+        if (!COMMENTED_KINDS.contains(kind)) {
+            return false;
+        }
+        boolean comment = false;
+        for (final String name : names) {
+            final String canonical = ParameterRegistry.canonical(name);
+            if ("COMMENT".equals(canonical)) {
+                comment = true;
+            } else if (OWN_PROPERTIES.contains(canonical)) {
+                return false;
+            }
+        }
+        return comment;
     }
 
     /**

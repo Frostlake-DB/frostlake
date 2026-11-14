@@ -39,8 +39,8 @@ public class SystemReferenceReadBackTest extends MeasuredCellsTestSupport {
             + "NUMBER := (SELECT COUNT(*) FROM TABLE(:r)); RETURN n; END $$");
         engine.execute("CREATE OR REPLACE PROCEDURE pr_ins(r VARCHAR) RETURNS NUMBER LANGUAGE SQL AS $$ BEGIN INSERT "
             + "INTO IDENTIFIER(:r) VALUES (9); RETURN 1; END $$");
-        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 32 unexpected "
-                + "'SYSTEM$REFERENCE'. | syntax error line 1 at position 63 unexpected ')'.",
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 31 unexpected "
+                + "'('. | syntax error line 1 at position 63 unexpected ')'.",
             "SELECT COUNT(*) FROM IDENTIFIER(SYSTEM$REFERENCE('TABLE', 'tsr'))");
         assertAnswer("REFUSED SQL compilation error: | Unknown table function SYSTEM$REFERENCE",
             "SELECT COUNT(*) FROM TABLE(SYSTEM$REFERENCE('TABLE', 'tsr'))");

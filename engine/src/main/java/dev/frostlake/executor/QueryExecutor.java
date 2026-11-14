@@ -2139,8 +2139,13 @@ public class QueryExecutor implements ImportLocalizer {
         return parseScript(sql, false);
     }
 
-    /** As {@link #parsedScript}, for a judgement made of a text before it runs: its faults are the run's to report. */
-    static FrostlakeParser.SqlScriptContext parsedScriptQuietly(final String sql) {
+    /**
+     * As {@link #parsedScript}, for a judgement made of a text before it runs: its faults are the run's to report.
+     *
+     * @param sql the text
+     * @return its script
+     */
+    public static FrostlakeParser.SqlScriptContext parsedScriptQuietly(final String sql) {
         return parseScript(sql, true);
     }
 
@@ -8960,6 +8965,76 @@ public class QueryExecutor implements ImportLocalizer {
         return new ResultSet(cols, rows);
     }
 
+    /**
+     * Where the Snowflake driver writes a file of a PUT it carries out itself: the directory of the stage path the PUT
+     * names, made where it is missing, where {@link #executePutFromContext} writes a file of that name.
+     *
+     * @param ctx  the PUT
+     * @param name the name the file lands under
+     * @return the directory
+     * @throws IOException where a directory cannot be made
+     */
+    public Path putDirectory(final FrostlakeParser.PutStatementContext ctx, final String name) throws IOException {
+        final String putLocation = stageRefToLocation(ctx.stageRef());
+        final Path stageDir = resolveCopyBaseDir(putLocation);
+        if (stageDir == null) {
+            throw new RuntimeException("PUT target stage has no local directory");
+        }
+        final StagePrefix putTarget = resolveStagePrefix(putLocation);
+        if (putTarget == null || putTarget.getRoot() == null) {
+            Files.createDirectories(stageDir);
+            return stageDir;
+        }
+        final String prefix = putTarget.getPrefix().isEmpty() || putTarget.getPrefix().endsWith("/")
+            ? putTarget.getPrefix() : putTarget.getPrefix() + "/";
+        return StagePathSegments.fileToWrite(putTarget.getRoot(), prefix + name).getParent();
+    }
+
+    /**
+     * The local path a PUT reads, as its text names it, without its {@code file://} scheme.
+     *
+     * @param ctx the PUT
+     * @return the path, its wildcards as written
+     */
+    public String putSource(final FrostlakeParser.PutStatementContext ctx) {
+        return stripFileScheme(ctx.STRING_LITERAL() != null
+            ? extractStringLiteral(ctx.STRING_LITERAL()) : ctx.FILE_URL().getText());
+    }
+
+    /**
+     * The directory a GET's stage keeps its files in, which {@link #getFiles} are read below.
+     *
+     * @param ctx the GET
+     * @return the stage's directory, or null where it has none
+     */
+    public Path getRoot(final FrostlakeParser.GetStatementContext ctx) {
+        return resolveStagePrefix(stageRefToLocation(ctx.stageRef())).getRoot();
+    }
+
+    /**
+     * The staged files a GET reads - those its path and its PATTERN reach - for the Snowflake driver to copy itself.
+     *
+     * @param ctx the GET
+     * @return the files, none where the stage holds none
+     */
+    public List<Path> getFiles(final FrostlakeParser.GetStatementContext ctx) {
+        final StagePrefix staged = resolveStagePrefix(stageRefToLocation(ctx.stageRef()));
+        if (staged.getRoot() == null || !Files.exists(staged.getRoot())) {
+            return new ArrayList<>();
+        }
+        return staged.files(getPattern(ctx));
+    }
+
+    /**
+     * The local directory a GET writes into, without its {@code file://} scheme.
+     *
+     * @param ctx the GET
+     * @return the directory
+     */
+    public String getTarget(final FrostlakeParser.GetStatementContext ctx) {
+        return stripFileScheme(stripTargetUrl(ctx));
+    }
+
     /** The gzip of {@code bytes}; GZIPOutputStream writes no timestamp, so equal input gives equal output. */
     public static byte[] gzipBytes(final byte[] bytes) throws IOException {
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -13398,6 +13473,8 @@ public class QueryExecutor implements ImportLocalizer {
                 return systemViews.queryViews(database, null);
             case "TABLE_CONSTRAINTS":
                 return systemViews.queryTableConstraints(database, null);
+            case "CHECK_CONSTRAINTS":
+                return systemViews.queryCheckConstraints(database, null);
             case "REFERENTIAL_CONSTRAINTS":
                 return systemViews.queryReferentialConstraints(database, null);
             case "PROCEDURES":

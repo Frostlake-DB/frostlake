@@ -796,6 +796,11 @@ public class ShowCommandExecutor {
         return sessionExecutor.showAccounts(history, created, managed);
     }
 
+    /** @see ShowSessionExecutor#accountsAsAccountAdministrator */
+    public ResultSet accountsAsAccountAdministrator(final List<Account> created, final int managed) {
+        return sessionExecutor.accountsAsAccountAdministrator(created, managed);
+    }
+
     /** SHOW MANAGED ACCOUNTS. */
     public ResultSet showManagedAccounts(final List<ManagedAccount> accounts) {
         return sessionExecutor.showManagedAccounts(accounts);

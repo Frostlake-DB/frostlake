@@ -169,7 +169,7 @@ public class SubqueryInAggregateEchoTest extends MeasuredCellsTestSupport {
         assertAnswer(
             "REFUSED SQL compilation error: | [MAX((SELECT SET_COMBINE(WB$0.\"MAX(G.V)\", WB$1.\"1\") AS "
                 + "\"MAX(G.V)\" FROM (SELECT OB$0.\"MAX(G.V)\" AS \"MAX(G.V)\" FROM (SELECT MAX(G.V) AS \"MAX(G.V)\" "
-                + "FROM G AS G) OB$0) WB$0 UNION ALL (SELECT ENSURE_NULLABLE(CAST(OB$1.\"1\" AS NUMBER(38,0))) AS "
+                + "FROM G AS G) OB$0) WB$0 UNION ALL (SELECT CAST(OB$1.\"1\" AS NUMBER(38,0)) AS "
                 + "\"1\" FROM (SELECT 1 AS \"1\" FROM (VALUES (null)) DUAL) OB$1) WB$1 LIMIT 1 OFFSET 0))] is not a "
                 + "valid order by expression",
             "SELECT DISTINCT b FROM fz GROUP BY b ORDER BY MAX((SELECT MAX(g.v) FROM g UNION ALL SELECT 1 LIMIT "

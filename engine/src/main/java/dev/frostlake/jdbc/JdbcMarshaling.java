@@ -1496,6 +1496,32 @@ public final class JdbcMarshaling {
         return count;
     }
 
+    /**
+     * The number of values a statement binds: one for each {@code ?}, and for numbered binds the highest {@code :n}
+     * it writes, a {@code ?} or a {@code :n} inside a string literal or a comment aside.
+     *
+     * @param sql the statement
+     * @return the number of values it binds
+     */
+    public static int bindCount(final String sql) {
+        final List<Token> tokens = lex(sql).getTokens();
+        int questions = 0;
+        int highest = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            final Token t = tokens.get(i);
+            if (t.getType() == FrostlakeLexer.QUESTION) {
+                questions++;
+            } else if (t.getType() == FrostlakeLexer.COLON && i + 1 < tokens.size()
+                    && tokens.get(i + 1).getType() == FrostlakeLexer.INTEGER_LITERAL && !objectKeyColon(tokens, i)) {
+                final Integer number = bindNumber(tokens.get(i + 1).getText());
+                if (number != null) {
+                    highest = Math.max(highest, number.intValue());
+                }
+            }
+        }
+        return questions + highest;
+    }
+
     /** Read a character stream fully into a String (for PreparedStatement character/clob parameters). */
     public static String readToString(final Reader reader) throws SQLException {
         if (reader == null) {

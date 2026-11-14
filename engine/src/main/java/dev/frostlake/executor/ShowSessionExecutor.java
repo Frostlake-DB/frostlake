@@ -680,6 +680,36 @@ final class ShowSessionExecutor {
     }
 
     /**
+     * SHOW ACCOUNTS as the account's administrator reads it: the accounts of {@link #showAccounts(boolean, List, int)}
+     * in five of its columns, the organization's and the account's names, the region, the locator and whether the
+     * account is the organization account (live-verified).
+     *
+     * @param created the accounts CREATE ACCOUNT recorded
+     * @param managed how many managed accounts this account has created
+     * @return the listing
+     */
+    public ResultSet accountsAsAccountAdministrator(final List<Account> created, final int managed) {
+        final ResultSet full = showAccounts(false, created, managed);
+        final String[] kept = {"organization_name", "account_name", "snowflake_region", "account_locator",
+            "is_organization_account"};
+        final int[] at = new int[kept.length];
+        final List<ResultSetColumn> columns = new ArrayList<>();
+        for (int i = 0; i < kept.length; i++) {
+            at[i] = full.getColumnIndex(kept[i]);
+            columns.add(full.getColumns().get(at[i]));
+        }
+        final List<Row> rows = new ArrayList<>();
+        for (final Row row : full.getRows()) {
+            final List<Object> cells = new ArrayList<>();
+            for (final int index : at) {
+                cells.add(row.getValue(index));
+            }
+            rows.add(new Row(cells));
+        }
+        return new ResultSet(columns, rows);
+    }
+
+    /**
      * SHOW ACCOUNTS: this account, then every account CREATE ACCOUNT recorded, in the columns of the one row.
      * {@code HISTORY} lists the dropped accounts too, and adds their {@code dropped_on},
      * {@code scheduled_deletion_time} and {@code restored_on} after {@code is_org_admin}.

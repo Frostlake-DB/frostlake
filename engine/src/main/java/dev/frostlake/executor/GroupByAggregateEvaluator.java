@@ -224,13 +224,10 @@ final class GroupByAggregateEvaluator {
             }
             return keys;
         }
+        // Grouped by several sets - a ROLLUP, a CUBE, GROUPING SETS of more than one - each key is computed over the
+        // rows as one set alone groups them: a[0]::DATE ... GROUP BY ROLLUP (a[0]::DATE) converts the stored element
+        // and answers NULL for the grand total (live-verified).
         final List<List<String>> sets = expandGroupByToSets(select.groupByClause());
-        if (sets.size() > 1) {
-            // Grouped by several sets - a ROLLUP, a CUBE, GROUPING SETS of more than one - a key's value is the set's,
-            // so none reads the rows as they are: a[0]::DATE ... GROUP BY ROLLUP (a[0]::DATE) is refused where
-            // GROUPING SETS ((a[0]::DATE)) converts the stored element (live-verified).
-            return keys;
-        }
         for (final List<String> set : sets) {
             for (final String key : set) {
                 noteKey(keys, key, items);

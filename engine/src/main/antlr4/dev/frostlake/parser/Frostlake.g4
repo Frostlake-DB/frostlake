@@ -1066,7 +1066,11 @@ import java.util.List;
                                                  final Token closing, final boolean commaLine) {
         final int close = closing.getTokenIndex();
         final Token fault = _input.get(openedReferenceFault(open.getTokenIndex()));
-        notifyErrorListeners(fault, "unexpected '" + fault.getText() + "'",
+        // A FROM clause reads the word IDENTIFIER as a table's name when its parentheses open with a name, a keyword
+        // or nothing at all, and refuses the parenthesis then (live-verified).
+        final Token refused = reference.getParent() instanceof TableSourceContext
+            && fault.getTokenIndex() == open.getTokenIndex() + 1 && opensNoReference(fault) ? open : fault;
+        notifyErrorListeners(refused, "unexpected '" + refused.getText() + "'",
             new IdentifierReferenceFault(this, reference, !commaLine));
         for (int comma = fault.getTokenIndex(); commaLine && comma < close; comma++) {
             if (_input.get(comma).getType() != COMMA) {
@@ -1392,6 +1396,20 @@ import java.util.List;
         if (previous != LPAREN && previous != COMMA) {
             notifyErrorListeners(type, "unexpected '" + type.getText() + "'", new RefusedWordFault(this, _ctx, true));
         }
+    }
+
+    /**
+     * Whether the first token inside an IDENTIFIER() reference's parentheses makes a FROM clause read the word as a
+     * table's name: a name, quoted or not, a word, a SYSTEM$ function's, TRUE, FALSE, CASE, CAST, TRY_CAST, DEFAULT, a
+     * positional column or the closing parenthesis — not a number, a NULL, a sign, a parenthesis, a SELECT or a star
+     * (live-verified).
+     */
+    private boolean opensNoReference(final Token first) {
+        final int type = first.getType();
+        return type == RPAREN || type == TRUE || type == FALSE || type == CASE || type == CAST || type == TRY_CAST
+            || type == DEFAULT || type == POSITIONAL_PARAMETER || type == SYSTEM_FUNC || type == SYSTEM_STREAM_HAS_DATA
+            || type == SYSTEM_USER_TASK_CANCEL
+            || getATN().nextTokens(getATN().ruleToStartState[RULE_identifier]).contains(type);
     }
 
     /** The index of the first token after the parenthesis at {@code open} that a whole reference cannot take. */
@@ -4371,7 +4389,7 @@ accessControlStatement
     | SHOW FUTURE GRANTS IN DATABASE principalName showTail SEMI?
     | SHOW FUTURE GRANTS TO ROLE principalName showTail SEMI?
     | SHOW FUTURE GRANTS TO DATABASE ROLE referencedName SEMI?
-    | CREATE ACCOUNT identifier accountProperty+ SEMI?
+    | CREATE ACCOUNT identifier accountProperty* SEMI?
     | DROP ACCOUNT if_exists? identifier GRACE_PERIOD_IN_DAYS EQ INTEGER_LITERAL SEMI?
     // A qualified name is read so that it is refused in the account's own words.
     | UNDROP ACCOUNT qualifiedName SEMI?

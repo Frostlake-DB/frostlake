@@ -2390,6 +2390,14 @@ public class SyntaxErrorListener extends BaseErrorListener {
             return keywordScopeLines.lines();
         }
         final List<Token> spokenTokens = sql == null ? null : defaultChannelTokens();
+        // ★ A BRACKET RIGHT AFTER A TABLE'S NAME IN A FROM LIST is refused, and the recovery reads on from the first
+        // token that may follow the reference — see TableNameBracketLines.
+        final List<String> tableBracket = spokenTokens == null || offendingIndexes.isEmpty() ? null
+            : TableNameBracketLines.lines(sql, spokenTokens, offendingIndexes.get(0).intValue(), statementParse,
+                firstOnly);
+        if (tableBracket != null) {
+            return tableBracket;
+        }
         // ★ A TABLE QUERY WITH AN ALIAS in a bracket that may hold a value — see TableQueryLines.
         final List<String> tableQuery = spokenTokens == null || offendingIndexes.isEmpty() || !statementParse
             ? null : TableQueryLines.lines(spokenTokens, offendingIndexes.get(0).intValue());

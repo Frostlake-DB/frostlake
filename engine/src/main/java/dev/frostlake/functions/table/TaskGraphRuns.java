@@ -207,8 +207,7 @@ public final class TaskGraphRuns {
      * account counts them (live-verified). An attempt is told from its own task runs — its state, first error and
      * completion — and a retry's SCHEDULED_TIME is its first run's, scheduled from what started it, MANUAL RETRY or
      * AUTOMATIC RETRY; every attempt keeps the graph run's RUN_ID and GRAPH_RUN_GROUP_ID. A retry's QUERY_START_TIME
-     * is when the root's run in it started, or, when the retry does not run the root, when its first run started if
-     * that run succeeded: a retry whose first run failed tells none.
+     * is when its first run started - the root's where it runs the root again - whether that run succeeded or not.
      */
     private static void addCompleted(final List<Row> rows, final Task root, final Schema schema,
                                      final boolean errorOnly) {
@@ -231,7 +230,6 @@ public final class TaskGraphRuns {
                                    final TaskExecution graphRun, final LocalDateTime until, final int attempt,
                                    final boolean errorOnly) {
         TaskExecution first = null;
-        TaskExecution rootRun = null;
         TaskExecution firstError = null;
         String firstErrorTask = null;
         LocalDateTime completed = null;
@@ -239,9 +237,6 @@ public final class TaskGraphRuns {
             final TaskExecution last = TaskGraphs.lastRunWithin(task, graphRun.getStartTime(), until, attempt);
             if (last == null) {
                 continue;
-            }
-            if (task == root) {
-                rootRun = last;
             }
             if (first == null || before(last, first)) {
                 first = last;
@@ -259,14 +254,7 @@ public final class TaskGraphRuns {
         }
         final String state = firstError != null ? FAILED : TaskExecutionState.SUCCEEDED.name();
         final boolean retry = attempt > 1;
-        final LocalDateTime queryStart;
-        if (!retry) {
-            queryStart = graphRun.getStartTime();
-        } else if (rootRun != null) {
-            queryStart = rootRun.getStartTime();
-        } else {
-            queryStart = FAILED.equals(first.getState()) ? null : first.getStartTime();
-        }
+        final LocalDateTime queryStart = retry ? first.getStartTime() : graphRun.getStartTime();
         rows.add(row(true, root, schema, state,
             retry ? first.getScheduledFrom() : graphRun.getScheduledFrom(), firstErrorTask,
             firstError == null ? null : firstError.getErrorCode(),

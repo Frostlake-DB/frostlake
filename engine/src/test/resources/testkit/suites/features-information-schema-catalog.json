@@ -156,8 +156,10 @@
        "expect": {"value": "true"}}
     ]},
     {"name": "an-unmodeled-view-is-empty-with-its-live-shape", "steps": [
-      {"sql": "SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS",
-       "expect": {"rowCount": 0, "columns": ["CONSTRAINT_CATALOG", "CONSTRAINT_SCHEMA", "CONSTRAINT_TABLE", "CONSTRAINT_NAME", "CHECK_CLAUSE"]}}
+      {"sql": "SELECT * FROM INFORMATION_SCHEMA.BACKUP_POLICIES",
+       "expect": {"rowCount": 0, "columns": ["BACKUP_POLICY_NAME", "BACKUP_POLICY_SCHEMA", "BACKUP_POLICY_CATALOG",
+         "SCHEDULE", "EXPIRE_AFTER_DAYS", "HAS_RETENTION_LOCK", "OWNER", "OWNER_ROLE_TYPE", "CREATED", "LAST_ALTERED",
+         "COMMENT"]}}
     ]}
   ]
 }

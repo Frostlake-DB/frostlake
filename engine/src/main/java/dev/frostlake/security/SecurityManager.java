@@ -1015,6 +1015,26 @@ public class SecurityManager {
     }
 
     /**
+     * Whether the session acts as its organization's administrator: ORGADMIN is its primary role or one of the
+     * secondary roles in use. ORGADMIN stands outside the role hierarchy, so no other role brings it.
+     *
+     * @return whether it does
+     */
+    public boolean actsAsOrganizationAdministrator() {
+        return getEffectiveRoles().contains("ORGADMIN");
+    }
+
+    /**
+     * Whether the session acts as the account's administrator: ACCOUNTADMIN is in use, as the primary role or a
+     * secondary one.
+     *
+     * @return whether it does
+     */
+    public boolean actsAsAccountAdministrator() {
+        return getEffectiveRoles().contains("ACCOUNTADMIN");
+    }
+
+    /**
      * The roles enabled in the session, as INFORMATION_SCHEMA.ENABLED_ROLES lists them: every role in use and every
      * role granted to one of them, however many levels down, and PUBLIC, which is always enabled (documented).
      *

@@ -326,10 +326,8 @@ public final class SqlCompilationError {
     /**
      * {@link #doesNotExist} for a name that is no securable object, which live words without the privilege hint:
      * the column of a RENAME COLUMN or a COMMENT ON COLUMN, the constraint of an ALTER CONSTRAINT, a search
-     * analyzer, a table stage named with four parts, a data metric function that is not a system one. An UNDROP
-     * ACCOUNT of a missing account uses it too: live refuses that in other words altogether, and a hint would only
-     * add a sentence live never gives. So does a POLICY_REFERENCES REF_ENTITY_NAME that names no table, although a
-     * table is a securable object (live-verified).
+     * analyzer, a table stage named with four parts, a data metric function that is not a system one. So does a
+     * POLICY_REFERENCES REF_ENTITY_NAME that names no table, although a table is a securable object (live-verified).
      *
      * @param kind the kind noun, as the sentence opens with it
      * @param name the canonical name

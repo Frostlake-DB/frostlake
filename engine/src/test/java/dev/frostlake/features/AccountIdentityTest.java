@@ -96,6 +96,8 @@ public class AccountIdentityTest extends BaseDatabaseTest {
     /** SHOW ACCOUNTS reports the same identity the functions do, rather than its own hardcoded one. */
     @Test
     public void showAccountsAgreesWithTheContextFunctions() {
+        // The account's administrator reads these columns of the listing.
+        engine.execute("USE ROLE ACCOUNTADMIN");
         assertEquals(scalar("SELECT CURRENT_ORGANIZATION_NAME()"), accountCell("organization_name"));
         assertEquals(scalar("SELECT CURRENT_ACCOUNT_NAME()"), accountCell("account_name"));
         assertEquals(scalar("SELECT CURRENT_ACCOUNT()"), accountCell("account_locator"));
@@ -153,6 +155,7 @@ public class AccountIdentityTest extends BaseDatabaseTest {
     public void anAbsentOldUrlIsEmptyAndItsMomentsAreNull() {
         Assumptions.assumeFalse(isLiveSnowflake(),
             "a real account's old-URL history is its own, not something a test may assert");
+        engine.execute("USE ROLE ORGADMIN");
         assertEquals("", accountCell("old_account_url"));
         assertEquals(null, accountCell("account_old_url_saved_on"));
         assertEquals(null, accountCell("organization_old_url_last_used"));

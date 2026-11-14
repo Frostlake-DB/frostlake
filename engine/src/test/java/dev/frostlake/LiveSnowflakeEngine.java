@@ -101,8 +101,10 @@ public class LiveSnowflakeEngine extends DatabaseEngine {
 
     @Override
     public ExecutionResult execute(final String sql) {
-        // A statement that would change the account's roles, users or grants is not sent (see LiveAccountStatements).
-        final String heldBack = LiveAccountStatements.sent() ? null : LiveAccountStatements.heldBack(sql);
+        // A statement that would change the account's roles, users or grants is not sent, nor one that would make a new
+        // account (see LiveAccountStatements).
+        final String heldBack = LiveAccountStatements.sent() ? LiveAccountStatements.neverSent(sql)
+            : LiveAccountStatements.heldBack(sql);
         if (heldBack != null) {
             if (tearingDown) {
                 return new ExecutionResult(true, new ArrayList<ResultSet>(), null, null);

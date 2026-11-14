@@ -45,7 +45,7 @@ public class ShowGrantsNameSignatureTest extends MeasuredCellsTestSupport {
             {"SHOW GRANTS ON DATABASE IDENTIFIER(CURRENT_DATABASE())",
                 "REFUSED SQL compilation error: | syntax error line 1 at position 52 unexpected ')'."},
             {"SELECT 1 FROM IDENTIFIER(CURRENT_USER())",
-                "REFUSED SQL compilation error: | syntax error line 1 at position 25 unexpected 'CURRENT_USER'."},
+                "REFUSED SQL compilation error: | syntax error line 1 at position 24 unexpected '('."},
             {"DESCRIBE TABLE IDENTIFIER(UPPER('t'))",
                 "REFUSED SQL compilation error: | syntax error line 1 at position 32 unexpected ''t''."},
             {"SHOW GRANTS TO USER IDENTIFIER(1 + 2)",

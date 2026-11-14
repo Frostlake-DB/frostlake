@@ -68,10 +68,10 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  * on the account, so a blank inside it — between its parts, or inside a quoted part — ends it, and what follows is
  * refused as the next token.
  *
- * <p>A routine's body is judged in the frame it compiles in, its positions its own: a SQL UDF's expression body, a
- * table function's query and a policy's body inside a frame of parentheses — one character on either side, so a place
- * on the body's first line moves by one — their refusals opening with "Compilation of SQL UDF failed: "; a procedure's
- * block and a scalar UDF's query or block as a statement of their own.
+ * <p>A routine's body is judged in the frame it compiles in, its positions its own: a SQL UDF's expression body and a
+ * policy's body inside a frame of parentheses — one character on either side, so a place on the body's first line
+ * moves by one — their refusals opening with "Compilation of SQL UDF failed: "; a procedure's block, a UDF's query,
+ * a table function's too, and a scalar UDF's block as a statement of their own.
  */
 public final class StageArgumentSyntax {
 
@@ -189,9 +189,8 @@ public final class StageArgumentSyntax {
     }
 
     /**
-     * Both phases over a routine body compiled inside a frame of parentheses — a SQL UDF's expression, a table
-     * function's query — its places the body's own, moved by one on its first line, each refusal opening with
-     * {@link #UDF_COMPILATION_FAILED}.
+     * Both phases over a routine body compiled inside a frame of parentheses — a SQL UDF's expression — its places the
+     * body's own, moved by one on its first line, each refusal opening with {@link #UDF_COMPILATION_FAILED}.
      *
      * @param body the parsed body
      */

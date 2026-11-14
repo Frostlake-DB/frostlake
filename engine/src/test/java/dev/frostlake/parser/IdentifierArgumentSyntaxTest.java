@@ -87,16 +87,9 @@ public class IdentifierArgumentSyntaxTest extends BaseDatabaseTest {
     public void anyOtherArgumentIsRefusedInsideTheParentheses() {
         final Object[][] cells = {
             {"SELECT COUNT(*) FROM IDENTIFIER('t' || '1')", 36, "||"},
-            {"SELECT COUNT(*) FROM IDENTIFIER(\"T1\")", 32, "\"T1\""},
-            {"SELECT COUNT(*) FROM IDENTIFIER(t1)", 32, "t1"},
             {"SELECT COUNT(*) FROM IDENTIFIER(NULL)", 32, "NULL"},
-            {"SELECT COUNT(*) FROM IDENTIFIER($1)", 32, "$1"},
             {"SELECT COUNT(*) FROM IDENTIFIER(-1)", 32, "-"},
-            {"SELECT COUNT(*) FROM IDENTIFIER(TRUE)", 32, "TRUE"},
-            {"SELECT COUNT(*) FROM IDENTIFIER(UPPER('t1'))", 32, "UPPER"},
             {"SELECT COUNT(*) FROM IDENTIFIER(('t1'))", 32, "("},
-            {"SELECT COUNT(*) FROM IDENTIFIER(CONCAT('t'))", 32, "CONCAT"},
-            {"SELECT COUNT(*) FROM IDENTIFIER()", 32, ")"},
             {"SELECT COUNT(*) FROM IDENTIFIER('t1'", 36, "<EOF>"},
             {"SELECT COUNT(*) FROM IDENTIFIER($$t$$ || '1')", 38, "||"},
             {"SELECT COUNT(*) FROM IDENTIFIER(1.5)", 32, "1.5"},
@@ -114,8 +107,6 @@ public class IdentifierArgumentSyntaxTest extends BaseDatabaseTest {
             {"DROP TABLE IDENTIFIER('n' || 'y')", 26, "||"},
             {"DESCRIBE TABLE IDENTIFIER('t1' || '')", 31, "||"},
             {"EXECUTE IMMEDIATE $$ DECLARE v VARCHAR DEFAULT 't1'; c INT; BEGIN SELECT COUNT(*) INTO :c"
-                + " FROM IDENTIFIER(v); RETURN c; END; $$", 86, "v"},
-            {"EXECUTE IMMEDIATE $$ DECLARE v VARCHAR DEFAULT 't1'; c INT; BEGIN SELECT COUNT(*) INTO :c"
                 + " FROM IDENTIFIER(:v || ''); RETURN c; END; $$", 89, "||"},
         };
         for (final Object[] cell : cells) {
@@ -125,14 +116,52 @@ public class IdentifierArgumentSyntaxTest extends BaseDatabaseTest {
     }
 
     @Test
+    public void aFromClauseReadsTheWordAsATableNameBeforeANameOrAWord() {
+        final Object[][] cells = {
+            {"SELECT COUNT(*) FROM IDENTIFIER(\"T1\")", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(t1)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(a.b)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER($1)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(TRUE)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(FALSE)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(DEFAULT)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(CURRENT_DATE)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(CASE WHEN TRUE THEN 't1' END)", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(CAST('t1' AS VARCHAR))", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(UPPER('t1'))", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(CONCAT('t'))", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER()", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(t1) x", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(t1) AS q", 31},
+            {"SELECT COUNT(*) FROM t1, IDENTIFIER(t1)", 35},
+            {"SELECT COUNT(*) FROM t1 JOIN IDENTIFIER(t1) ON TRUE", 39},
+            {"SELECT COUNT(*) FROM IDENTIFIER(UPPER('t1')), t1", 31},
+            {"SELECT COUNT(*) FROM IDENTIFIER(UPPER('t1')) JOIN t1 ON TRUE", 31},
+            {"DELETE FROM t1 USING IDENTIFIER(t1)", 31},
+            {"UPDATE t1 SET a = 1 FROM IDENTIFIER(t1)", 35},
+            {"INSERT INTO t1 SELECT * FROM IDENTIFIER(t1)", 39},
+        };
+        for (final Object[] cell : cells) {
+            assertEquals(refusal(unexpected((Integer) cell[1], "(")), answer((String) cell[0]), (String) cell[0]);
+        }
+        // A number, a NULL, a sign, a parenthesis, a SELECT or a star is refused where it stands, as before.
+        assertEquals(refusal(unexpected(32, "SELECT")), answer("SELECT COUNT(*) FROM IDENTIFIER(SELECT 't1')"));
+        assertEquals(refusal(unexpected(32, "*")), answer("SELECT COUNT(*) FROM IDENTIFIER(*)"));
+        assertEquals(refusal(unexpected(31, "("), unexpected(51, "<EOF>")),
+            answer("SELECT COUNT(*) FROM IDENTIFIER(t1) WHERE a = 1 AND"));
+        assertEquals(refusal(unexpected(31, "("), unexpected(41, ")")),
+            answer("SELECT COUNT(*) FROM IDENTIFIER(\"T1\", 'x')"));
+    }
+
+    @Test
     public void aCommaAddsTheParenthesisAfterItAndEndsTheReport() {
-        assertEquals(refusal(unexpected(32, "CONCAT"), unexpected(47, ")")),
+        assertEquals(refusal(unexpected(31, "("), unexpected(47, ")")),
             answer("SELECT COUNT(*) FROM IDENTIFIER(CONCAT('t', '1'))"));
-        assertEquals(refusal(unexpected(32, "CONCAT"), unexpected(52, ")")),
+        assertEquals(refusal(unexpected(31, "("), unexpected(52, ")")),
             answer("SELECT COUNT(*) FROM IDENTIFIER(CONCAT('t', '1', '2'))"));
         assertEquals(refusal(unexpected(36, ","), unexpected(41, ")")),
             answer("SELECT COUNT(*) FROM IDENTIFIER('t1', 'x')"));
-        assertEquals(refusal(unexpected(32, "CONCAT"), unexpected(47, ")")),
+        assertEquals(refusal(unexpected(31, "("), unexpected(47, ")")),
             answer("SELECT COUNT(*) FROM IDENTIFIER(CONCAT('t', '1')) x, t1 y"));
         assertEquals(refusal(unexpected(18, "CONCAT"), unexpected(33, ")")),
             answer("SELECT IDENTIFIER(CONCAT('a', 'b')) FROM t1"));
@@ -153,7 +182,7 @@ public class IdentifierArgumentSyntaxTest extends BaseDatabaseTest {
             answer("SELECT IDENTIFIER(UPPER('a')) FROM t1 WHERE a = 1 AND"));
         assertEquals(refusal(unexpected(18, "("), unexpected(48, "<EOF>")),
             answer("SELECT IDENTIFIER(('a')) FROM t1 WHERE a = 1 AND"));
-        assertEquals(refusal(unexpected(32, "UPPER"), unexpected(60, "<EOF>")),
+        assertEquals(refusal(unexpected(31, "("), unexpected(60, "<EOF>")),
             answer("SELECT COUNT(*) FROM IDENTIFIER(UPPER('t1')) WHERE a = 1 AND"));
     }
 

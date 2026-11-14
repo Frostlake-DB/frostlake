@@ -99,7 +99,7 @@ enum UnmodelledListing {
         dropped_on@ type
         """, true),
     SEMANTIC_VIEWS("""
-        created_on@ name database_name schema_name comment owner owner_role_type extension max_staleness
+        created_on@ name database_name schema_name comment owner owner_role_type extension max_staleness updated_on@
         """, true);
 
     /** What TERSE lists for the listings it narrows. */

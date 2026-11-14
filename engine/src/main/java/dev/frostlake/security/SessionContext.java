@@ -444,6 +444,16 @@ public class SessionContext {
         return boundSettings.get();
     }
 
+    /**
+     * The JSON_INDENT this thread's session lays its values out at while it sets none, or null for the engine's own
+     * width (see {@link SessionSettings#getDefaultJsonIndent}).
+     *
+     * @return the width, or null
+     */
+    public Integer getDefaultJsonIndent() {
+        return settings().getDefaultJsonIndent();
+    }
+
     /** The settings this thread's statements read and write. */
     private SessionSettings settings() {
         final SessionSettings bound = boundSettings.get();

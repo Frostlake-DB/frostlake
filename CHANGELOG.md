@@ -334,6 +334,31 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Added
 
+- **Snowflake's own JDBC driver connects to the HTTP server**: `net.snowflake:snowflake-jdbc` logs in at
+  `jdbc:snowflake://127.0.0.1:18082/?account=frostlake&ssl=off`, any account name, user and password taken, and runs
+  statements, bound statements and texts of several statements through the endpoints that driver calls: login, query, a
+  child statement's result and status, cancel, heartbeat, token renewal and logout. `db`, `schema`, `role` and
+  `warehouse` are set as a USE sets them, results come back as Arrow, the account's default, or as JSON where the
+  session sets `JDBC_QUERY_RESULT_FORMAT = 'JSON'`, and a refusal carries its SQLSTATE and vendor code. A prepared
+  statement's `getMetaData()` and `getParameterMetaData()` answer before it runs, its columns worked out without running
+  it and each placeholder a text, and a batch of an `INSERT … VALUES` runs as one statement, all of its rows or none.
+  PUT and GET move their files through the stage's own directory, the driver copying them as it does against the
+  account, so client and server share a file system; `executeAsyncQuery` answers at once with the query ID, which
+  `getQueryStatus` and `createResultSet` follow; and `http.tls.port` with a keystore opens an HTTPS listener, so the
+  driver connects without `ssl=off`. A VECTOR is described with its dimension and element type and reads as its
+  elements, an interval with its fields and reads as a `Period` or `Duration` (its nanoseconds where wider than 64
+  bits), and a structured ARRAY, OBJECT or MAP as the semi-structured value it holds, laid out at the session's
+  JSON_INDENT - the account's 2 while it sets none - as on the account. See `docs/http-api.md`.
+- **An HTTP server in a test JVM**: `http.port=0` takes a free port, which `DatabaseHttpServer.getPort()` reports, so
+  servers in parallel test forks never collide; and `new DatabaseHttpServer(config, DatabaseDriver.directEngine(name))`
+  serves the engine `jdbc:frostlake:direct:<name>` connections share, so a client of the server - Snowflake's own
+  driver among them - and the direct connections read and write one database, each session its own. Every request
+  then runs alone on the engine, as a direct connection's statement does, and stopping the server rolls back what its
+  sessions left open and leaves the engine running.
+- **`SnowflakeEndpoint`, an in-process endpoint for Snowflake's own driver in one call**:
+  `SnowflakeEndpoint.start("mydb")` serves the engine of `jdbc:frostlake:direct:mydb` on a free port of 127.0.0.1 (or
+  `start(EngineConfig)` an engine of its own), `jdbcUrl()` answers the `jdbc:snowflake://…` URL to connect by, and
+  `close()` stops the server, the direct name's engine running on - a test fixture with no JUnit dependency.
 - **INFORMATION_SCHEMA.FUNCTION_INVERSES** (live-verified): the account's sixty-fourth view, empty, with its comment and
   its thirteen columns: FUNCTION_CATALOG, FUNCTION_SCHEMA, FUNCTION_NAME, ARGUMENT_SIGNATURE, the same four of the
   inverse function (INVERSE_FUNCTION_CATALOG … INVERSE_ARGUMENT_SIGNATURE), RELY, RELATIONSHIP_STATUS,
@@ -425,6 +450,74 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Fixed
 
+- **A set operation quoted in a refusal marks an arm ENSURE_NULLABLE only where it is not cast** (live-verified):
+  `(SELECT MAX(v) FROM g UNION ALL SELECT 1)` re-prints its second arm as `CAST(OB$1."1" AS NUMBER(38,0))`, where it
+  read `ENSURE_NULLABLE(CAST(…))`; an arm already of the combined type keeps the mark.
+- **COMPLETE_TASK_GRAPHS tells a retry's QUERY_START_TIME though its first run fails** (live-verified): a retry
+  that runs only a failed dependent again starts when that run starts; it was NULL.
+- **A bracket written right after a table's name in a FROM list is read on as the account reads it**
+  (live-verified): the bracket is refused and the reading resumes at the first token that may follow the table - a
+  comma, a clause's or a join's word, a semicolon, and a closing bracket in an EXISTS's, a set operation's or the
+  statement's own brackets - inside the refused bracket too. `SELECT 1 FROM zz (a, b)` is refused at the `(` and then
+  at the `)`, `SELECT 1 FROM t JOIN USING (a)` at the `(` alone, and `SELECT 1 WHERE EXISTS (SELECT 1 FROM zz (a))`
+  at the `(` and at the last `)`.
+- **IDENTIFIER() in a FROM clause whose parentheses open with a name or a word is refused at its parenthesis**
+  (live-verified): `SELECT COUNT(*) FROM IDENTIFIER(t1)`, `IDENTIFIER(UPPER('t1'))`, `IDENTIFIER(CASE …)` and
+  `IDENTIFIER()` are refused at the `(`, the word read as a table's name, where the token inside was refused; a
+  string, a number, a NULL, a sign, a bracket, a SELECT or a star is still refused where it stands, and the lines after
+  the first are as before.
+- **A SQL function's query body is judged as a statement of its own, a table function's too** (live-verified): a
+  stage given where a value belongs is refused at its place in the body as written with no `Compilation of SQL UDF
+  failed:` before it, and a caret or two signs in a row are refused bare (`Unsupported feature '^'.`,
+  `invalid function '-'`); an expression body keeps the heading.
+- **EXPLAIN joins three tables keyed to each other as the account does** (live-verified): the one that holds the
+  most rows with the one that holds the fewest first - a tie for the fewest going to the name that sorts first - the
+  smaller side first, and the third last under a JoinFilter, the pair first, whatever the order written; a DELETE's or
+  an UPDATE's target counts as one of the three. They were joined in the order written.
+- **INFORMATION_SCHEMA.CHECK_CONSTRAINTS lists every CHECK constraint of the database's tables** (live-verified): one
+  row each, its name - SYS_CONSTRAINT_<uuid> where none was written - and its clause as written; it was empty.
+- **A PIVOT listing a second aggregate with no FOR refuses no closing bracket after the aggregate's own**
+  (live-verified): `PIVOT (SUM(amt), COUNT(amt))` is refused at the comma and at COUNT's `(`, where the clause's
+  closing `)` was refused too.
+- **SHOW ACCOUNTS answers by the session's roles, as the account does** (live-verified): the organization's
+  administrator (ORGADMIN, as the primary role or a secondary one) reads the 25 columns, HISTORY included; the
+  account's administrator five of them - `organization_name`, `account_name`, `snowflake_region`, `account_locator`,
+  `is_organization_account` - and HISTORY is refused; any other role is refused, `Insufficient privileges to operate
+  on  'SYSTEM'. Your primary role R must have CREATE LISTING granted on ACCOUNT L.` SHOW ORGANIZATION ACCOUNTS answers
+  the organization's administrator the listing's columns and no row and refuses every other role; CREATE ACCOUNT and
+  UNDROP ACCOUNT are the organization's administrator's, any other role refused before the account is looked for, and
+  to the administrator an account UNDROP cannot find does not exist. CREATE ACCOUNT with no property at all is `ADMIN_NAME
+  needs to be specified.` (it was a syntax error), and its missing-option sentence ends with no full stop. Every
+  listing showed the 25 columns to every role.
+- **ALTER SCHEMA, DATABASE, TABLE, VIEW and MATERIALIZED VIEW judge the parameters beside a comment as CREATE does**
+  (live-verified): `SET COMMENT = 'k' TIMEZONE = 'UTC'` is `cannot set parameter 'TIMEZONE' at 'SCHEMA'` (a view's at
+  'TABLE'), where the parameter alone is still refused for want of access; beside a view's comment, a table's
+  parameter is taken.
+- **CREATE STREAMLIT takes IMPORTS only for an app that runs on warehouses** (live-verified): a new app created FROM a
+  location runs on the container runtime unless RUNTIME_NAME names `SYSTEM$WAREHOUSE_RUNTIME`, so IMPORTS without it
+  is refused, `This has IMPORTS set - but IMPORTS are only supported by Streamlit applications running on
+  warehouses.`, after the query warehouse is judged and before the main file is; an app replacing one of its name, or
+  created with ROOT_LOCATION, takes them. An app on a container runtime describes SYSTEM_COMPUTE_POOL_CPU as its
+  compute pool whether it named the runtime or not.
+- **A ROLLUP, a CUBE and GROUPING SETS of several sets read an element's conversion inside a key as a GROUP BY does**
+  (live-verified): `SELECT a[0]::DATE FROM va GROUP BY ROLLUP (a[0]::DATE)` converts the stored element and answers
+  NULL for the grand total, where it was refused, `Failed to cast variant value 1 to DATE`.
+- **A Snowscript UDF that returns a DECFLOAT answers its value** (live-verified); its call was refused, `Unsupported
+  return type for Snowscript UDF: decfloat`.
+- **INFORMATION_SCHEMA.CORTEX_SEARCH_SERVICES ends with PREPROCESSING_WAREHOUSE and INDEXING_WAREHOUSE, and SHOW
+  SEMANTIC VIEWS with `updated_on`**, as the account now lists them.
+- **JS_QUERY_RESULT_FORMAT defaults to ARROW** in SHOW PARAMETERS, its value at level SYSTEM JSON, as the account now
+  lists it; INFORMATION_SCHEMA.PACKAGES lists `com.snowflake:snowpark-spark-datasource-extensions_2.12` 3.5.7.10 for
+  Java and Scala.
+- **A session with no current database or schema names a comment change as the account does** (live-verified): a
+  change of nothing but comments is refused as `Cannot perform ALTER OBJECT COMMENT` - COMMENT ON a table, view,
+  materialized view, dynamic or Iceberg table, schema, task, pipe, function or procedure, or an ALTER that sets or
+  unsets its COMMENT beside nothing but parameters and a table's staged COPY defaults - and as `Cannot perform ALTER
+  COLUMN COMMENT` for column comments, while a Cortex Search service's settings and layers are `ALTER CORTEX SEARCH
+  SERVICE OPERATE`. Each was `Cannot perform ALTER`.
+- **Stopping the HTTP server ends the threads that served its requests**: a server started inside a JVM kept them
+  after `stop()`, so the JVM did not exit once its main thread had. They are named after their listener,
+  `frostlake-http-<port>-<n>`.
 - **A correlated NOT EXISTS, and an EXISTS whose key the outer WHERE bounds with constants, meet no fault in another
   key's inner rows** (live-verified): over `b` whose `z` is 0 only in rows of keys no row of `a` holds, `SELECT a.id
   FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.k = a.id AND b.j / b.z > a.v)` answers, and so does `… WHERE a.id

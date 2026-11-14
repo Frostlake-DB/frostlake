@@ -717,6 +717,11 @@ public final class AccessControlHandler {
         final AccountDirectory directory = catalog.getAccountDirectory();
         final String name = ctx.identifier() != null ? visitor.getText(ctx.identifier()) : undroppedAccount(ctx);
         final Account existing = directory.account(name);
+        if (first != FrostlakeParser.DROP && !actsAsOrganizationAdministrator()) {
+            // Only the organization's administrator creates and restores accounts: any other role is refused before
+            // the account is looked for or the options are judged, naming no privilege (live-verified).
+            throw new PrivilegeRefusal(SqlAccessControlError.insufficientPrivileges("account", name));
+        }
         if (first == FrostlakeParser.CREATE) {
             if (existing != null || isCurrentAccount(name)) {
                 throw new RuntimeException(SqlCompilationError.of("Object '" + name + "' already exists."));
@@ -741,13 +746,10 @@ public final class AccessControlHandler {
             existing.drop(grace);
         } else {
             if (existing == null) {
-                // An account that is not there is refused as one the role may not operate on, by the
-                // privilege it would need on the current account, MANAGE ACCOUNTS (live-verified).
-                final SecurityManager security = queryExecutor.getSecurityManager();
-                throw new PrivilegeRefusal(SqlAccessControlError.privilegeRequired("ACCOUNT", name,
-                    security == null ? null : security.getSessionContext().getCurrentRole(),
-                    security != null && security.getSessionContext().isSecondaryRolesInUse(),
-                    "MANAGE ACCOUNTS", catalog.getAccountLocator()));
+                // To the organization's administrator, an account that is not there is one that does not exist, its
+                // name as resolved and unquoted (live-verified).
+                throw new RuntimeException(SqlCompilationError.of("Account '" + name
+                    + "' does not exist or not authorized."));
             }
             if (!existing.isDropped()) {
                 throw new RuntimeException(SqlCompilationError.of("Object '" + name + "' already exists."));
@@ -755,6 +757,12 @@ public final class AccessControlHandler {
             existing.restore();
         }
         return null;
+    }
+
+    /** Whether the session acts as its organization's administrator; a session with no security model does. */
+    private boolean actsAsOrganizationAdministrator() {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.actsAsOrganizationAdministrator();
     }
 
     /** The account an UNDROP names: one part, a qualifier being refused in the account's words (live-verified). */
@@ -773,6 +781,10 @@ public final class AccessControlHandler {
 
     private void createAccount(final FrostlakeParser.AccessControlStatementContext ctx,
                                final AccountDirectory directory, final String name) {
+        if (ctx.accountProperty().isEmpty()) {
+            // A CREATE ACCOUNT with no property at all names its first want, in a sentence of its own (live-verified).
+            throw new RuntimeException("ADMIN_NAME needs to be specified.");
+        }
         String adminName = null;
         boolean credential = false;
         String email = null;
@@ -816,7 +828,8 @@ public final class AccessControlHandler {
             missing.add("EDITION");
         }
         if (!missing.isEmpty()) {
-            throw new RuntimeException(SqlCompilationError.of("Missing option(s): " + missing + "."));
+            // The list ends the sentence with no full stop (live-verified).
+            throw new RuntimeException(SqlCompilationError.of("Missing option(s): " + missing));
         }
         directory.putAccount(new Account(name, edition, region, regionGroup, comment, adminName, email,
             directory.nextLocator()));

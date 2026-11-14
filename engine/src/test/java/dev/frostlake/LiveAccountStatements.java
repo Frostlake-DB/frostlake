@@ -28,7 +28,9 @@ import org.junit.jupiter.api.Assumptions;
 /**
  * The statements the live harness does not send: the ones that change the account's roles, users and grants, which
  * the account the suite runs against keeps as they are — GRANT, REVOKE, USE ROLE, USE SECONDARY ROLES, and CREATE,
- * ALTER or DROP of a ROLE, a DATABASE ROLE or a USER. A test that sends one is skipped on the account before the
+ * ALTER or DROP of a ROLE, a DATABASE ROLE or a USER - and CREATE ACCOUNT, which would make a new account in the
+ * organization wherever the session may, never sent, whatever the switch below. A test that sends one is skipped on the
+ * account before the
  * statement reaches it, the reason naming the statement's words, and a teardown's one is passed over, since nothing
  * it would undo was made. The embedded engine runs them all as ever. {@code SF_LIVE_ACCOUNT_STATEMENTS=1} sends them
  * all the same, for a run against an account that takes them.
@@ -80,8 +82,23 @@ public final class LiveAccountStatements {
      * @return the skip's reason
      */
     public static String reason(final String words) {
+        if (words.endsWith(" ACCOUNT")) {
+            return words + " is never sent to the live account: it would make a new account in the organization";
+        }
         return words + " is not sent to the live account, whose roles, users and grants stay as they are (set "
             + SEND_ALL + "=1 to send it)";
+    }
+
+    /**
+     * The words of the first statement in {@code sql} that is never sent, the switch notwithstanding: a CREATE ACCOUNT.
+     * Null when it holds none.
+     *
+     * @param sql the text a test hands the engine
+     * @return the statement's leading words, or null
+     */
+    public static String neverSent(final String sql) {
+        final String words = heldBack(sql);
+        return words != null && words.endsWith(" ACCOUNT") ? words : null;
     }
 
     /**
@@ -137,6 +154,10 @@ public final class LiveAccountStatements {
                 if (next == FrostlakeLexer.SECONDARY) {
                     return "USE SECONDARY ROLES";
                 }
+            }
+            if (type == FrostlakeLexer.CREATE && i + 1 < tokens.size()
+                    && tokens.get(i + 1).getType() == FrostlakeLexer.ACCOUNT) {
+                return "CREATE ACCOUNT";
             }
             if (type == FrostlakeLexer.CREATE || type == FrostlakeLexer.ALTER || type == FrostlakeLexer.DROP) {
                 final String principal = principalAfter(tokens, i + 1);
