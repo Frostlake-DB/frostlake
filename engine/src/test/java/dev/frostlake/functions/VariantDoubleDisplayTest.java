@@ -85,7 +85,7 @@ public class VariantDoubleDisplayTest extends BaseDatabaseTest {
 
     @Test
     public void jsonIndentLaysOutTheSameNumbers() {
-        Assumptions.assumeFalse(isLiveSnowflake(), "the live harness compacts every container it reads");
+        Assumptions.assumeFalse(readsThroughSnowflakeDriver(), "the harness compacts every container it reads");
         engine.execute("ALTER SESSION SET JSON_INDENT = 2");
         try {
             assertEquals("[\n  1.500000000000000e+00,\n  2\n]", displayed("SELECT ARRAY_CONSTRUCT(1.5::FLOAT, 2)"));

@@ -75,7 +75,9 @@ final class SnowflakeFileTransfer {
         final ObjectNode data = JsonNodeFactory.instance.objectNode();
         data.put("queryId", queryId);
         data.put("threshold", THRESHOLD);
-        data.put("clientShowEncryptionParameter", false);
+        // The driver lists the encryption column only when told to, as the account tells it; over a local stage it
+        // leaves the column empty, since it writes and reads the files unencrypted.
+        data.put("clientShowEncryptionParameter", true);
         data.putNull("encryptionMaterial");
         if (statement.getChild(0) instanceof FrostlakeParser.PutStatementContext) {
             put(engine, session, (FrostlakeParser.PutStatementContext) statement.getChild(0), data);

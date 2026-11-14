@@ -50,7 +50,7 @@ public class JsonIndentTest extends BaseDatabaseTest {
      * about. The width still reaches a real account — the harness just cannot show the result.
      */
     private void skipWhereIndentationIsNormalisedAway() {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(readsThroughSnowflakeDriver(),
             "the comparison harness re-serialises arrays and objects to compact text");
     }
 

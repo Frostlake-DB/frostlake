@@ -45,14 +45,17 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import java.util.TimeZone;
 import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -142,6 +145,16 @@ public class SnowflakeDriverProtocolTest {
             rows.add(row.toString());
         }
         return rows;
+    }
+
+    /** A result's column labels, joined by {@code |}. */
+    private static String labels(final ResultSet rs) throws SQLException {
+        final StringBuilder labels = new StringBuilder();
+        final ResultSetMetaData metaData = rs.getMetaData();
+        for (int i = 1; i <= metaData.getColumnCount(); i++) {
+            labels.append(i > 1 ? "|" : "").append(metaData.getColumnLabel(i));
+        }
+        return labels.toString();
     }
 
     @Test
@@ -240,22 +253,135 @@ public class SnowflakeDriverProtocolTest {
             statement.execute("ALTER SESSION SET MULTI_STATEMENT_COUNT = 0");
             statement.execute("SELECT 1; CREATE TABLE m (x INT); INSERT INTO m VALUES (1), (2); SELECT x FROM m "
                 + "ORDER BY x");
-            final List<String> answers = new ArrayList<>();
-            while (true) {
-                final ResultSet rs = statement.getResultSet();
-                if (rs != null) {
-                    answers.add(String.join(",", rows(rs)));
-                    rs.close();
-                } else if (statement.getUpdateCount() != -1) {
-                    answers.add("count " + statement.getUpdateCount());
-                } else {
-                    break;
-                }
-                if (!statement.getMoreResults() && statement.getUpdateCount() == -1) {
-                    break;
+            assertEquals(List.of("1", "count 0", "count 2", "1,2"), answers(statement));
+        }
+    }
+
+    /** Every answer of the statement just run, in order: a result set's rows, or an update count. */
+    private static List<String> answers(final Statement statement) throws SQLException {
+        final List<String> answers = new ArrayList<>();
+        while (true) {
+            final ResultSet rs = statement.getResultSet();
+            if (rs != null) {
+                answers.add(String.join(",", rows(rs)));
+                rs.close();
+            } else if (statement.getUpdateCount() != -1) {
+                answers.add("count " + statement.getUpdateCount());
+            } else {
+                break;
+            }
+            if (!statement.getMoreResults() && statement.getUpdateCount() == -1) {
+                break;
+            }
+        }
+        return answers;
+    }
+
+    @Test
+    public void anExecuteImmediateAnswersAsTheStatementItRan() throws SQLException {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE ei (x INT)");
+            assertFalse(statement.execute("EXECUTE IMMEDIATE 'INSERT INTO ei VALUES (1), (2)'"));
+            assertEquals(2, statement.getUpdateCount());
+            assertFalse(statement.execute("EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE ei2 (x INT)'"));
+            assertEquals(0, statement.getUpdateCount());
+            assertTrue(statement.execute("EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM ei'"));
+            assertEquals(List.of("2"), answers(statement));
+            // A chain answers as its last statement, here a query over the INSERT's count.
+            assertTrue(statement.execute("INSERT INTO ei VALUES (3) ->> SELECT * FROM $1"));
+            assertEquals(List.of("1"), answers(statement));
+            // One EXECUTE IMMEDIATE of several statements hands back each statement's answer.
+            statement.unwrap(SnowflakeStatement.class).setParameter("MULTI_STATEMENT_COUNT", 0);
+            assertTrue(statement.execute("EXECUTE IMMEDIATE 'SELECT 7; INSERT INTO ei VALUES (4); "
+                + "DROP TABLE ei2'"));
+            assertEquals(List.of("7", "count 1", "count 0"), answers(statement));
+        }
+    }
+
+    @Test
+    public void sizesDecfloatsDecimalsAndMaxRowsReadAsOnTheAccount() throws SQLException {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement()) {
+            // The largest text a result holds, 128 MB, and half of it for a binary's hex.
+            assertEquals("134217728 67108864 134217728", connection.getMetaData().getMaxCharLiteralLength() + " "
+                + connection.getMetaData().getMaxBinaryLiteralLength() + " " + statement.getMaxFieldSize());
+            for (final String format : new String[] {"ARROW", "JSON"}) {
+                statement.execute("ALTER SESSION SET JDBC_QUERY_RESULT_FORMAT = '" + format + "'");
+                try (ResultSet rs = statement.executeQuery("SELECT 1.5::DECFLOAT AS a, 0.0000001::VARIANT AS v")) {
+                    final ResultSetMetaData metaData = rs.getMetaData();
+                    assertEquals("38 0 40", metaData.getPrecision(1) + " " + metaData.getScale(1) + " "
+                        + metaData.getColumnDisplaySize(1), format);
+                    assertTrue(rs.next());
+                    assertEquals("0.0000001", rs.getString(2), format);
                 }
             }
-            assertEquals(List.of("1", "count 0", "count 2", "1,2"), answers);
+            // A DECFLOAT keeps its own text, scientific where the account's is.
+            try (ResultSet rs = statement.executeQuery("SELECT 1::DECFLOAT / 3, 1e40::DECFLOAT")) {
+                assertTrue(rs.next());
+                assertEquals("3.3333333333333333333333333333333333333e-1 1.0000000000000000303786028427003666891e40",
+                    rs.getString(1) + " " + rs.getString(2));
+            }
+            // setMaxRows bounds the rows the statement hands back.
+            statement.setMaxRows(1);
+            try (ResultSet rs = statement.executeQuery("SELECT column1 FROM VALUES (1), (2), (3) ORDER BY 1")) {
+                assertEquals(List.of("1"), rows(rs));
+            }
+        }
+    }
+
+    @Test
+    public void aSessionsTemporaryTableComesBackWithItsSchemaButNotOverAPermanentOne() throws SQLException {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA tts");
+            statement.execute("CREATE TABLE tts.km (a INT)");
+            statement.execute("INSERT INTO tts.km VALUES (8)");
+            statement.execute("CREATE TEMPORARY TABLE tts.km (b INT)");
+            statement.execute("INSERT INTO tts.km VALUES (4), (5)");
+            statement.execute("DROP SCHEMA tts");
+            statement.execute("UNDROP SCHEMA tts");
+            try (ResultSet rs = statement.executeQuery("SELECT * FROM tts.km ORDER BY 1")) {
+                assertEquals(List.of("4", "5"), rows(rs));
+            }
+            // The temporary table dropped, the permanent one it hid holds the name an UNDROP would take.
+            statement.execute("DROP TABLE tts.km");
+            try (ResultSet rs = statement.executeQuery("SELECT * FROM tts.km")) {
+                assertEquals(List.of("8"), rows(rs));
+            }
+            final SQLException taken = assertThrows(SQLException.class, new Executable() {
+                @Override
+                public void execute() throws SQLException {
+                    statement.execute("UNDROP TABLE tts.km");
+                }
+            });
+            assertEquals("SQL compilation error:\nObject 'KM' already exists.", taken.getMessage());
+        }
+    }
+
+    @Test
+    public void datesAndTimestampsReadInTheSessionsZone() throws SQLException {
+        final TimeZone jvmZone = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("Europe/London"));
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement()) {
+            // Read from JSON results, as the account's driver reads them where these readings were measured.
+            statement.execute("ALTER SESSION SET JDBC_QUERY_RESULT_FORMAT = 'JSON'");
+            // A session that sets no zone runs in the account's, UTC here, and reads a TIMESTAMP_LTZ there.
+            try (ResultSet rs = statement.executeQuery("SELECT '2024-01-02 10:11:12'::TIMESTAMP_LTZ")) {
+                assertTrue(rs.next());
+                assertEquals("2024-01-02 10:11:12.0", rs.getTimestamp(1).toString());
+            }
+            // A DATE read as an object is the session zone's midnight, and through getDate the client's.
+            statement.execute("ALTER SESSION SET TIMEZONE = 'America/Los_Angeles'");
+            try (ResultSet rs = statement.executeQuery("SELECT '2024-01-02'::DATE")) {
+                assertTrue(rs.next());
+                assertEquals(Instant.parse("2024-01-02T08:00:00Z"),
+                    Instant.ofEpochMilli(((Date) rs.getObject(1)).getTime()));
+                assertEquals(Instant.parse("2024-01-02T00:00:00Z"), Instant.ofEpochMilli(rs.getDate(1).getTime()));
+            }
+        } finally {
+            TimeZone.setDefault(jvmZone);
         }
     }
 
@@ -510,7 +636,12 @@ public class SnowflakeDriverProtocolTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE STAGE st");
                 try (ResultSet rs = statement.executeQuery("PUT 'file://" + source + "' @st/sub/")) {
+                    // The account's columns, the encryption marker among them; a local stage's files move
+                    // unencrypted, so the driver leaves the marker empty.
+                    assertEquals("source|target|source_size|target_size|source_compression|target_compression|status"
+                        + "|encryption|message", labels(rs));
                     assertTrue(rs.next());
+                    assertEquals("", rs.getString("encryption"));
                     assertEquals("p4.csv", rs.getString("source"));
                     assertEquals("p4.csv.gz", rs.getString("target"));
                     assertEquals("GZIP", rs.getString("target_compression"));
@@ -524,6 +655,7 @@ public class SnowflakeDriverProtocolTest {
                     assertEquals("st/sub/p4.csv.gz", rs.getString(1));
                 }
                 try (ResultSet rs = statement.executeQuery("GET @st/sub/ 'file://" + out + "'")) {
+                    assertEquals("file|size|status|encryption|message", labels(rs));
                     assertTrue(rs.next());
                     assertEquals("sub/p4.csv.gz", rs.getString("file"));
                     assertEquals("DOWNLOADED", rs.getString("status"));

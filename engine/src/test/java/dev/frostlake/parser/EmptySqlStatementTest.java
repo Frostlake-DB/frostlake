@@ -102,7 +102,7 @@ public class EmptySqlStatementTest extends BaseDatabaseTest {
      */
     @Test
     public void theEmptyStringIsEmptyToo() {
-        Assumptions.assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled(),
+        Assumptions.assumeFalse(readsThroughSnowflakeDriver() || FrostlakeJdbc.enabled(),
             "a JDBC driver, Snowflake's and Frostlake's alike, refuses an empty statement client-side, so the "
             + "server's own sentence is not observable through it");
         assertEmptyRefusal("");

@@ -369,7 +369,7 @@ final class SnowflakeArrowRowset {
             if (cells.get(i) == null) {
                 field.addNull();
             } else {
-                field.addText(wires.get(i).toString());
+                field.addText(SnowflakeRowset.textOf(cells.get(i), wires.get(i), kind));
             }
         }
         return field;

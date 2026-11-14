@@ -17,7 +17,6 @@
 package dev.frostlake.jdbc;
 
 import dev.frostlake.BaseJdbcTest;
-import dev.frostlake.LiveSnowflake;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -46,7 +45,7 @@ public class AbortTransactionAcrossSessionsTest extends BaseJdbcTest {
 
     /** Another session on the same account or engine as the test's own connection. */
     private Connection another() throws SQLException {
-        return LiveSnowflake.enabled() ? LiveSnowflake.open() : new DirectConnection(sharedEngine);
+        return newSession();
     }
 
     private static String cell(final Statement on, final String sql) throws SQLException {

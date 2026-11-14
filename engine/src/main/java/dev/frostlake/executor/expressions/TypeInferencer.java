@@ -886,9 +886,10 @@ final class TypeInferencer {
                 return declaredNumericConversionType(call.getArguments());
             }
             // AS_DECIMAL and AS_NUMBER declare the (precision, scale) written after the VARIANT, NUMBER(38,0) for
-            // none: AS_NUMBER(v, 3, 1) is NUMBER(3,1) (live-verified).
+            // none: AS_NUMBER(v, 3, 1) is NUMBER(3,1), and a number written with a fraction is read as the call reads
+            // it, AS_DECIMAL(v, 10.0, 2.0) as NUMBER(10,2) (live-verified).
             if (declared instanceof NumericType && VARIANT_NUMBER_CASTS.contains(funcName)) {
-                return declaredNumericConversionType(call.getArguments());
+                return variantNumberCastType(call.getArguments());
             }
             // The timestamp casts of a VARIANT declare the scale written after it: AS_TIMESTAMP_NTZ(v, 0) is
             // TIMESTAMP_NTZ(0) (live-verified).
@@ -1204,6 +1205,30 @@ final class TypeInferencer {
             return new NumericType("NUMBER", last.intValue(), 0);
         }
         return new NumericType("NUMBER", 38, 0);
+    }
+
+    /**
+     * The type AS_DECIMAL or AS_NUMBER declares: the precision and scale written after the VARIANT, each a number
+     * literal read as the call reads it, its whole part.
+     */
+    private static DataType variantNumberCastType(final List<Expression> args) {
+        final Integer precision = args.size() >= 2 ? numberLiteral(args.get(1)) : null;
+        final Integer scale = args.size() >= 3 ? numberLiteral(args.get(2)) : null;
+        if (precision != null && scale != null) {
+            return new NumericType("NUMBER", precision.intValue(), scale.intValue());
+        }
+        if (precision != null && args.size() == 2) {
+            return new NumericType("NUMBER", precision.intValue(), 0);
+        }
+        return new NumericType("NUMBER", 38, 0);
+    }
+
+    /** The whole part of a number literal argument, or null when it is no number literal. */
+    private static Integer numberLiteral(final Expression arg) {
+        if (!(arg instanceof LiteralExpression) || !(((LiteralExpression) arg).getValue() instanceof Number)) {
+            return null;
+        }
+        return Integer.valueOf(((Number) ((LiteralExpression) arg).getValue()).intValue());
     }
 
     /** The int a literal argument holds, or null when it is not an integer literal. */

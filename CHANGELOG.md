@@ -343,7 +343,16 @@ Changes since 0.4.0 accumulate here as they land.
   statement's `getMetaData()` and `getParameterMetaData()` answer before it runs, its columns worked out without running
   it and each placeholder a text, and a batch of an `INSERT … VALUES` runs as one statement, all of its rows or none.
   PUT and GET move their files through the stage's own directory, the driver copying them as it does against the
-  account, so client and server share a file system; `executeAsyncQuery` answers at once with the query ID, which
+  account, so client and server share a file system, and answer the account's columns, the `encryption` marker among
+  them (empty, as the files move unencrypted). `execute()` answers what the account's driver answers: an update count
+  for DML, COPY and every statement that answers no rows, rows for a query, SHOW, DESCRIBE, CALL, LIST, GET, PUT and
+  REMOVE; an EXECUTE IMMEDIATE answers as the statement its text ran, one of several statements hands back each
+  statement's answer where the request allows several, and a `->>` chain answers as its last statement. Dates and
+  timestamps read in the session's zone as against the account - a DATE read as an object at the zone's midnight, a
+  session that sets no zone in the account's, UTC here. The login carries the account's result size limits, 128 MB,
+  which `getMaxCharLiteralLength` and `getMaxFieldSize` answer; a DECFLOAT column reads precision 38 and display size
+  40, a decimal held in a VARIANT reads its digits in place (`0.0000001`), and `setMaxRows` bounds the rows a statement
+  hands back. `executeAsyncQuery` answers at once with the query ID, which
   `getQueryStatus` and `createResultSet` follow; and `http.tls.port` with a keystore opens an HTTPS listener, so the
   driver connects without `ssl=off`. A VECTOR is described with its dimension and element type and reads as its
   elements, an interval with its fields and reads as a `Period` or `Duration` (its nanoseconds where wider than 64
@@ -449,6 +458,24 @@ Changes since 0.4.0 accumulate here as they land.
   column's name, and a DEFAULT as `Unsupported feature 'Column constraints [ WITH DEFAULT null ]'.`
 
 ### Fixed
+
+- **AS_DECIMAL and AS_NUMBER read a precision or scale written with a fraction as the call does** (live-verified):
+  `AS_DECIMAL(v, 10, 2.0)` and `AS_DECIMAL(v, 10.0, 2.0)` declare NUMBER(10,2), the type of the value they hand back;
+  they declared NUMBER(38,0) over a value of two places.
+- **A constant of another type reaching a SQL function's VARCHAR parameter is text in the body** (live-verified): over
+  `f(p VARCHAR) RETURNS VARCHAR AS $$ p $$`, `f(1)`, `f(TRUE)`, `f(1.5::FLOAT)` and `f('2024-01-01'::DATE)` are each
+  VARCHAR[LOB], an unbounded VARCHAR column, where each kept its argument's type; a text constant still folds into
+  the body.
+- **A temporary table of a server session survives DROP SCHEMA and UNDROP SCHEMA, and comes back only to a free
+  name** (live-verified): a session's own temporary table waits with its dropped schema or database and comes back
+  with an UNDROP in that session, as the engine's own session's does; it was discarded. And `UNDROP TABLE t` over a
+  dropped temporary `t` while the permanent `t` it hid holds the name is `Object 'T' already exists.`, where it was
+  restored.
+- **`setObject` with a FLOAT or DOUBLE target binds a FLOAT in both Frostlake drivers** (live-verified):
+  `setObject(1, new BigDecimal("7.25"), Types.DOUBLE)` is FLOAT[DOUBLE], as the account's driver binds it, where it
+  bound the decimal, NUMBER(3,2).
+- **The HTTP server stops as soon as the requests in flight are answered**: a stop waited three seconds whether or not
+  a request was open; it now waits for the open ones, at most three seconds, and so does `SnowflakeEndpoint.close()`.
 
 - **A set operation quoted in a refusal marks an arm ENSURE_NULLABLE only where it is not cast** (live-verified):
   `(SELECT MAX(v) FROM g UNION ALL SELECT 1)` re-prints its second arm as `CAST(OB$1."1" AS NUMBER(38,0))`, where it

@@ -16,6 +16,7 @@
 package dev.frostlake.http;
 
 import dev.frostlake.ConcurrentDatabaseEngine;
+import dev.frostlake.values.LobSize;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
@@ -48,11 +49,23 @@ final class SnowflakeSessionParameters {
         {"JDBC_QUERY_RESULT_FORMAT", "ARROW"},
     };
 
+    /**
+     * How the driver reads dates and times, each the session's own setting where it has one and else the account's
+     * default: a DATE at midnight in the zone it is read in, a TIMESTAMP_NTZ in the client's zone rather than UTC, and
+     * the session's zone for the rest.
+     */
+    private static final Object[][] TEMPORAL_READS = {
+        {"JDBC_FORMAT_DATE_WITH_TIMEZONE", Boolean.TRUE},
+        {"JDBC_TREAT_TIMESTAMP_NTZ_AS_UTC", Boolean.FALSE},
+        {"JDBC_USE_SESSION_TIMEZONE", Boolean.TRUE},
+    };
+
     /** The client settings this server answers whatever the session sets, so the driver stays on what it serves. */
     private static final Set<String> FIXED = new HashSet<>(Arrays.asList("AUTOCOMMIT",
         "CLIENT_RESULT_CHUNK_SIZE", "CLIENT_PREFETCH_THREADS", "CLIENT_SESSION_KEEP_ALIVE", "CLIENT_TELEMETRY_ENABLED",
         "CLIENT_OUT_OF_BAND_TELEMETRY_ENABLED", "CLIENT_STAGE_ARRAY_BINDING_THRESHOLD", "JDBC_TREAT_DECIMAL_AS_INT",
-        "JDBC_USE_SESSION_TIMEZONE", "CLIENT_HONOR_CLIENT_TZ_FOR_TIMESTAMP_NTZ", "CLIENT_DISABLE_INCIDENTS"));
+        "CLIENT_HONOR_CLIENT_TZ_FOR_TIMESTAMP_NTZ", "CLIENT_DISABLE_INCIDENTS", "VARCHAR_AND_BINARY_MAX_SIZE_IN_RESULT",
+        "VARIANT_MAX_SIZE_IN_RESULT"));
 
     private SnowflakeSessionParameters() {
     }
@@ -81,6 +94,13 @@ final class SnowflakeSessionParameters {
         add(parameters, "CLIENT_RESULT_COLUMN_CASE_INSENSITIVE").put("value",
             engine.resultColumnsCaseInsensitive(session));
         named.add("CLIENT_RESULT_COLUMN_CASE_INSENSITIVE");
+        for (final Object[] read : TEMPORAL_READS) {
+            final String name = (String) read[0];
+            final Object set = session.getSettings().getParameter(name);
+            add(parameters, name).put("value", set == null ? ((Boolean) read[1]).booleanValue()
+                : "TRUE".equalsIgnoreCase(set.toString().trim()));
+            named.add(name);
+        }
         // Every other parameter the session has set, as it set it.
         for (final Map.Entry<String, Object> parameter : session.getSettings().setParameters().entrySet()) {
             if (!named.contains(parameter.getKey()) && !FIXED.contains(parameter.getKey())
@@ -108,9 +128,12 @@ final class SnowflakeSessionParameters {
         add(parameters, "CLIENT_OUT_OF_BAND_TELEMETRY_ENABLED").put("value", false);
         add(parameters, "CLIENT_STAGE_ARRAY_BINDING_THRESHOLD").put("value", Integer.MAX_VALUE);
         add(parameters, "JDBC_TREAT_DECIMAL_AS_INT").put("value", true);
-        add(parameters, "JDBC_USE_SESSION_TIMEZONE").put("value", true);
         add(parameters, "CLIENT_HONOR_CLIENT_TZ_FOR_TIMESTAMP_NTZ").put("value", true);
         add(parameters, "CLIENT_DISABLE_INCIDENTS").put("value", true);
+        // The largest text, binary and semi-structured value a result holds, which the driver answers as its
+        // DatabaseMetaData maxima (getMaxCharLiteralLength, and half of it as getMaxBinaryLiteralLength).
+        add(parameters, "VARCHAR_AND_BINARY_MAX_SIZE_IN_RESULT").put("value", (int) LobSize.MAX_TEXT_BYTES);
+        add(parameters, "VARIANT_MAX_SIZE_IN_RESULT").put("value", (int) LobSize.MAX_TEXT_BYTES);
         return parameters;
     }
 

@@ -389,19 +389,63 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         session.followStatementCount(sql);
         engine.bindJsonIndent(session);
         try {
-            return answer(session, result, types, written);
+            return answer(session, capped(result, rowsAtMost(body.path("parameters"))), types, written);
         } finally {
             VariantJsonFormat.clearSessionScope();
         }
     }
 
-    /** A successful run's answer: its one result, or for a text of several, the ids of each statement's result. */
+    /**
+     * The most rows a statement hands back, as the driver asks with {@code setMaxRows}: its {@code rows_per_resultset}
+     * parameter, 0 for no bound.
+     *
+     * @param parameters the statement's parameters
+     * @return the bound, or 0
+     */
+    private static int rowsAtMost(final JsonNode parameters) {
+        for (final Map.Entry<String, JsonNode> parameter : parameters.properties()) {
+            if ("ROWS_PER_RESULTSET".equalsIgnoreCase(parameter.getKey()) && parameter.getValue().isNumber()) {
+                return Math.max(0, parameter.getValue().asInt());
+            }
+        }
+        return 0;
+    }
+
+    /** A run's results, each holding at most {@code most} rows where that bounds them. */
+    private static ExecutionResult capped(final ExecutionResult result, final int most) {
+        if (most <= 0 || result.getResultSets() == null) {
+            return result;
+        }
+        final List<ResultSet> results = new ArrayList<>();
+        boolean cut = false;
+        for (final ResultSet whole : result.getResultSets()) {
+            if (whole.getRows().size() <= most) {
+                results.add(whole);
+                continue;
+            }
+            final ResultSet first =
+                new ResultSet(whole.getColumns(), new ArrayList<>(whole.getRows().subList(0, most)));
+            first.markJdbcUpdateCount(whole.getJdbcUpdateCount());
+            if (whole.isScriptingAnswer()) {
+                first.markScriptingAnswer();
+            }
+            results.add(first);
+            cut = true;
+        }
+        return cut ? new ExecutionResult(true, results, null, result.getQueryId()) : result;
+    }
+
+    /**
+     * A successful run's answer: its one result, or for several - a text of several statements, or one EXECUTE
+     * IMMEDIATE of several, which hands back each statement's answer - the ids of each result. Each result is typed
+     * as its statement reads (see {@link SnowflakeStatementTypes#answered}).
+     */
     private ObjectNode answer(final SessionContext session, final ExecutionResult result, final List<Long> types,
                               final String written) {
         final List<ResultSet> results = result.getResultSets() == null ? new ArrayList<ResultSet>()
             : result.getResultSets();
         final String queryId = result.getQueryId() == null ? UUID.randomUUID().toString() : result.getQueryId();
-        if (results.size() <= 1 || types.size() <= 1) {
+        if (results.size() <= 1) {
             final ObjectNode data = JsonNodeFactory.instance.objectNode();
             if (results.isEmpty()) {
                 data.putArray("rowtype");
@@ -411,16 +455,20 @@ final class SnowflakeProtocolHandler implements HttpHandler {
             } else {
                 SnowflakeRowset.write(results.get(0), data, arrow(session));
             }
-            describe(data, session, queryId, types.get(0).longValue(), written);
+            describe(data, session, queryId, SnowflakeStatementTypes.answered(types.get(0).longValue(),
+                results.isEmpty() ? null : results.get(0)), written);
             return success(data);
         }
+        // One result for each statement, or each answer of one EXECUTE IMMEDIATE, whose statements are not the text's.
+        final boolean eachStatements = results.size() == types.size();
         final List<String> ids = new ArrayList<>();
         final List<String> kinds = new ArrayList<>();
         for (int i = 0; i < results.size(); i++) {
             final String id = UUID.randomUUID().toString();
             final ObjectNode data = JsonNodeFactory.instance.objectNode();
             SnowflakeRowset.write(results.get(i), data, arrow(session));
-            final long type = i < types.size() ? types.get(i).longValue() : SnowflakeStatementTypes.SELECT;
+            final long type = SnowflakeStatementTypes.answered(eachStatements ? types.get(i).longValue()
+                : SnowflakeStatementTypes.SELECT, results.get(i));
             describe(data, session, id, type, written);
             keptResults.put(id, success(data));
             ids.add(id);

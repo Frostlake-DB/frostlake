@@ -17,6 +17,7 @@
 package dev.frostlake;
 
 import dev.frostlake.config.EngineConfig;
+import dev.frostlake.executor.AccountParameters;
 import dev.frostlake.executor.ReadOnlyBodies;
 import dev.frostlake.executor.ReadOnlyRequest;
 import dev.frostlake.executor.RelationShapeOnly;
@@ -556,8 +557,9 @@ public class ConcurrentDatabaseEngine {
     }
 
     /**
-     * A session parameter's value - the session's own, its user's or the account's - read from the session's own
-     * settings, as {@link #sessionTimezone} reads its zone.
+     * A session parameter's value - the session's own, its user's or the account's, the zone this engine's account
+     * sets among them (see {@link AccountParameters}) - read from the session's own settings, as SHOW PARAMETERS reads
+     * it.
      *
      * @param session the session
      * @param name    the parameter's name, upper-cased
@@ -566,7 +568,8 @@ public class ConcurrentDatabaseEngine {
     public Object sessionParameter(final SessionContext session, final String name) {
         engine.getSecurityManager().getSessionContext().bindSettings(session.getSettings());
         try {
-            return engine.getSecurityManager().getSessionContext().getSessionParameter(name);
+            final Object value = engine.getSecurityManager().getSessionContext().getSessionParameter(name);
+            return value != null ? value : AccountParameters.value(engine.getCatalog(), name);
         } finally {
             engine.getSecurityManager().getSessionContext().unbindSettings();
         }

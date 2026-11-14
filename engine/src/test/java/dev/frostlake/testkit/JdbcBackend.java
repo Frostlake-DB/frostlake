@@ -154,9 +154,10 @@ public final class JdbcBackend implements Backend {
         if (openingWarehouse != null) {
             statement.execute("USE WAREHOUSE " + openingWarehouse);
         }
-        // A live case that altered the session leaves the change for every later case; the account's session goes
-        // back on the harness's parameters (an engine's sessions start each case clean already).
-        if (sessionAltered && "snowflake".equals(name)) {
+        // A case that altered the session leaves the change for every later case; a session of Snowflake's driver —
+        // the account's, or Frostlake's endpoint's — goes back on the harness's parameters (an engine's sessions start
+        // each case clean already).
+        if (sessionAltered && ("snowflake".equals(name) || "sfjdbc".equals(name))) {
             LiveSnowflake.restoreSessionParameters(statement);
         }
         sessionAltered = false;

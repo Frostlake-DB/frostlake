@@ -271,6 +271,36 @@ public class StorageEngine {
         }
     }
 
+    /**
+     * Take the current session's own temporary table's rows of a key out of the engine, to wait with a dropped schema
+     * or database for an UNDROP in the same session ({@link #restoreOwnSessionTable}).
+     *
+     * @param qualifiedName the key
+     * @return the rows, or null where the session holds no such table
+     */
+    public TableStorage takeOwnSessionTable(final String qualifiedName) {
+        final Long session = StatementSession.current();
+        final Map<String, TableStorage> own = session == null ? null : sessionTables.get(session);
+        final TableStorage storage = own == null ? null : own.remove(qualifiedName);
+        if (own != null && own.isEmpty()) {
+            sessionTables.remove(session);
+        }
+        return storage;
+    }
+
+    /**
+     * Put the current session's own temporary table's rows back under a key, as {@link #takeOwnSessionTable} took them.
+     *
+     * @param qualifiedName the key
+     * @param storage       the rows
+     */
+    public void restoreOwnSessionTable(final String qualifiedName, final TableStorage storage) {
+        final Long session = StatementSession.current();
+        if (session != null && storage != null) {
+            sessionMap(sessionTables, session).put(qualifiedName, storage);
+        }
+    }
+
     /** The current session's own temporary tables' rows, or null for none (or the engine's own session). */
     private Map<String, TableStorage> ownTables() {
         final Long session = StatementSession.current();

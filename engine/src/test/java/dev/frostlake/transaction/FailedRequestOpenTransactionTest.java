@@ -17,8 +17,6 @@
 package dev.frostlake.transaction;
 
 import dev.frostlake.BaseJdbcTest;
-import dev.frostlake.LiveSnowflake;
-import dev.frostlake.jdbc.DirectConnection;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -61,7 +59,7 @@ public class FailedRequestOpenTransactionTest extends BaseJdbcTest {
 
     /** A second session on the same account or engine, placed in the test's schema. */
     private Connection observer() throws SQLException {
-        final Connection other = isLiveSnowflake() ? LiveSnowflake.open() : new DirectConnection(sharedEngine);
+        final Connection other = newSession();
         try (Statement use = other.createStatement()) {
             use.execute("USE SCHEMA test_db.public");
         }

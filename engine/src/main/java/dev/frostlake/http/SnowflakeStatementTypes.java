@@ -17,6 +17,8 @@ package dev.frostlake.http;
 
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.storage.ResultSet;
+import dev.frostlake.storage.ResultSetColumn;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -31,7 +33,8 @@ import java.util.List;
  * every other type as a result set: SELECT 0x1000, INSERT 0x3100, UPDATE 0x3200, DELETE 0x3300, MERGE 0x3400, a
  * multi-table INSERT 0x3500, COPY INTO a table 0x3600 and into a stage 0x3700, a session variable 0x4000, ALTER
  * SESSION 0x4100, USE 0x4300 (and 1, 2, 3 for a database, a schema, a warehouse), SHOW 0x4400, DESCRIBE 0x4500,
- * LIST 0x4701, a transaction's statement 0x5000, GET 0x7101, PUT 0x7102, and any other DDL 0x6000.
+ * LIST 0x4701, a transaction's statement 0x5000, GET 0x7101, PUT 0x7102, REMOVE 0x7103, and any other DDL 0x6000.
+ * A flow chain answers as its last statement, the one whose result it hands back.
  */
 final class SnowflakeStatementTypes {
 
@@ -51,6 +54,7 @@ final class SnowflakeStatementTypes {
     private static final long LIST = 0x4701;
     private static final long GET = 0x7101;
     private static final long PUT = 0x7102;
+    private static final long REMOVE = 0x7103;
     private static final long TCL = 0x5000;
     private static final long DDL = 0x6000;
 
@@ -58,8 +62,8 @@ final class SnowflakeStatementTypes {
     }
 
     /**
-     * The type id of each statement of a text, in order; a text that does not parse is answered as one SELECT, as it
-     * is refused when it runs.
+     * The type id of each statement of a text, in order, a flow chain's being its last statement's; a text that does
+     * not parse is answered as one SELECT, as it is refused when it runs.
      *
      * @param sql the text
      * @return the ids
@@ -69,8 +73,9 @@ final class SnowflakeStatementTypes {
         try {
             final FrostlakeParser.SqlScriptContext script = QueryExecutor.parsedScriptQuietly(sql);
             for (final FrostlakeParser.FlowChainContext chain : script.flowChain()) {
-                for (final FrostlakeParser.StatementContext statement : chain.statement()) {
-                    types.add(Long.valueOf(typeOf(statement)));
+                final List<FrostlakeParser.StatementContext> stages = chain.statement();
+                if (!stages.isEmpty()) {
+                    types.add(Long.valueOf(typeOf(stages.get(stages.size() - 1))));
                 }
             }
         } catch (final RuntimeException unparsed) {
@@ -143,6 +148,9 @@ final class SnowflakeStatementTypes {
         if (kind instanceof FrostlakeParser.PutStatementContext) {
             return PUT;
         }
+        if (kind instanceof FrostlakeParser.RemoveStatementContext) {
+            return REMOVE;
+        }
         if (kind instanceof FrostlakeParser.DmlStatementContext) {
             return dmlType((FrostlakeParser.DmlStatementContext) kind);
         }
@@ -160,7 +168,52 @@ final class SnowflakeStatementTypes {
         if (first == FrostlakeParser.ALTER && second == FrostlakeParser.SESSION) {
             return ALTER_SESSION;
         }
+        // The listings and descriptions other statement families parse (SHOW SERVICES, DESCRIBE TASK, ...) answer
+        // rows as well: the leading word decides.
+        if (first == FrostlakeParser.SHOW) {
+            return SHOW;
+        }
+        if (first == FrostlakeParser.DESC || first == FrostlakeParser.DESCRIBE) {
+            return DESCRIBE;
+        }
         return DDL;
+    }
+
+    /**
+     * The type id a statement's result is answered with: the statement's own, unless the engine reads the result
+     * otherwise. The engine records, for each result, the update count a JDBC client reports for it, or none when the
+     * client reads rows; an EXECUTE IMMEDIATE answers as the statement its text ran, and each answer of a text of
+     * several that one EXECUTE IMMEDIATE ran as that statement. A result read as rows takes a type the driver reads
+     * rows by, and a counted one a type the driver counts the same number by: a COPY's for a grid that counts the rows
+     * it loaded, a DML type's for a grid of counts, and any other statement's for 0.
+     *
+     * @param parsed the statement's own type id, or SELECT where the statement is not known
+     * @param result the result answered, or null
+     * @return the type id to answer with
+     */
+    static long answered(final long parsed, final ResultSet result) {
+        if (result == null) {
+            return parsed;
+        }
+        final Long count = result.getJdbcUpdateCount();
+        if (count == null) {
+            return readsRows(parsed) ? parsed : SELECT;
+        }
+        if (!readsRows(parsed)) {
+            return parsed;
+        }
+        for (final ResultSetColumn column : result.getColumns()) {
+            if ("rows_loaded".equalsIgnoreCase(column.getName())) {
+                return COPY;
+            }
+        }
+        return count.longValue() == 0L ? DDL : INSERT;
+    }
+
+    /** Whether the driver reads a result of the type as rows rather than as an update count. */
+    private static boolean readsRows(final long type) {
+        return type == SELECT || type == SHOW || type == DESCRIBE || type == LIST || type == GET || type == PUT
+            || type == REMOVE;
     }
 
     private static long dmlType(final FrostlakeParser.DmlStatementContext dml) {

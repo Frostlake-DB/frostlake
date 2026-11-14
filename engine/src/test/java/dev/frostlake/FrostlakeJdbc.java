@@ -21,15 +21,15 @@ package dev.frostlake;
  * {@link BaseDatabaseTest} routes every statement through Frostlake's own JDBC driver (a
  * {@link dev.frostlake.jdbc.DirectConnection} over the test's engine) instead of calling the
  * engine API — the same suite, flipped by a switch, auditing the whole driver surface.
- * {@code SF_LIVE} takes precedence when both are set.
+ * {@code SF_LIVE} and {@code SF_JDBC_FL} take precedence when set as well.
  */
 public final class FrostlakeJdbc {
 
     private FrostlakeJdbc() {
     }
 
-    /** Whether FL-over-JDBC mode is on ({@code FL_JDBC=1} and not overridden by {@code SF_LIVE}). */
+    /** Whether FL-over-JDBC mode is on: {@code FL_JDBC=1}, and neither {@code SF_LIVE} nor {@code SF_JDBC_FL}. */
     public static boolean enabled() {
-        return "1".equals(System.getenv("FL_JDBC")) && !LiveSnowflake.enabled();
+        return "1".equals(System.getenv("FL_JDBC")) && !LiveSnowflake.enabled() && !SnowflakeJdbcFl.enabled();
     }
 }

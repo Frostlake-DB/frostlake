@@ -5036,7 +5036,9 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      * {@code txt_p('5')} and {@code txt_p('5' || '0')} are [SB1] as {@code '5'::NUMBER} is,
      * {@code txt_p(NULL)} is a NULL's [SB1] and {@code txt_p('123456')} [SB4], where
      * {@code txt_p(n::VARCHAR)} keeps the declared width (live-verified). The bare word NULL folds for the interval
-     * alone, {@code nullsFold}: the call's type reads it at the parameter's type.
+     * alone, {@code nullsFold}: the call's type reads it at the parameter's type. A constant of another type reaches a
+     * text parameter converted, and is read at the parameter's type: over a body that hands its VARCHAR parameter back,
+     * {@code f(1)}, {@code f(TRUE)} and {@code f('2024-01-01'::DATE)} are VARCHAR[LOB] (live-verified).
      */
     private Expression textConstantInlined(final Function udf, final FunctionCallExpression call,
                                            final String body, final boolean nullsFold) {
@@ -5052,7 +5054,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             final Expression argument = call.getArguments().get(i);
             foldsText |= parameter.getDataType() instanceof StringType
                 && (nullsFold && UntypedNullFold.isUntypedNull(argument)
-                    || !UntypedNullFold.isUntypedNull(argument) && valueRangeInferencer.foldsAsConstant(argument));
+                    || !UntypedNullFold.isUntypedNull(argument) && valueRangeInferencer.foldsAsConstant(argument)
+                    && typeInferencer.infer(argument) instanceof StringType);
             arguments.put(parameter.getName().toUpperCase(Locale.ROOT), argument);
         }
         return foldsText ? substitutedBody(parsed, arguments) : null;
@@ -5077,7 +5080,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             final Parameter parameter = udf.getParameters().get(i);
             final Expression argument = i < call.getArguments().size() ? call.getArguments().get(i) : null;
             final DataType supplied = argument != null ? typeInferencer.infer(argument) : null;
-            final DataType effective = UdfParameterTypes.effective(parameter.getDataType(), supplied);
+            final DataType effective = UdfParameterTypes.effective(parameter.getDataType(), supplied,
+                parameter.isUnsized());
             if (effective == null) {
                 return body;
             }
@@ -5110,7 +5114,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             }
             final Parameter parameter = udf.getParameters().get(i);
             final DataType effective = UdfParameterTypes.effective(parameter.getDataType(),
-                typeInferencer.infer(argument));
+                typeInferencer.infer(argument), parameter.isUnsized());
             if (effective != null) {
                 names.add(parameter.getName());
                 standIns.add("CAST(" + AstPrinterVisitor.print(argument) + " AS " + SqlTypeNames.routineType(effective)
@@ -5196,7 +5200,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             final DataType supplied = argument != null ? typeInferencer.infer(argument) : null;
             final DataType effective = argument != null && UntypedNullFold.isUntypedNull(argument)
                 ? UdfParameterTypes.ofNullArgument(parameter.getDataType(), parameter.isUnsized())
-                : UdfParameterTypes.effective(parameter.getDataType(), supplied);
+                : UdfParameterTypes.effective(parameter.getDataType(), supplied, parameter.isUnsized());
             final TableColumn column = new TableColumn(parameter.getName(), effective, true,
                 null, false, false, false);
             // A declared parameter type is authoritative, so the resolver trusts it.

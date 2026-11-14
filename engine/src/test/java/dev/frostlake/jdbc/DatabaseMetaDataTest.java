@@ -42,12 +42,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class DatabaseMetaDataTest extends BaseJdbcTest {
 
     private static final String DRIVER_IDENTITY =
-        "asserts the Frostlake driver's own identity strings; under SF_LIVE the connection is "
+        "asserts the Frostlake driver's own identity strings; with SF_LIVE or SF_JDBC_FL the connection is "
         + "Snowflake's driver, which names itself and its server version instead";
 
     private static final String DRIVER_CAPABILITY =
         "asserts a capability the FROSTLAKE driver declares about itself through "
-        + "java.sql.DatabaseMetaData; under SF_LIVE the answer comes from Snowflake's own driver, "
+        + "java.sql.DatabaseMetaData; with SF_LIVE or SF_JDBC_FL the answer comes from Snowflake's own driver, "
         + "which declares its own (different) answer — nothing about the account's SQL is checked";
 
     @Test
@@ -58,21 +58,21 @@ public class DatabaseMetaDataTest extends BaseJdbcTest {
 
     @Test
     public void testGetDatabaseProductName() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_IDENTITY);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_IDENTITY);
         final DatabaseMetaData metaData = connection.getMetaData();
         assertEquals("Frostlake SQL Engine", metaData.getDatabaseProductName());
     }
 
     @Test
     public void testGetDatabaseProductVersion() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_IDENTITY);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_IDENTITY);
         final DatabaseMetaData metaData = connection.getMetaData();
         assertEquals("1.0.0", metaData.getDatabaseProductVersion());
     }
 
     @Test
     public void testGetDriverName() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_IDENTITY);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_IDENTITY);
         final DatabaseMetaData metaData = connection.getMetaData();
         assertEquals("Frostlake JDBC Driver", metaData.getDriverName());
     }
@@ -355,7 +355,7 @@ public class DatabaseMetaDataTest extends BaseJdbcTest {
 
     @Test
     public void testSupportsNamedParameters() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_CAPABILITY);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_CAPABILITY);
         final DatabaseMetaData metaData = connection.getMetaData();
         assertTrue(metaData.supportsNamedParameters());
     }
@@ -609,7 +609,7 @@ public class DatabaseMetaDataTest extends BaseJdbcTest {
 
     @Test
     public void testGetTablesListsAMaterializedViewAsAView() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "creating a materialized view on the live account needs a running warehouse and is "
             + "slow; the TABLE_TYPE mapping it exercises was measured live and is asserted above");
         statement.execute("CREATE TABLE fl162_tbl (id INTEGER)");
@@ -955,7 +955,7 @@ public class DatabaseMetaDataTest extends BaseJdbcTest {
 
     @Test
     public void testGetColumnsReportsAMaterializedViewsColumns() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "creating a materialized view on the live account needs a running warehouse and is "
             + "slow; that a materialized view reports its columns — and freezes them exactly as a "
             + "plain view does — was measured live separately");

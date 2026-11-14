@@ -24,6 +24,20 @@ FL_JDBC=1 mvn -pl engine test
 engine, so the whole suite exercises the driver: statement execution, result-set getters and value marshaling.
 Tests that read engine internals still see the same engine.
 
+## Through Snowflake's JDBC driver (`SF_JDBC_FL=1`)
+
+```bash
+SF_JDBC_FL=1 mvn -pl engine test
+```
+
+`BaseDatabaseTest` and `BaseJdbcTest` send their SQL through Snowflake's own JDBC driver, logged in to a
+`SnowflakeEndpoint` serving the test's engine in-process, so the suite checks the endpoint and how the account's
+driver reads what it answers: the protocol, result metadata, values and refusals. A refusal must reach the client in
+the engine's own words, and a value the driver reads back as the engine's comes back as the engine's own cell; anything
+else reaches the assertion as the driver read it. Tests that read engine internals still see the same engine.
+Results arrive in JSON, as the live harness asks for them; `SF_JDBC_FL_RESULTS=ARROW` asks for the driver's default
+Arrow results instead. `SF_LIVE` takes precedence over this switch, and this switch over `FL_JDBC`.
+
 ## Against a live Snowflake account (`SF_LIVE=1`)
 
 ```bash
@@ -104,8 +118,10 @@ replay the same files with runners of their own.
 mvn -pl engine test -Dtest=JsonSuiteTest -Dtestkit.backend=http -Dtestkit.suites=dml,ddl-alter
 ```
 
-`-Dtestkit.backend=engine|jdbc|http|snowflake` picks the transport (`FL_JDBC=1` means `jdbc` and `SF_LIVE=1`
-means `snowflake`); `-Dtestkit.suites=a,b` runs only the suites whose name contains a listed word — a live replay
+`-Dtestkit.backend=engine|jdbc|http|sfjdbc|snowflake` picks the transport (`FL_JDBC=1` means `jdbc`, `SF_JDBC_FL=1`
+means `sfjdbc` and `SF_LIVE=1` means `snowflake`; a case skipped on `http`, or on both `jdbc` and `snowflake`, is
+skipped on `sfjdbc` too);
+`-Dtestkit.suites=a,b` runs only the suites whose name contains a listed word — a live replay
 of the whole corpus takes hours.
 
 Every expectation that a live account can run records what the account answers; a case the account cannot run

@@ -41,7 +41,7 @@
       {"sql": "ALTER SESSION UNSET JSON_INDENT"}
     ]},
     {"name": "unsetting-restores-the-default",
-     "skip": {"backends": ["snowflake"], "reason": "UNSET restores the ENGINE default (compact); live defaults differ"},
+     "skip": {"backends": ["snowflake", "sfjdbc"], "reason": "UNSET restores the ENGINE default (compact); live defaults differ, and a session of Snowflake's driver on Frostlake's endpoint starts from the account's default"},
      "steps": [
       {"sql": "ALTER SESSION SET JSON_INDENT = 2"},
       {"sql": "SELECT ARRAY_CONSTRUCT('a')", "expect": {"value": "[\n  \"a\"\n]"}},

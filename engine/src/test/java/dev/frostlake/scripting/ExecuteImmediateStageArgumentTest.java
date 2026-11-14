@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 import dev.frostlake.BaseDatabaseTest;
 import dev.frostlake.FrostlakeJdbc;
+import dev.frostlake.SnowflakeJdbcFl;
 import dev.frostlake.storage.ResultSet;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -103,8 +104,8 @@ public class ExecuteImmediateStageArgumentTest extends BaseDatabaseTest {
      */
     @Test
     public void underACountOfZeroEachStatementIsJudgedInItsOwnText() {
-        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled(),
-            "the live and FL-over-JDBC harnesses declare each request's own MULTI_STATEMENT_COUNT");
+        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled() || SnowflakeJdbcFl.enabled(),
+            "the driver harnesses declare each request's own MULTI_STATEMENT_COUNT");
         engine.execute("ALTER SESSION SET MULTI_STATEMENT_COUNT = 0");
         try {
             final String second = refusal(

@@ -39,7 +39,7 @@ public class FloatColumnReadsTest extends BaseJdbcTest {
 
     @Test
     public void getBigDecimalIsTheDecimalOfTheDoublesText() throws SQLException {
-        FloatColumnChecks.decimalReads(connection, isLiveSnowflake());
+        FloatColumnChecks.decimalReads(connection, isSnowflakeDriver());
     }
 
     @Test

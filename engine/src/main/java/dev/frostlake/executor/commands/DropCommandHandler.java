@@ -26,6 +26,7 @@ import dev.frostlake.executor.StatementErrors;
 import dev.frostlake.executor.StatementTokens;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.DroppedObject;
+import dev.frostlake.metastore.DroppedSessionTable;
 import dev.frostlake.metastore.MaterializedViewValidity;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
@@ -193,13 +194,16 @@ public class DropCommandHandler implements CommandHandler {
      * DROP TABLE does, keeping it for the UNDROP under the key {@code keptOut} notes. Without this the storage entries
      * outlive the drop, so re-creating the same database/schema fails with "Table storage already exists" and a CLONE
      * into the reused name appends to the stale rows instead of replacing them. Buffered writes are discarded so an
-     * uncommitted change from this transaction isn't flushed to now-missing storage at commit.
+     * uncommitted change from this transaction isn't flushed to now-missing storage at commit. The dropping session's
+     * own temporary tables wait aside in {@code ownOut}, their rows with them, and every other session's go.
      */
     private void snapshotAndReleaseStorage(final String databaseName, final Schema schema,
                                            final Map<String, List<Row>> out,
                                            final Map<String, List<Row>> hiddenOut,
-                                           final Map<String, String> keptOut) {
+                                           final Map<String, String> keptOut,
+                                           final List<DroppedSessionTable> ownOut) {
         final StorageEngine storage = queryExecutor.getStorageEngine();
+        ownOut.addAll(TemporaryObjects.setOwnSessionTablesAside(schema, storage, databaseName));
         TemporaryObjects.releaseSessionTables(schema, storage, databaseName);
         for (final Table table : schema.getTables()) {
             final String fqn = QualifiedName.key(databaseName, schema.getName(), table.getName());
@@ -478,14 +482,17 @@ public class DropCommandHandler implements CommandHandler {
                         final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
                         final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
                         final Map<String, String> kept = new LinkedHashMap<>();
+                        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
                         for (final Schema droppedSchema : droppedDb.getAllSchemas()) {
-                            snapshotAndReleaseStorage(dbName, droppedSchema, tableRows, hiddenTableRows, kept);
+                            snapshotAndReleaseStorage(dbName, droppedSchema, tableRows, hiddenTableRows, kept,
+                                ownTemporary);
                         }
                         // Its tables' and stages' files wait for an UNDROP under a token of the version's own.
                         dropped = new DroppedObject(droppedDb, tableRows, hiddenTableRows,
                             RetentionChain.effectiveDays(droppedDb, null, null),
                             StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
                         keepStorages(dropped, kept);
+                        dropped.keepSessionTables(ownTemporary);
                         catalog.recordDropped("DATABASE:" + dbName, dropped);
                     }
                     catalog.dropDatabase(dbName, false);
@@ -532,12 +539,15 @@ public class DropCommandHandler implements CommandHandler {
                         final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
                         final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
                         final Map<String, String> kept = new LinkedHashMap<>();
-                        snapshotAndReleaseStorage(snapDbName, snapSchema, tableRows, hiddenTableRows, kept);
+                        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+                        snapshotAndReleaseStorage(snapDbName, snapSchema, tableRows, hiddenTableRows, kept,
+                            ownTemporary);
                         // Its tables' and stages' files wait for an UNDROP under a token of the version's own.
                         dropped = new DroppedObject(snapSchema, tableRows, hiddenTableRows,
                             RetentionChain.effectiveDays(snapDb, snapSchema, null),
                             StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
                         keepStorages(dropped, kept);
+                        dropped.keepSessionTables(ownTemporary);
                         catalog.recordDropped(droppedKey, dropped);
                     }
                     // DROP SCHEMA … CASCADE also drops the objects the schema still contains; without it

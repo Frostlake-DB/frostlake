@@ -572,8 +572,10 @@ public final class JdbcMarshaling {
      * binds the value's text — {@code setObject(1, 5, Types.VARCHAR)} is the text {@code '5'} — and a whole-number or
      * DECIMAL type its number, from a String too — {@code setObject(1, "5", Types.INTEGER)} is 5. A DECIMAL or NUMERIC
      * scale moves the number to that scale, refusing one it would have to round ({@code 7.25} at scale 1), as the
-     * account's driver fails there. A Time binds at its clock in UTC whatever the type (see {@link #timeAtUtc}); any
-     * other type, and a String that spells no number, bind as given.
+     * account's driver fails there. A FLOAT or DOUBLE type binds the number's double, a FLOAT however it was
+     * given: {@code setObject(1, new BigDecimal("7.25"), Types.DOUBLE)} is FLOAT[DOUBLE]. A Time binds at its clock
+     * in UTC whatever the type (see {@link #timeAtUtc}); any other type, and a String that spells no number, bind as
+     * given.
      *
      * @param x             the value
      * @param targetSqlType the {@link Types} code the value is bound as
@@ -590,6 +592,10 @@ public final class JdbcMarshaling {
         }
         if (isTextType(targetSqlType)) {
             return x instanceof BigDecimal ? ((BigDecimal) x).toPlainString() : String.valueOf(x);
+        }
+        if (isApproximateType(targetSqlType)) {
+            final BigDecimal approximated = numberOf(x);
+            return approximated == null ? x : Double.valueOf(approximated.doubleValue());
         }
         if (!isNumberType(targetSqlType)) {
             return x;
@@ -612,6 +618,11 @@ public final class JdbcMarshaling {
     private static boolean isTextType(final int type) {
         return type == Types.CHAR || type == Types.VARCHAR || type == Types.LONGVARCHAR || type == Types.NCHAR
             || type == Types.NVARCHAR || type == Types.LONGNVARCHAR;
+    }
+
+    /** Whether a {@link Types} code names an approximate number, which the account's driver binds as REAL. */
+    private static boolean isApproximateType(final int type) {
+        return type == Types.FLOAT || type == Types.DOUBLE;
     }
 
     /** Whether a {@link Types} code names a whole number or a DECIMAL. */

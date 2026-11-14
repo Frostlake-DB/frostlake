@@ -366,7 +366,7 @@ ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its c
 
 | Endpoint | What it does |
 |---|---|
-| `POST /session/v1/login-request` | Opens a session; its token is the session's id. Answers the session parameters the driver renders values by. |
+| `POST /session/v1/login-request` | Opens a session; its token is the session's id. Answers the session parameters the driver renders values by: the output formats and the zone - the session's own, else the account's (UTC here) - the account's flags for reading dates and timestamps in that zone, and its result size limits (128 MB), which `getMaxCharLiteralLength` and `getMaxFieldSize` answer. |
 | `POST /queries/v1/query-request` | Runs a statement in the session the token names, its bindings written in, and answers its result: each column's type, and the rows as an Arrow stream or as JSON cells in the driver's internal form. A refusal carries its SQLSTATE and vendor code. |
 | `GET /queries/{id}/result` | One statement's result of a text of several (the driver asks for those with `MULTI_STATEMENT_COUNT`). |
 | `GET /monitoring/queries/{id}` | A query's status, read from the query history: RUNNING, SUCCESS, or FAILED_WITH_ERROR with its error (the driver's `getQueryStatus`, and what an asynchronous statement and a statement of several are followed by). |
@@ -400,8 +400,17 @@ it stands, `Bind variable ? not set.`. The batch of any other statement runs row
 PUT and GET are carried out by the driver itself: the server answers the statement with the transfer - the files, and
 the stage's own directory on this machine as the driver's local-filesystem stage type - so the driver writes a PUT's
 files into the directory the engine stages them in, compressed as it compresses them, copies a GET's files out of it,
-and builds the result rows itself, as it does against the account. The client and the server have to share one file
-system.
+and builds the result rows itself, as it does against the account, the account's `encryption` column among them. The
+client and the server have to share one file system. The files move unencrypted, so the driver leaves `encryption`
+empty where the account's reads `ENCRYPTED` (PUT) or `DECRYPTED` (GET); and as against a local stage, the driver skips
+a GET whose local copy already matches, and names a stage file that other names continue (`dir` beside `dir/g`) by its
+place in the stage's directory.
+
+Each answer carries the statement type the driver tells a result set from an update count by, so `execute()` answers
+as against the account: rows for a query, SHOW, DESCRIBE, CALL, LIST, GET, PUT and REMOVE, an update count for DML,
+COPY and every other statement. An EXECUTE IMMEDIATE answers as the statement its text ran, and one of several
+statements, in a request that allows several, hands back each statement's answer; a `->>` chain answers as its last
+statement. `setMaxRows` bounds the rows a statement hands back, as the driver asks for them with each statement.
 
 `executeAsyncQuery` is answered at once with the query ID the statement runs under (code 333334); the statement runs
 on the server, and the driver follows it by its ID - `getQueryStatus`, and reading the result set, which waits for the

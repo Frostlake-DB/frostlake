@@ -113,7 +113,9 @@ so nothing a failing case leaves behind reaches the next case — and reports `S
 Attached to a running server with `-Dtestkit.url`, the replay gets only a new session of that server, which keeps
 just the session's state apart. A replay that passes is a `FAIL`,
 `unexpected pass on <backend>: remove the skip ("<reason>")`: the divergence the skip recorded is gone. A skip on
-`snowflake` is never replayed — a live replay costs warehouse time and can leave account state.
+`snowflake` is never replayed — a live replay costs warehouse time and can leave account state. The `sfjdbc`
+backend — Snowflake's driver on Frostlake's endpoint — takes as its own, without a replay, a skip on `http` (the
+engine answers it as over HTTP) and one on both `jdbc` and `snowflake` (the driver reads it as over JDBC).
 
 ## Writing a runner in another language (drivers: js, go, php, rust)
 

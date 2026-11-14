@@ -21,6 +21,8 @@ import dev.frostlake.storage.Row;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +74,9 @@ public class DroppedObject {
      * version a snapshot restored without its storage. The engine's own, as {@link #storageSetAside} is.
      */
     private final Map<String, String> keptStorage = new LinkedHashMap<>();
+
+    /** The dropping session's own temporary tables, which an UNDROP in that session brings back with the version. */
+    private final List<DroppedSessionTable> sessionTables = new ArrayList<>();
 
     /**
      * A dropped table (or another object that holds no rows of its own, with null rows).
@@ -291,5 +296,23 @@ public class DroppedObject {
         synchronized (keptStorage) {
             return new LinkedHashMap<>(keptStorage);
         }
+    }
+
+    /**
+     * Keep the dropping session's own temporary tables with this version.
+     *
+     * @param tables the tables, set aside
+     */
+    public void keepSessionTables(final List<DroppedSessionTable> tables) {
+        sessionTables.addAll(tables);
+    }
+
+    /**
+     * The dropping session's own temporary tables kept with this version.
+     *
+     * @return the tables
+     */
+    public List<DroppedSessionTable> getSessionTables() {
+        return Collections.unmodifiableList(sessionTables);
     }
 }

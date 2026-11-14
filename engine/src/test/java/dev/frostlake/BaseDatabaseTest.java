@@ -41,6 +41,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * flipped by a switch, to confirm Frostlake and Snowflake agree. In live mode {@code test_db} is
  * recreated on the account before each test for isolation. A statement that would change the account's roles, users
  * or grants is not sent there, and the test that sends one is skipped (see {@link LiveAccountStatements}).
+ *
+ * <p>With {@code SF_JDBC_FL=1} (see {@link SnowflakeJdbcFl}) the SQL travels Snowflake's own JDBC driver to an
+ * endpoint serving the test's engine, and with {@code FL_JDBC=1} Frostlake's own driver (see {@link FrostlakeJdbc}).
  */
 @ExtendWith(LiveHeldBackFailures.class)
 public abstract class BaseDatabaseTest {
@@ -80,6 +83,11 @@ public abstract class BaseDatabaseTest {
             }
             // Everything the TEST creates from here on is the test's to clean up, not the harness's.
             LiveAccountObjects.beginTest();
+        } else if (SnowflakeJdbcFl.enabled()) {
+            // SF_JDBC_FL=1: every statement travels Snowflake's own JDBC driver to an endpoint serving the engine.
+            engine = new SnowflakeJdbcFlEngine();
+            enableLocalStageUrls(engine);
+            createTestContext("CREATE DATABASE test_db");
         } else if (FrostlakeJdbc.enabled()) {
             // FL_JDBC=1: same suite, but every statement detours through the direct JDBC driver.
             engine = new FrostlakeJdbcEngine();
@@ -106,6 +114,23 @@ public abstract class BaseDatabaseTest {
     /** Whether this run targets live Snowflake — for tests that must skip engine-internal checks there. */
     protected static boolean isLiveSnowflake() {
         return LiveSnowflake.enabled();
+    }
+
+    /**
+     * Whether the SQL travels Snowflake's own driver — to a live account, or with {@code SF_JDBC_FL=1} to Frostlake's
+     * endpoint — whose results the harness reads the account's way, a semi-structured value re-serialised compactly.
+     */
+    protected static boolean readsThroughSnowflakeDriver() {
+        return LiveSnowflake.enabled() || SnowflakeJdbcFl.enabled();
+    }
+
+    /**
+     * Whether the session the SQL runs in lives on the far side of a driver — on a live account, or with
+     * {@code SF_JDBC_FL=1} in Frostlake's endpoint — so that its parameters and the plan of its last statement are out
+     * of reach of the engine's own accessors.
+     */
+    protected static boolean sessionLivesElsewhere() {
+        return LiveSnowflake.enabled() || SnowflakeJdbcFl.enabled();
     }
 
     /**

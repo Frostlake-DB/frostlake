@@ -69,6 +69,8 @@ import java.util.Locale;
 final class SnowflakeRowset {
 
     private static final int ZONE_INDEX_BASE = 1440;
+    /** The digits a DECFLOAT column is described with. */
+    private static final int DECFLOAT_DIGITS = 38;
 
     private SnowflakeRowset() {
     }
@@ -193,6 +195,10 @@ final class SnowflakeRowset {
         if ("fixed".equals(kind)) {
             node.put("precision", ((NumericType) type).getPrecision());
             node.put("scale", ((NumericType) type).getScale());
+        } else if ("decfloat".equals(kind)) {
+            // A DECFLOAT is described as 38 digits at scale 0, which the driver reads as a display size of 40.
+            node.put("precision", DECFLOAT_DIGITS);
+            node.put("scale", 0);
         } else if (type instanceof DateTimeType && !"date".equals(kind)) {
             node.put("precision", 0);
             node.put("scale", ((DateTimeType) type).getPrecision());
@@ -293,8 +299,22 @@ final class SnowflakeRowset {
             case "timestamp_tz":
                 return timestampText(cell, kind, scaleOf(type), wire);
             default:
-                return wire.toString();
+                return textOf(cell, wire, kind);
         }
+    }
+
+    /**
+     * A cell the driver reads as text, as the wire writes it, a decimal a semi-structured column holds with its digits
+     * in place - {@code 0.0000001}, never BigDecimal's {@code 1E-7} - as the account's text has them.
+     *
+     * @param cell the cell, not null
+     * @param wire the cell as the wire writes it, not null
+     * @param kind the column's kind
+     * @return its text
+     */
+    static String textOf(final Object cell, final Object wire, final String kind) {
+        final boolean semiStructured = "variant".equals(kind) || "object".equals(kind) || "array".equals(kind);
+        return semiStructured && cell instanceof BigDecimal ? ((BigDecimal) cell).toPlainString() : wire.toString();
     }
 
     private static int scaleOf(final DataType type) {

@@ -103,7 +103,7 @@ public class DirectJdbcSurfaceTest extends BaseJdbcTest {
 
     @Test
     public void directCallableNumericGetterChain() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), CALLABLE_GETTERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), CALLABLE_GETTERS);
         statement.execute("""
             CREATE OR REPLACE PROCEDURE D_ADD_ONE(N FLOAT) RETURNS FLOAT LANGUAGE SQL AS
             $$ BEGIN RETURN N + 1; END $$
@@ -132,7 +132,7 @@ public class DirectJdbcSurfaceTest extends BaseJdbcTest {
 
     @Test
     public void directCallableVarcharBooleanNullAndTemporal() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), CALLABLE_GETTERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), CALLABLE_GETTERS);
         statement.execute("""
             CREATE OR REPLACE PROCEDURE D_TAG() RETURNS VARCHAR LANGUAGE SQL AS
             $$ BEGIN RETURN 'frost'; END $$

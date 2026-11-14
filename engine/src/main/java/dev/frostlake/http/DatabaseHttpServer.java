@@ -16,6 +16,7 @@
 
 package dev.frostlake.http;
 
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
@@ -64,6 +65,8 @@ public class DatabaseHttpServer {
     private final ConcurrentDatabaseEngine engine;
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String NO_DELAY_PROPERTY = "sun.net.httpserver.nodelay";
+    /** The longest a stop waits for the requests in flight to be answered. */
+    private static final long STOP_GRACE_MILLIS = 3000;
     private final int port;
     private final EngineConfig config;
     private final RestResults restResults;
@@ -72,6 +75,8 @@ public class DatabaseHttpServer {
     private final HttpsServer tlsServer;
     /** The threads that serve requests, the HTTPS listener's included, shut down when the server stops. */
     private final List<ExecutorService> executors = new ArrayList<>();
+    /** The requests the listeners are answering, which a stop lets finish. */
+    private final InFlightRequests inFlight = new InFlightRequests();
 
     public DatabaseHttpServer(final int port) throws IOException {
         this(createConfigWithPort(port));
@@ -166,23 +171,26 @@ public class DatabaseHttpServer {
     /**
      * Registers every endpoint on a listener. Each handler is wrapped, so a fault its own handling does not answer is
      * still answered instead of leaving the client to time out, and every request passes the guard first: the host it
-     * names, the origin it comes from, and for the SQL endpoints the kind of body it carries (see RequestGuard).
+     * names, the origin it comes from, and for the SQL endpoints the kind of body it carries (see RequestGuard). Each
+     * request is counted while it runs, which a stop waits for.
      */
     private void registerContexts(final HttpServer target, final String host, final EngineConfig config) {
         final RequestGuard guard = new RequestGuard(target.getAddress().getAddress(), host,
             config.getCorsAllowedOrigins());
-        target.createContext("/api/execute", new ErrorAnsweringHandler(new ExecuteSqlHandler(engine), guard, true));
-        target.createContext("/api/health", new ErrorAnsweringHandler(new HealthCheckHandler(engine), guard, false));
-        target.createContext("/api/sessions", new ErrorAnsweringHandler(new SessionInfoHandler(engine), guard, true));
-        target.createContext(RestApiHandler.CONTEXT,
-            new ErrorAnsweringHandler(new RestApiHandler(engine, restResults), guard, false));
-        target.createContext(PresignedUrls.CONTEXT, new ErrorAnsweringHandler(new PresignedFileHandler(), guard,
-            false));
-        target.createContext(BuildStageFileUrl.CONTEXT, new ErrorAnsweringHandler(new StageFileUrlHandler(engine),
-            guard, false));
+        target.createContext("/api/execute", counted(new ExecuteSqlHandler(engine), guard, true));
+        target.createContext("/api/health", counted(new HealthCheckHandler(engine), guard, false));
+        target.createContext("/api/sessions", counted(new SessionInfoHandler(engine), guard, true));
+        target.createContext(RestApiHandler.CONTEXT, counted(new RestApiHandler(engine, restResults), guard, false));
+        target.createContext(PresignedUrls.CONTEXT, counted(new PresignedFileHandler(), guard, false));
+        target.createContext(BuildStageFileUrl.CONTEXT, counted(new StageFileUrlHandler(engine), guard, false));
         for (final String context : SnowflakeProtocolHandler.CONTEXTS) {
-            target.createContext(context, new ErrorAnsweringHandler(snowflake, guard, true));
+            target.createContext(context, counted(snowflake, guard, true));
         }
+    }
+
+    /** A handler wrapped to answer its faults and pass the guard (see ErrorAnsweringHandler), and counted. */
+    private HttpHandler counted(final HttpHandler handler, final RequestGuard guard, final boolean jsonBody) {
+        return new CountedHandler(new ErrorAnsweringHandler(handler, guard, jsonBody), inFlight);
     }
 
     /** The HTTPS listener's TLS context, from the keystore http.tls.keystore names. */
@@ -241,13 +249,15 @@ public class DatabaseHttpServer {
     }
 
     /**
-     * Stop the HTTP server
+     * Stop the HTTP server: the requests in flight are answered first, for at most three seconds, and the listeners
+     * then stop at once, so a server with none open stops without waiting.
      */
     public void stop() {
         logger.info("Stopping Frostlake HTTP server");
-        server.stop(3);
+        inFlight.awaitNone(STOP_GRACE_MILLIS);
+        server.stop(0);
         if (tlsServer != null) {
-            tlsServer.stop(3);
+            tlsServer.stop(0);
         }
         // A listener's stop leaves the threads it was given; ended here, they no longer keep the JVM alive.
         for (final ExecutorService pool : executors) {

@@ -34,6 +34,7 @@ import dev.frostlake.executor.StatementClock;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.CreationGrants;
 import dev.frostlake.metastore.DroppedObject;
+import dev.frostlake.metastore.DroppedSessionTable;
 import dev.frostlake.metastore.FutureGrants;
 import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.MaterializedViewValidity;
@@ -41,6 +42,7 @@ import dev.frostlake.metastore.NameTakenException;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SqlObject;
+import dev.frostlake.metastore.StatementSession;
 import dev.frostlake.metastore.StreamSources;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.model.ContainerType;
@@ -1734,6 +1736,13 @@ public class DDLCommandHandler implements CommandHandler {
                 throw new RuntimeException("Table " + tableName + " did not exist or was purged.");
             }
             final Table table = (Table) dropped.getObject();
+            if (table.isSessionTemporary() && schema.tableExact(tableName) != null) {
+                // A session's temporary table comes back only to a name no table holds, a permanent one it hid
+                // included, as any table does (live-verified): the dropped version stays for a later UNDROP.
+                catalog.recordDropped("TABLE:" + fqName, dropped);
+                throw new RuntimeException(SqlCompilationError.of(
+                    "Object '" + SqlIdentifiers.spellCanonical(tableName) + "' already exists."));
+            }
             try {
                 schema.addTable(table);
             } catch (final RuntimeException taken) {
@@ -1893,6 +1902,29 @@ public class DDLCommandHandler implements CommandHandler {
                 refill(storage.getShadowedTableStorage(fqn), hidden,
                     dropped.getHiddenTableRows() == null ? null : dropped.getHiddenTableRows().get(fqn));
             }
+            restoreOwnSessionTables(databaseName, schema, dropped);
+        }
+    }
+
+    /**
+     * Bring the session's own temporary tables that waited with an UNDROPped schema or database back into it, rows and
+     * all, where the session that dropped them restores it: no other session reaches them (live-verified: a session's
+     * temporary table is back after DROP SCHEMA and UNDROP SCHEMA).
+     */
+    private void restoreOwnSessionTables(final String databaseName, final Schema schema,
+                                         final DroppedObject dropped) {
+        final Long session = StatementSession.current();
+        if (session == null) {
+            return;
+        }
+        for (final DroppedSessionTable aside : dropped.getSessionTables()) {
+            if (!aside.getSchemaName().equals(schema.getName())
+                    || !session.equals(aside.getTable().getCreatedInSession())) {
+                continue;
+            }
+            schema.addTable(aside.getTable());
+            queryExecutor.getStorageEngine().restoreOwnSessionTable(
+                QualifiedName.key(databaseName, schema.getName(), aside.getTable().getName()), aside.getStorage());
         }
     }
 
