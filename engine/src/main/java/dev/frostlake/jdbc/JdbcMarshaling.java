@@ -357,7 +357,7 @@ public final class JdbcMarshaling {
             return (Timestamp) v;
         }
         if (v instanceof LocalDateTime) {
-            return Timestamp.valueOf((LocalDateTime) v);
+            return Timestamp.valueOf(requireReach((LocalDateTime) v));
         }
         if (v instanceof ZonedDateTime) {
             // The LOCAL part, for the reason the OffsetDateTime branch below gives: a TIMESTAMP_TZ's
@@ -373,7 +373,7 @@ public final class JdbcMarshaling {
             return Timestamp.valueOf(((OffsetDateTime) v).toLocalDateTime());
         }
         if (v instanceof LocalDate) {
-            return Timestamp.valueOf(((LocalDate) v).atStartOfDay());
+            return Timestamp.valueOf(requireReach(((LocalDate) v).atStartOfDay()));
         }
         if (v instanceof LocalTime) {
             // A TIME is read as its time of day on 1970-01-01 (live-verified).
@@ -382,7 +382,7 @@ public final class JdbcMarshaling {
         if (v instanceof java.util.Date) {
             return new Timestamp(((java.util.Date) v).getTime());
         }
-        return Timestamp.valueOf(parseDateTime(v.toString()));
+        return Timestamp.valueOf(requireReach(parseDateTime(v.toString())));
     }
 
     /**
@@ -734,22 +734,44 @@ public final class JdbcMarshaling {
         return read;
     }
 
-    /** The moment, in milliseconds, a wall clock names in the Calendar's zone, counted in the Calendar's calendar. */
+    /**
+     * A wall clock java.sql's Date and Timestamp can hold: one past what their long of milliseconds reaches (about
+     * year 292 million either side) is refused rather than wrapped to another moment.
+     *
+     * @throws ArithmeticException when the wall clock is beyond that reach
+     */
+    private static LocalDateTime requireReach(final LocalDateTime wall) {
+        if (Math.abs((long) wall.getYear()) > 290_000_000L) {
+            wallClockMillis(Calendar.getInstance(), wall);
+        }
+        return wall;
+    }
+
+    /**
+     * The moment, in milliseconds, a wall clock names in the Calendar's zone, counted in the Calendar's calendar.
+     *
+     * @throws ArithmeticException when the moment is beyond what a long of milliseconds reaches (about year 292
+     *                             million either side), where the Calendar would wrap it to another moment
+     */
     static long wallClockMillis(final Calendar cal, final LocalDateTime wall) {
         final Calendar fields = (Calendar) cal.clone();
         fields.clear();
-        if (wall.getYear() <= 0) {
-            fields.set(Calendar.ERA, GregorianCalendar.BC);
-            fields.set(Calendar.YEAR, 1 - wall.getYear());
-        } else {
-            fields.set(Calendar.YEAR, wall.getYear());
-        }
+        final int era = wall.getYear() <= 0 ? GregorianCalendar.BC : GregorianCalendar.AD;
+        final int year = wall.getYear() <= 0 ? 1 - wall.getYear() : wall.getYear();
+        fields.set(Calendar.ERA, era);
+        fields.set(Calendar.YEAR, year);
         fields.set(Calendar.MONTH, wall.getMonthValue() - 1);
         fields.set(Calendar.DAY_OF_MONTH, wall.getDayOfMonth());
         fields.set(Calendar.HOUR_OF_DAY, wall.getHour());
         fields.set(Calendar.MINUTE, wall.getMinute());
         fields.set(Calendar.SECOND, wall.getSecond());
-        return fields.getTimeInMillis();
+        final long millis = fields.getTimeInMillis();
+        final Calendar back = (Calendar) cal.clone();
+        back.setTimeInMillis(millis);
+        if (back.get(Calendar.ERA) != era || back.get(Calendar.YEAR) != year) {
+            throw new ArithmeticException("beyond the reach of a millisecond count: " + wall);
+        }
+        return millis;
     }
 
     /** The wall clock a moment shows in the Calendar's zone, read in the Calendar's own calendar, nanoseconds given. */
@@ -803,6 +825,7 @@ public final class JdbcMarshaling {
             return (Date) v;
         }
         if (v instanceof LocalDate) {
+            requireReach(((LocalDate) v).atStartOfDay());
             return Date.valueOf((LocalDate) v);
         }
         if (v instanceof LocalDateTime) {
@@ -814,7 +837,9 @@ public final class JdbcMarshaling {
         if (v instanceof java.util.Date) {
             return new Date(((java.util.Date) v).getTime());
         }
-        return Date.valueOf(parseDate(v.toString()));
+        final LocalDate parsed = parseDate(v.toString());
+        requireReach(parsed.atStartOfDay());
+        return Date.valueOf(parsed);
     }
 
     /**

@@ -50,6 +50,11 @@ As against Snowflake, the driver reads its default Arrow results on JDK 16+ only
 `--add-opens=java.base/java.nio=ALL-UNNAMED`; append `&JDBC_QUERY_RESULT_FORMAT=JSON` to the URL to do without.
 Details in [`docs/http-api.md`](docs/http-api.md#the-snowflake-jdbc-driver).
 
+A driver that can carry its requests through an HTTP transport needs no server at all: with the optional
+`frostlake-sf-transport` module on the class path, `jdbc:snowflake://mydb/?account=frostlake&httpTransport=frostlake`
+reaches the engine `jdbc:frostlake:direct:mydb` connections share, in process. No released Snowflake driver offers the
+transport yet - see [`docs/http-api.md`](docs/http-api.md#without-a-socket).
+
 ## Snowflake's Python connector and Snowflake CLI
 
 Snowflake's Python connector (`snowflake-connector-python`) and Snowflake CLI (`snow`) connect to the same HTTP

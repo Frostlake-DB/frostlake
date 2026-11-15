@@ -144,6 +144,31 @@ statement escape or catches a pure-Python exception, and a JavaScript handler un
 Evaluating both languages in one polyglot context, or a nested Python evaluation on a thread of its own with the
 session's state carried over, would lift it; neither is done, since both reach deep into how a routine runs.
 
+## Python routines on one thread share one interpreter — module state can cross them, by design
+
+Python keeps one interpreter per thread (a GraalPy context, or a CPython worker process with `python.runtime`),
+and every engine and every routine that runs on that thread uses it. A routine's own names never reach another:
+each call starts with an empty module namespace. When an outermost statement ends, the runtime puts back what
+the interpreter shares between calls: the built-in names, the environment, the working directory, the decimal
+context, `sys.path`, `sys.meta_path`, `sys.path_hooks`, the importer cache, the recursion limit, its own modules
+and classes, and the members a routine replaced or deleted on the standard-library modules imported by then.
+
+Some state is not put back, and the next statement's routines on that thread see it, whichever engine runs them:
+
+- a member a routine **adds** to a module (`json.SECRET = 1` after `import json`), and any change to a module
+  first imported after the runtime started, such as a package's;
+- state a module keeps **inside its objects**: `random.seed(…)`, a `logging` handler, a `functools.lru_cache`'s
+  entries, a package's own caches and registries;
+- within **one statement**, all of the above and the built-in names too: the routines of `SELECT tamper(),
+  peek()` see a built-in that `tamper` added.
+
+On the account, no routine's state reaches another. Each way of closing the gap costs too much. Importing modules
+again per statement is ruled out because numpy and pandas cannot be imported twice in one interpreter. Comparing
+every module's members on every call is too slow. An interpreter per engine takes over a second to build and its
+own memory per thread, and it still leaves the within-engine cases. An interpreter per statement pays that build on
+every Python statement. So the one shared interpreter is kept. A handler that needs a clean module should not
+change shared modules, or should put back what it changed before it returns.
+
 ## Task notification and run properties — kept and shown, not acted on
 
 A task's SUCCESS_INTEGRATION and ERROR_INTEGRATION are kept and shown, but no notification is sent: no message

@@ -20,12 +20,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
 /**
  * The bookkeeping of the privileges a grantee holds on objects (see {@link GrantLedger}): privileges keyed
- * {@code KIND:NAME}, and grantors, grant times and grant options keyed {@code KIND:NAME:PRIVILEGE}.
+ * {@code KIND:NAME}, and grantors, grant times, grant options and the other grantors' instances keyed
+ * {@code KIND:NAME:PRIVILEGE}.
  */
 final class GrantKeys {
 
@@ -35,7 +37,7 @@ final class GrantKeys {
     /** Moves or copies the privileges a {@link GrantRemap} reaches, with what is recorded about each. */
     static void remap(final Map<String, Set<Privilege>> privileges, final Map<String, Map<String, Set<Privilege>>> columns,
                       final Map<String, String> grantors, final Map<String, Instant> times, final Set<String> options,
-                      final GrantRemap remap) {
+                      final Map<String, Map<String, GrantInstance>> others, final GrantRemap remap) {
         for (final Map.Entry<String, Set<Privilege>> entry : new ArrayList<>(privileges.entrySet())) {
             final String key = entry.getKey();
             final int split = key.indexOf(':');
@@ -62,6 +64,7 @@ final class GrantKeys {
                 final String to = newKey + ":" + privilege.name();
                 carry(grantors, from, to, remap.copies());
                 carry(times, from, to, remap.copies());
+                carryInstances(others, from, to, remap.copies());
                 if (options != null && options.contains(from)) {
                     options.add(to);
                     if (!remap.copies()) {
@@ -109,7 +112,8 @@ final class GrantKeys {
     /** Takes back the privileges held on one object: all of them, or only OWNERSHIP. */
     static void purge(final Map<String, Set<Privilege>> privileges, final Map<String, Map<String, Set<Privilege>>> columns,
                       final Map<String, String> grantors, final Map<String, Instant> times, final Set<String> options,
-                      final String key, final boolean ownershipOnly) {
+                      final Map<String, Map<String, GrantInstance>> others, final String key,
+                      final boolean ownershipOnly) {
         final Set<Privilege> held = privileges.get(key);
         if (held != null) {
             for (final Privilege privilege : new ArrayList<>(held)) {
@@ -125,6 +129,7 @@ final class GrantKeys {
                 if (options != null) {
                     options.remove(withPrivilege);
                 }
+                others.remove(withPrivilege);
             }
             if (held.isEmpty()) {
                 privileges.remove(key);
@@ -133,6 +138,25 @@ final class GrantKeys {
         if (!ownershipOnly) {
             columns.remove(key);
         }
+    }
+
+    /** Moves or copies the other grantors' instances of one privilege; a copy takes copies of them. */
+    private static void carryInstances(final Map<String, Map<String, GrantInstance>> others, final String from,
+                                       final String to, final boolean copy) {
+        final Map<String, GrantInstance> held = others.get(from);
+        if (held == null) {
+            return;
+        }
+        if (!copy) {
+            others.remove(from);
+            others.put(to, held);
+            return;
+        }
+        final Map<String, GrantInstance> copied = new LinkedHashMap<>();
+        for (final Map.Entry<String, GrantInstance> instance : held.entrySet()) {
+            copied.put(instance.getKey(), instance.getValue().copy());
+        }
+        others.put(to, copied);
     }
 
     private static <V> void carry(final Map<String, V> recorded, final String from, final String to, final boolean copy) {

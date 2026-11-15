@@ -244,10 +244,12 @@ public class SecurityManager {
     }
 
     /**
-     * The role a grant passed on through a grant option is recorded in the name of (documented): the session's
-     * primary role where it, or a role beneath it, holds the privilege WITH GRANT OPTION, else the first secondary
-     * role in use, by name, that does. Grants the session decides without an option - the roles that decide every
-     * grant, the object's owner, a managed schema's owner - are recorded in the owner's name, and answer null here.
+     * The role a grant passed on through a grant option is recorded in the name of: the role that holds the
+     * privilege WITH GRANT OPTION, found under the session's primary role first - the primary role itself, else the
+     * first role beneath it by name that holds it - then under each secondary role in use, by name (live-verified: a
+     * primary role inheriting the option from another role records that role, and so does a secondary role holding
+     * it). Grants the session decides without an option - the roles that decide every grant, the object's owner, a
+     * managed schema's owner - are recorded in the owner's name, and answer null here.
      *
      * @param objectType the object's kind as privileges record it
      * @param objectName the object's name, as privileges record it or as the statement wrote it
@@ -282,13 +284,49 @@ public class SecurityManager {
             candidates.addAll(secondary);
         }
         for (final String candidate : candidates) {
+            String found = null;
             for (final Role holder : holdersUnder(rolesUnder(candidate))) {
-                if (holder.hasGrantOption(objectType, recorded, named)) {
+                if (!holder.hasGrantOption(objectType, recorded, named)) {
+                    continue;
+                }
+                // A database role holding the option stands for the account role it is granted to.
+                final String name = holder instanceof DatabaseRole ? candidate : holder.getName();
+                if (name.equals(candidate)) {
                     return candidate;
                 }
+                if (found == null || name.compareTo(found) < 0) {
+                    found = name;
+                }
+            }
+            if (found != null) {
+                return found;
             }
         }
         return null;
+    }
+
+    /**
+     * Whether the session may grant one privilege on one object: it decides every grant, owns the object (in a
+     * schema with managed access, the schema), or holds the privilege WITH GRANT OPTION. A bulk grant passes over
+     * the objects this answers false for.
+     *
+     * @param objectType the object's kind as privileges record it
+     * @param objectName the object's name, as privileges record it
+     * @param owner      the role that owns the object, or null when none is recorded
+     * @param privilege  the privilege granted
+     * @return whether the grant may be made
+     */
+    public boolean mayGrant(final String objectType, final String objectName, final String owner,
+                            final String privilege) {
+        if (decidesGrants()) {
+            return true;
+        }
+        final Schema managed = GrantNames.managedSchema(catalog, objectType, objectName);
+        if (managed != null) {
+            return owns(managed.getOwner(), "SCHEMA", QualifiedName.join(managed.getDatabaseName(), managed.getName()));
+        }
+        return owns(owner, objectType, objectName)
+            || holdsGrantOptions(objectType, objectName, Collections.singletonList(privilege));
     }
 
     /**

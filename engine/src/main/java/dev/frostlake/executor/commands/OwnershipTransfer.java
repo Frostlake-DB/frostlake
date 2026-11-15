@@ -253,7 +253,7 @@ final class OwnershipTransfer {
                     if (privilege == Privilege.OWNERSHIP || revoke) {
                         holder.revokePrivilege(objectType, spelling, privilege);
                     } else {
-                        holder.grantPrivilege(objectType, spelling, privilege, owner);
+                        holder.regrantAs(objectType, spelling, privilege, owner);
                     }
                 }
             }
@@ -264,7 +264,7 @@ final class OwnershipTransfer {
                     if (privilege == Privilege.OWNERSHIP || revoke) {
                         user.revokePrivilege(objectType, spelling, privilege);
                     } else {
-                        user.grantPrivilege(objectType, spelling, privilege, owner);
+                        user.regrantAs(objectType, spelling, privilege, owner);
                     }
                 }
             }

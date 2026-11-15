@@ -465,6 +465,31 @@ try (SnowflakeEndpoint endpoint = SnowflakeEndpoint.start("mydb")) {   // the en
 `start(EngineConfig)` runs an engine of its own on that configuration's settings instead, and `start(DatabaseEngine)`
 serves any engine already running in the JVM. `close()` stops the server; a direct name's engine stays with its name.
 
+### Without a socket
+
+`dev.frostlake.http.SnowflakeDirectEndpoint` answers the same endpoints in process: a request handed over as its URI,
+headers and body is answered as the server answers it, and no port is opened. `SnowflakeDirectEndpoint.direct("mydb")`
+is the endpoint of the engine `jdbc:frostlake:direct:mydb` connections share - one per name, so every request of a
+session reaches the session - and `SnowflakeDirectEndpoint.of(engine)` is a new one over any engine, which its caller
+closes. `close()` ends the endpoint's sessions and leaves the engine running.
+
+A Snowflake JDBC driver that can carry its requests through an HTTP transport (the `httpTransport` connection property
+and the `net.snowflake.client.api.http.HttpTransport` interface) reaches an engine this way. The optional module
+`dev.frostlake:frostlake-sf-transport` is that transport, registered for `ServiceLoader` under the name `frostlake`;
+with it on the class path, a URL alone reaches the direct engine its host names:
+
+```
+jdbc:snowflake://mydb/?account=frostlake&httpTransport=frostlake&disablePlatformDetection=true
+```
+
+The host keeps its case, and nothing resolves or connects to it. `disablePlatformDetection=true` stops the driver from
+probing cloud metadata addresses at login, which it does outside the transport. A transport made over one engine,
+`new FrostlakeHttpTransport(engine)` passed in the connection properties under `httpTransport`, answers for that engine
+whatever host the URL names.
+
+No released Snowflake JDBC driver offers the HTTP transport yet, so the module is built only on request, against a
+driver build that does: `mvn -Psf-transport -Dsnowflake.jdbc.transport.version=<version> install`. It is not published.
+
 ### HTTPS
 
 `http.tls.port` opens an HTTPS listener beside the plain one, serving every endpoint the plain one serves, with the

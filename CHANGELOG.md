@@ -12,6 +12,10 @@ for exactly that reason.
 
 ### Now refused (SQL that earlier versions accepted)
 
+- **The JDBC driver refuses a DATE past what a java.sql.Date reaches** (about year 292,278,994 either side):
+  `getDate`, `getTimestamp` and `getObject` raise `The value 999999999-12-31 is beyond the reach of a java.sql.Date;
+  read it with getString.` (SQLSTATE 22008), where they handed back another date without a word. `getString` reads
+  such a date as before. Only Frostlake keeps such a date; the account wraps it on the server.
 - **A JAR handler reads Snowpark only where its routine's PACKAGES name Snowpark** (live-verified): a function or
   table function that IMPORTS a jar whose handler reads a Snowpark class, with no `com.snowflake:snowpark` package,
   is created and then fails when called, with the account's report of a `java.lang.NoClassDefFoundError` caused by
@@ -20,7 +24,33 @@ for exactly that reason.
   body that uses a class of an imported jar built for Java 17 is refused when the routine is created, `cannot access
   Helper` with `class file has wrong version 61.0, should be 55.0`, at the body's first use of the class.
 
+### Added
+
+- **The Snowflake endpoints answer in process** (`dev.frostlake.http.SnowflakeDirectEndpoint`): a request handed over
+  as its URI, headers and body is answered as the HTTP server answers it, with no port; `direct(name)` serves the
+  engine `jdbc:frostlake:direct:<name>` connections share. The optional module `frostlake-sf-transport` builds on it:
+  an HTTP transport for Snowflake's JDBC driver, registered as `frostlake`, so
+  `jdbc:snowflake://mydb/?account=frostlake&httpTransport=frostlake` reaches that engine without a socket. It needs a
+  driver that offers the HTTP transport, which no release does yet, so the module is built only with `-Psf-transport`
+  and is not published.
+
 ### Fixed
+
+- **A privilege granted to one grantee by two grantors is two grants** (live-verified): each grantor's grant is
+  listed on its own row by SHOW GRANTS and the privilege views, with its own grant option, and a REVOKE takes back
+  only the grants its roles made: every grantor's with MANAGE GRANTS, its own alone for an owner without it. A second
+  grantor's grant used to be folded into the first, so its REVOKE took nothing back. The count a REVOKE reports is of
+  grants, the dependent grants a CASCADE takes included (`2 objects affected` for one grant and the grant made
+  through it).
+- **A REVOKE that meets dependent grants without CASCADE revokes the rest and reports it** (live-verified): `Revoke
+  partially executed: N grant(s) revoked, M grant(s) skipped due to dependent grants and no CASCADE is specified.`
+  (3935 / 23001), where it used to refuse the whole statement with a sentence of its own.
+- **A grant made through a grant option is recorded in the name of the role holding the option** (live-verified): a
+  primary role that inherits the option, or a secondary role that holds it, records that role as `granted_by`, not
+  the primary role.
+- **A grant ON ALL objects passes over the objects the role may not grant on** (live-verified): it grants on the ones
+  it owns or holds the privilege on WITH GRANT OPTION and counts only those, `0 objects affected` when there are none,
+  where it used to refuse the whole statement. A bulk OWNERSHIP grant is still refused.
 
 - **A GENERATOR past 2147483647 rows answers two more reads** (live-verified): a derived table of literals passes the
   rows on to the select counting them, `SELECT COUNT(*) FROM (SELECT 1 AS x FROM TABLE(GENERATOR(ROWCOUNT =>

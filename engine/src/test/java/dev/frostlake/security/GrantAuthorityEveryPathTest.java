@@ -32,10 +32,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Who may grant and revoke, on every form of GRANT and REVOKE, as Snowflake's GRANT and REVOKE pages put it: a
  * privilege on an object is granted by its owner, by a role holding it WITH GRANT OPTION, or by MANAGE GRANTS; a bulk
- * grant asks that of every object it reaches; a future grant and a privilege on the account ask MANAGE GRANTS; a role
- * or a database role is granted by its owner or by MANAGE GRANTS; a REVOKE takes back only the grants its role made
- * unless it holds MANAGE GRANTS. The administrative roles decide every grant. The live account allows no CREATE ROLE,
- * CREATE USER or GRANT, so the rule is the documented one, held by the embedded engine.
+ * grant asks that of every object it reaches and passes over the objects it may not grant on, counting only the
+ * others (live-verified); a bulk OWNERSHIP grant is refused instead; a future grant and a privilege on the account
+ * ask MANAGE GRANTS; a role or a database role is granted by its owner or by MANAGE GRANTS; a REVOKE takes back only
+ * the grants its role made unless it holds MANAGE GRANTS. The administrative roles decide every grant.
  */
 public class GrantAuthorityEveryPathTest {
 
@@ -106,8 +106,10 @@ public class GrantAuthorityEveryPathTest {
         as("uo", "own");
         refused("SELECT * FROM t");
         refused("GRANT SELECT ON TABLE t TO ROLE own");
-        refused("GRANT ALL ON ALL TABLES IN SCHEMA db.public TO ROLE own");
-        refused("GRANT SELECT ON ALL TABLES IN DATABASE db TO ROLE own");
+        assertEquals("Statement executed successfully. 0 objects affected.",
+            status("GRANT ALL ON ALL TABLES IN SCHEMA db.public TO ROLE own"));
+        assertEquals("Statement executed successfully. 0 objects affected.",
+            status("GRANT SELECT ON ALL TABLES IN DATABASE db TO ROLE own"));
         refused("GRANT OWNERSHIP ON ALL TABLES IN SCHEMA db.public TO ROLE own COPY CURRENT GRANTS");
         refused("SELECT * FROM t");
     }
@@ -123,7 +125,11 @@ public class GrantAuthorityEveryPathTest {
         assertEquals("Statement executed successfully. 1 objects affected.",
             status("GRANT SELECT ON ALL TABLES IN SCHEMA db.mine TO ROLE rv"));
         engine.execute("GRANT SELECT ON TABLE db.mine.m TO ROLE rv");
-        refused("GRANT SELECT ON ALL TABLES IN DATABASE db TO ROLE rv");
+        assertEquals("Statement executed successfully. 1 objects affected.",
+            status("GRANT INSERT ON ALL TABLES IN DATABASE db TO ROLE rv"));
+        asSystem();
+        assertEquals("DB.MINE.M", status("SHOW GRANTS TO ROLE rv ->> SELECT LISTAGG(\"name\", ',') FROM $1"
+            + " WHERE \"privilege\" = 'INSERT'"));
     }
 
     @Test

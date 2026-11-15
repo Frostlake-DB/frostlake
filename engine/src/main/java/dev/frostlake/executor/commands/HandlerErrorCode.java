@@ -47,7 +47,7 @@ import dev.frostlake.transaction.TransactionManager;
  * 3320 and dropped 3203 / 42601. A refusal of no known family reads 100351 / P0000.
  * A hybrid table's primary key already held is 200001 / 22000 and a foreign key it breaks 200009 / 22000, and a
  * privilege refusal - an access-control error, {@code Insufficient privileges to operate on …} - 3001 / 42501
- * (documented).
+ * (documented). A REVOKE that skipped grants others depend on, {@code Revoke partially executed: …}, is 3935 / 23001.
  *
  * <p>A client's driver reads the same pairs, and more families besides (live-verified): a missing object
  * 2003 / 42S02 where the sentence calls it an object, a table or a view, 2003 / 02000 where it names any other kind
@@ -213,6 +213,9 @@ final class HandlerErrorCode {
         if (message.startsWith("Cannot apply projection policy on '")
                 && message.endsWith("' because it is used as an argument by one or more policies.")) {
             return new HandlerErrorCode(506002, "23001");
+        }
+        if (message.startsWith("Revoke partially executed: ")) {
+            return new HandlerErrorCode(3935, "23001");
         }
         if (message.contains(SqlAccessControlError.PREFIX) && message.contains(INSUFFICIENT_PRIVILEGES)) {
             return new HandlerErrorCode(3001, "42501");

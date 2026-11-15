@@ -139,36 +139,46 @@ final class SnowflakeProtocolHandler implements HttpHandler {
 
     @Override
     public void handle(final HttpExchange exchange) throws IOException {
-        final String path = exchange.getRequestURI().getPath();
-        final Map<String, String> query = queryParameters(exchange.getRequestURI().getRawQuery());
+        final SnowflakeReply reply = answer(SnowflakeRequest.of(exchange));
+        HttpResponses.send(exchange, reply.status(), reply.json());
+    }
+
+    /**
+     * Answers a request, however it arrived: over a socket (see {@link #handle}) or in process (see
+     * {@link SnowflakeDirectEndpoint}). A fault of the request is answered as the driver reads one.
+     *
+     * @param request the request
+     * @return the status and the JSON document to answer with
+     */
+    SnowflakeReply answer(final SnowflakeRequest request) {
+        final String path = request.path();
+        final Map<String, String> query = queryParameters(request.rawQuery());
         try {
             if ("/session/v1/login-request".equals(path)) {
-                send(exchange, login(readJson(exchange), query));
+                return ok(login(readJson(request), query));
             } else if ("/queries/v1/query-request".equals(path)) {
-                send(exchange, query(exchange, readJson(exchange)));
+                return ok(query(request, readJson(request)));
             } else if ("/session".equals(path) && "true".equalsIgnoreCase(query.get("delete"))) {
-                send(exchange, logout(exchange));
+                return ok(logout(request));
             } else if ("/session/heartbeat".equals(path)) {
-                send(exchange, heartbeat(exchange));
+                return ok(heartbeat(request));
             } else if ("/session/token-request".equals(path)) {
-                send(exchange, renewToken(exchange));
+                return ok(renewToken(request));
             } else if ("/queries/v1/abort-request".equals(path)) {
-                send(exchange, abort(exchange));
+                return ok(abort(request));
             } else if ("/telemetry/send".equals(path)) {
-                send(exchange, success(null));
+                return ok(success(null));
             } else if (path.startsWith("/monitoring/queries/")) {
-                send(exchange, status(exchange, path.substring("/monitoring/queries/".length())));
+                return ok(status(request, path.substring("/monitoring/queries/".length())));
             } else if (path.startsWith("/queries/") && path.endsWith("/result")) {
-                send(exchange, keptResult(exchange, path.substring("/queries/".length(),
+                return ok(keptResult(request, path.substring("/queries/".length(),
                     path.length() - "/result".length())));
-            } else {
-                HttpResponses.send(exchange, 404, MAPPER.writeValueAsString(failure("390400",
-                    "Unknown endpoint " + path, null)));
             }
+            return new SnowflakeReply(404, MAPPER.writeValueAsString(failure("390400",
+                "Unknown endpoint " + path, null)));
         } catch (final IOException | RuntimeException fault) {
             logger.error("Error handling a Snowflake driver request to {}", path, fault);
-            HttpResponses.send(exchange, 200, MAPPER.writeValueAsString(failure("000603",
-                fault.getMessage() == null ? fault.toString() : fault.getMessage(), null)));
+            return ok(failure("000603", fault.getMessage() == null ? fault.toString() : fault.getMessage(), null));
         }
     }
 
@@ -271,8 +281,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
      * Runs a statement, or a text of several, in the session the request's token names; an asynchronous one is
      * started on a worker and answered at once (see {@link #runAsync}).
      */
-    private ObjectNode query(final HttpExchange exchange, final JsonNode body) {
-        final SessionContext session = sessionOf(exchange);
+    private ObjectNode query(final SnowflakeRequest request, final JsonNode body) {
+        final SessionContext session = sessionOf(request);
         if (session == null) {
             return expired();
         }
@@ -533,8 +543,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
     }
 
     /** A kept result of one statement of a text of several. */
-    private ObjectNode keptResult(final HttpExchange exchange, final String queryId) {
-        if (sessionOf(exchange) == null) {
+    private ObjectNode keptResult(final SnowflakeRequest request, final String queryId) {
+        if (sessionOf(request) == null) {
             return expired();
         }
         final ObjectNode kept = keptResults.get(queryId);
@@ -547,8 +557,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
      * reading its result, and through {@code getQueryStatus}: RUNNING while it runs, then SUCCESS or
      * FAILED_WITH_ERROR with its error, read from the query history; no query for an ID the server does not know.
      */
-    private ObjectNode status(final HttpExchange exchange, final String queryId) {
-        if (sessionOf(exchange) == null) {
+    private ObjectNode status(final SnowflakeRequest request, final String queryId) {
+        if (sessionOf(request) == null) {
             return expired();
         }
         final ObjectNode data = JsonNodeFactory.instance.objectNode();
@@ -593,16 +603,16 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         return moment == null ? fallback : moment.toEpochMilli();
     }
 
-    private ObjectNode logout(final HttpExchange exchange) {
-        final SessionContext session = sessionOf(exchange);
+    private ObjectNode logout(final SnowflakeRequest request) {
+        final SessionContext session = sessionOf(request);
         if (session != null) {
             engine.endSession(session);
         }
         return success(null);
     }
 
-    private ObjectNode heartbeat(final HttpExchange exchange) {
-        final SessionContext session = sessionOf(exchange);
+    private ObjectNode heartbeat(final SnowflakeRequest request) {
+        final SessionContext session = sessionOf(request);
         if (session == null) {
             return expired();
         }
@@ -610,8 +620,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         return success(null);
     }
 
-    private ObjectNode renewToken(final HttpExchange exchange) {
-        final SessionContext session = sessionOf(exchange);
+    private ObjectNode renewToken(final SnowflakeRequest request) {
+        final SessionContext session = sessionOf(request);
         if (session == null) {
             return expired();
         }
@@ -624,9 +634,9 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         return success(data);
     }
 
-    private ObjectNode abort(final HttpExchange exchange) {
+    private ObjectNode abort(final SnowflakeRequest request) {
         // Found without waiting for the engine: a cancel must not wait behind the statement it cancels.
-        final SessionContext session = sessionOf(exchange, true);
+        final SessionContext session = sessionOf(request, true);
         if (session == null) {
             return expired();
         }
@@ -638,13 +648,13 @@ final class SnowflakeProtocolHandler implements HttpHandler {
     }
 
     /** The session a request's {@code Authorization: Snowflake Token="..."} names, or null. */
-    private SessionContext sessionOf(final HttpExchange exchange) {
-        return sessionOf(exchange, false);
+    private SessionContext sessionOf(final SnowflakeRequest request) {
+        return sessionOf(request, false);
     }
 
-    /** {@link #sessionOf(HttpExchange)}, found without waiting for the engine where {@code cancelling}. */
-    private SessionContext sessionOf(final HttpExchange exchange, final boolean cancelling) {
-        final String header = exchange.getRequestHeaders().getFirst("Authorization");
+    /** {@link #sessionOf(SnowflakeRequest)}, found without waiting for the engine where {@code cancelling}. */
+    private SessionContext sessionOf(final SnowflakeRequest request, final boolean cancelling) {
+        final String header = request.header("Authorization");
         if (header == null) {
             return null;
         }
@@ -718,9 +728,9 @@ final class SnowflakeProtocolHandler implements HttpHandler {
     }
 
     /** A request's JSON body, unzipped where the driver sent it compressed. */
-    private static JsonNode readJson(final HttpExchange exchange) throws IOException {
-        final byte[] raw = exchange.getRequestBody().readAllBytes();
-        final String encoding = exchange.getRequestHeaders().getFirst("Content-Encoding");
+    private static JsonNode readJson(final SnowflakeRequest request) throws IOException {
+        final byte[] raw = request.body();
+        final String encoding = request.header("Content-Encoding");
         final byte[] body;
         if (encoding != null && encoding.toLowerCase(Locale.ROOT).contains("gzip")) {
             try (InputStream unzipped = new GZIPInputStream(new ByteArrayInputStream(raw))) {
@@ -747,7 +757,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         return parameters;
     }
 
-    private static void send(final HttpExchange exchange, final ObjectNode answer) throws IOException {
-        HttpResponses.send(exchange, 200, MAPPER.writeValueAsString(answer));
+    /** An answer the driver reads from a 200, a refusal included. */
+    private static SnowflakeReply ok(final ObjectNode answer) {
+        return new SnowflakeReply(200, MAPPER.writeValueAsString(answer));
     }
 }
