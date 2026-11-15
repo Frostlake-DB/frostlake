@@ -36,7 +36,7 @@ public class DriverResultSetSurfaceTest extends BaseJdbcTest {
 
     @Test
     public void anIntegerGetterRefusesAFixedPointNumberWithAFractionByPositionAndByLabel() throws SQLException {
-        DriverSurfaceChecks.scaledNumberRefusals(connection, isLiveSnowflake());
+        DriverSurfaceChecks.scaledNumberRefusals(connection, isSnowflakeDriver());
     }
 
     @Test
@@ -86,7 +86,7 @@ public class DriverResultSetSurfaceTest extends BaseJdbcTest {
 
     @Test
     public void anOutParameterReadsAsItsColumnOfTheCallsResult() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), OUT_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), OUT_PARAMETERS);
         DriverSurfaceChecks.outParameters(connection);
     }
 }

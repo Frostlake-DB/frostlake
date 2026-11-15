@@ -30,7 +30,8 @@ import java.util.List;
  *   <li>a word after a comma is read as the alias it could be, so a bracket that opens right after it is refused,
  *       {@code COUNT(amt)} at its {@code (}; a token after a comma that is no word is refused where it stands;</li>
  *   <li>the rest of the item is read past, a comma inside it included, up to the clause's FOR, where the column's
- *       first token is refused, or up to the bracket that closes the clause, which is refused where no FOR came;</li>
+ *       first token is refused, or up to the bracket that closes the clause, which is refused where no FOR came and
+ *       no bracket after a word was refused before it;</li>
  *   <li>nothing after the FOR column is reported, and a FOR right after a comma is read on as written.</li>
  * </ul>
  *
@@ -72,6 +73,7 @@ final class PivotAggregateLines {
         lines.add(SyntaxErrorListener.sentence(spoken.get(fault)));
         int state = AFTER_COMMA;
         int depth = 0;
+        boolean bracketRefused = false;
         for (int i = fault + 1; !ends(spoken, i); i++) {
             final int type = type(spoken, i);
             if (state == AFTER_COMMA) {
@@ -92,6 +94,7 @@ final class PivotAggregateLines {
             }
             if (state == AFTER_WORD && type == FrostlakeLexer.LPAREN) {
                 lines.add(SyntaxErrorListener.sentence(spoken.get(i)));
+                bracketRefused = true;
                 depth++;
                 state = READING_PAST;
                 continue;
@@ -106,7 +109,7 @@ final class PivotAggregateLines {
                 depth++;
             } else if (type == FrostlakeLexer.RPAREN) {
                 if (depth == 0) {
-                    return withLine(lines, spoken.get(i));
+                    return bracketRefused ? lines : withLine(lines, spoken.get(i));
                 }
                 depth--;
             }

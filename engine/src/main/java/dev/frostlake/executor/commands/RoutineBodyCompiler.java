@@ -28,6 +28,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.StatementClock;
 import dev.frostlake.executor.expressions.AntlrExpressionParser;
 import dev.frostlake.executor.expressions.CaretOperator;
+import dev.frostlake.executor.expressions.DoubledSigns;
 import dev.frostlake.executor.expressions.OuterJoinOperandException;
 import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.SqlUdfBodyFrame;
@@ -227,8 +228,9 @@ final class RoutineBodyCompiler {
             }
         }
         // The caret between two values is refused as the procedure is created, in a block and in a statement
-        // written without one (see CaretOperator).
-        CaretOperator.rejectIn(written);
+        // written without one (see CaretOperator), and so are two signs in a row, in a branch that never runs too,
+        // whichever the body's walk meets first (see DoubledSigns).
+        DoubledSigns.rejectWithOperators(written);
         // So is a positional argument written after a named one, at the argument in the body's own text
         // (live-verified).
         StrayArguments.require(queryExecutor.uncompiledScriptOf(body));
@@ -475,12 +477,14 @@ final class RoutineBodyCompiler {
      * @param routineName   the routine's own unqualified name, so the validator can see a self-call.
      */
     /**
-     * A function's expression or query that writes the caret between two values is refused as the function's
-     * compilation failing, by the operator alone (see {@link CaretOperator}); a block's is refused bare.
+     * A function's expression that writes the caret between two values, or two signs in a row, is refused as the
+     * function's compilation failing, by the operator alone (see {@link CaretOperator}) or the invalid function the
+     * signs make (see {@link DoubledSigns}); a query's, a table function's too, and a block's are refused bare
+     * (live-verified).
      */
     private static void rejectCaret(final ParseTree body) {
         try {
-            CaretOperator.rejectIn(body);
+            DoubledSigns.rejectWithOperators(body);
         } catch (final RuntimeException refused) {
             throw new RuntimeException("Compilation of SQL UDF failed: " + refused.getMessage(), refused);
         }
@@ -682,7 +686,7 @@ final class RoutineBodyCompiler {
         }
         final FrostlakeParser.SqlScriptContext queryBody = queryExecutor.queryStatementOf(trimmed);
         if (queryBody != null) {
-            rejectCaret(queryBody);
+            DoubledSigns.rejectWithOperators(queryBody);
             rejectQueryBodyEnding(body);
             rejectIntoClauses(queryBody);
             rejectUnknownTypedLiteral(queryBody);
@@ -833,10 +837,9 @@ final class RoutineBodyCompiler {
     }
 
     /**
-     * A query or block body's bare stages, judged at CREATE in the frame the body compiles in, its places the untrimmed
-     * body's own: a table function's query inside the frame of parentheses an expression body has — "Compilation of
-     * SQL UDF failed: " before the refusal, a place on the first line moved by one — and a scalar function's query or
-     * block as a statement of its own, neither (live-verified). An expression body is judged once it reads as one.
+     * A query or block body's bare stages, judged at CREATE as a statement of its own, its places the untrimmed body's:
+     * a query, a table function's as a scalar function's, and a scalar function's block, with no "Compilation of SQL
+     * UDF failed: " before the refusal (live-verified). An expression body is judged once it reads as one.
      *
      * @param script        the body as parsed before any stage in it is judged, or null when it does not parse
      * @param body          the body's text
@@ -849,11 +852,7 @@ final class RoutineBodyCompiler {
         }
         final FrostlakeParser.StatementContext statement = script.flowChain().get(0).statement().get(0);
         if (statement.queryStatement() != null) {
-            if (tableFunction) {
-                StageArgumentSyntax.requireFramedPlacement(statement);
-            } else {
-                StageArgumentSyntax.requirePlacement(statement, body);
-            }
+            StageArgumentSyntax.requirePlacement(statement, body);
         } else if (!tableFunction && statement.proceduralStatement() != null
                 && statement.proceduralStatement().beginEndBlock() != null) {
             StageArgumentSyntax.requirePlacement(statement, body);

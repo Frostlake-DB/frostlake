@@ -125,7 +125,8 @@ public final class TaskGraphRuns {
 
     /**
      * The output columns, as the account orders them; {@code completed} adds COMPLETED_TIME after
-     * NEXT_SCHEDULED_TIME. SCHEDULED_FROM follows ATTEMPT_NUMBER, and SCHEDULED_BY_USER ends the row.
+     * NEXT_SCHEDULED_TIME. SCHEDULED_FROM follows ATTEMPT_NUMBER, and GRAPH_ID and GRAPH_NAME follow
+     * SCHEDULED_BY_USER at the end of the row.
      */
     static List<ResultSetColumn> columns(final boolean completed) {
         final List<ResultSetColumn> columns = new ArrayList<>(Arrays.asList(
@@ -151,7 +152,9 @@ public final class TaskGraphRuns {
             new ResultSetColumn("CONFIG", TEXT),
             new ResultSetColumn("GRAPH_RUN_GROUP_ID", TEXT),
             new ResultSetColumn("BACKFILL_INFO", new ObjectType()),
-            new ResultSetColumn("SCHEDULED_BY_USER", TEXT)));
+            new ResultSetColumn("SCHEDULED_BY_USER", TEXT),
+            new ResultSetColumn("GRAPH_ID", TEXT),
+            new ResultSetColumn("GRAPH_NAME", TEXT)));
         return DeclaredColumnTypes.typed(columns);
     }
 
@@ -159,13 +162,15 @@ public final class TaskGraphRuns {
      * The graph runs scheduled within the next eight days: one per resumed root task with a schedule, newest
      * scheduled time first. The engine runs a graph to completion when it starts, so none is ever executing.
      */
-    static List<Row> current(final Catalog catalog, final String rootTaskName, final int limit) {
+    static List<Row> current(final Catalog catalog, final String rootTaskName, final int limit,
+                             final TaskSight sight) {
         final List<Row> rows = new ArrayList<>();
         final Instant horizon = Instant.now().plus(Duration.ofDays(LOOK_AHEAD_DAYS));
         for (final Database database : catalog.getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
                 for (final Task root : schema.getTasks()) {
                     if (!TaskGraphs.isRoot(root) || !named(root, rootTaskName) || !root.isActive()
+                            || sight != null && !sight.sees(schema, root)
                             || root.getSchedule() == null || root.getNextRunTime() == null
                             || root.getNextRunTime().isAfter(horizon)) {
                         continue;
@@ -181,12 +186,14 @@ public final class TaskGraphRuns {
 
     /** The graph runs that completed, newest completion first; {@code errorOnly} keeps the failed ones. */
     static List<Row> complete(final Catalog catalog, final String rootTaskName, final boolean errorOnly,
-                              final int limit) {
+                              final int limit, final TaskSight sight) {
         final List<Row> rows = new ArrayList<>();
         for (final Database database : catalog.getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
                 for (final Task root : schema.getTasks()) {
-                    if (TaskGraphs.isRoot(root) && named(root, rootTaskName)) {
+                    // A graph is read about through its root (see TaskSight).
+                    if (TaskGraphs.isRoot(root) && named(root, rootTaskName)
+                            && (sight == null || sight.sees(schema, root))) {
                         addCompleted(rows, root, schema, errorOnly);
                     }
                 }
@@ -198,10 +205,9 @@ public final class TaskGraphRuns {
     /**
      * One row per attempt of each graph run of the root: its first attempt, then one more for each retry, as the
      * account counts them (live-verified). An attempt is told from its own task runs — its state, first error and
-     * completion — and a retry's SCHEDULED_TIME is its first run's, scheduled from MANUAL RETRY; every attempt keeps
-     * the graph run's RUN_ID and GRAPH_RUN_GROUP_ID. A retry's QUERY_START_TIME is when the root's run in it
-     * started, or, when the retry does not run the root, when its first run started if that run succeeded: a retry
-     * whose first run failed tells none.
+     * completion — and a retry's SCHEDULED_TIME is its first run's, scheduled from what started it, MANUAL RETRY or
+     * AUTOMATIC RETRY; every attempt keeps the graph run's RUN_ID and GRAPH_RUN_GROUP_ID. A retry's QUERY_START_TIME
+     * is when its first run started - the root's where it runs the root again - whether that run succeeded or not.
      */
     private static void addCompleted(final List<Row> rows, final Task root, final Schema schema,
                                      final boolean errorOnly) {
@@ -224,7 +230,6 @@ public final class TaskGraphRuns {
                                    final TaskExecution graphRun, final LocalDateTime until, final int attempt,
                                    final boolean errorOnly) {
         TaskExecution first = null;
-        TaskExecution rootRun = null;
         TaskExecution firstError = null;
         String firstErrorTask = null;
         LocalDateTime completed = null;
@@ -232,9 +237,6 @@ public final class TaskGraphRuns {
             final TaskExecution last = TaskGraphs.lastRunWithin(task, graphRun.getStartTime(), until, attempt);
             if (last == null) {
                 continue;
-            }
-            if (task == root) {
-                rootRun = last;
             }
             if (first == null || before(last, first)) {
                 first = last;
@@ -252,16 +254,9 @@ public final class TaskGraphRuns {
         }
         final String state = firstError != null ? FAILED : TaskExecutionState.SUCCEEDED.name();
         final boolean retry = attempt > 1;
-        final LocalDateTime queryStart;
-        if (!retry) {
-            queryStart = graphRun.getStartTime();
-        } else if (rootRun != null) {
-            queryStart = rootRun.getStartTime();
-        } else {
-            queryStart = FAILED.equals(first.getState()) ? null : first.getStartTime();
-        }
+        final LocalDateTime queryStart = retry ? first.getStartTime() : graphRun.getStartTime();
         rows.add(row(true, root, schema, state,
-            retry ? TaskTrigger.MANUAL_RETRY.reported() : graphRun.getScheduledFrom(), firstErrorTask,
+            retry ? first.getScheduledFrom() : graphRun.getScheduledFrom(), firstErrorTask,
             firstError == null ? null : firstError.getErrorCode(),
             firstError == null ? null : firstError.getErrorMessage(),
             ShowResultHelpers.createdOn(retry ? first.getScheduledTime() : graphRun.getScheduledTime()),
@@ -289,7 +284,8 @@ public final class TaskGraphRuns {
 
     /**
      * One graph run's row. A completed one tells the code of its first error and the user it was scheduled by; a
-     * scheduled one tells the user who resumed the root and the fire after its own (live-verified).
+     * scheduled one tells the user who resumed the root and the fire after its own. A graph of tasks names no graph
+     * object, so GRAPH_ID and GRAPH_NAME are NULL.
      */
     private static Row row(final boolean completedShape, final Task root, final Schema schema, final String state,
                            final String scheduledFrom, final String firstErrorTask, final String firstErrorCode,
@@ -307,7 +303,7 @@ public final class TaskGraphRuns {
             cells.add(completed);
         }
         cells.addAll(Arrays.<Object>asList(root.getId(), Long.valueOf(1L), runId, Long.valueOf(attempt), scheduledFrom,
-            null, group, null, scheduledBy));
+            null, group, null, scheduledBy, null, null));
         return new Row(cells);
     }
 

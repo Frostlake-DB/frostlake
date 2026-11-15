@@ -53,9 +53,23 @@ public class TaskHistoryFunction extends TableFunction {
 
     private final Catalog catalog;
 
+    /** Which tasks the session may read about (see TaskSight); null reads about every one. */
+    private final TaskSight sight;
+
     public TaskHistoryFunction(final Catalog catalog) {
+        this(catalog, null);
+    }
+
+    /**
+     * The function reading only about the tasks the session sees.
+     *
+     * @param catalog the catalog
+     * @param sight   which tasks the session sees, or null for every one
+     */
+    public TaskHistoryFunction(final Catalog catalog, final TaskSight sight) {
         super("TASK_HISTORY");
         this.catalog = catalog;
+        this.sight = sight;
     }
 
     @Override
@@ -86,6 +100,10 @@ public class TaskHistoryFunction extends TableFunction {
                 for (final Schema schema : database.getAllSchemas()) {
                     for (final Task task : schema.getTasks()) {
                         if (filterTaskName != null && !task.getName().toUpperCase(Locale.ROOT).equals(filterTaskName)) continue;
+                        // Only the tasks the session may read about are listed (see TaskSight).
+                        if (sight != null && !sight.sees(schema, task)) {
+                            continue;
+                        }
                         final Task root = rootOf(schema, task);
                         // Live lists the next fire of every STARTED task as a SCHEDULED row, for as
                         // long as that fire is within EIGHT DAYS of now — measured to the hour: a fire
@@ -130,7 +148,7 @@ public class TaskHistoryFunction extends TableFunction {
 
     /**
      * The output columns, as the account orders and types them: every text unsized, the four times
-     * TIMESTAMP_LTZ, the versions, the run id, the attempt and the job id NUMBER(38,0).
+     * TIMESTAMP_LTZ, the versions, the run id, the attempt and the job id NUMBER(38,0); GRAPH_ID ends the row.
      */
     private static List<ResultSetColumn> columns() {
         return DeclaredColumnTypes.typed(Arrays.asList(
@@ -163,7 +181,8 @@ public class TaskHistoryFunction extends TableFunction {
             new ResultSetColumn("GRAPH_RUN_GROUP_ID", TaskGraphRuns.TEXT),
             new ResultSetColumn("BACKFILL_INFO", new ObjectType()),
             new ResultSetColumn("SPCS_JOB_ID", TaskGraphRuns.WHOLE_NUMBER),
-            new ResultSetColumn("SCHEDULED_BY_USER", TaskGraphRuns.TEXT)));
+            new ResultSetColumn("SCHEDULED_BY_USER", TaskGraphRuns.TEXT),
+            new ResultSetColumn("GRAPH_ID", TaskGraphRuns.TEXT)));
     }
 
     /**
@@ -171,7 +190,8 @@ public class TaskHistoryFunction extends TableFunction {
      * graph functions name it. A run that ran tells the query that ran the task's statement — its id, the code of
      * the error it failed with, and the hashes QUERY_HISTORY gives the statement — and the user it was scheduled by;
      * a scheduled run tells no query, the user who resumed the task, and the fire after its own (live-verified). The
-     * engine keeps one version of a graph and records no configuration or container job, so those cells are NULL.
+     * engine keeps one version of a graph and records no configuration, container job or graph object, so those
+     * cells are NULL.
      */
     private static Row row(final Task task, final Schema schema, final String state, final String errorMessage,
                            final Instant scheduled, final LocalDateTime started, final LocalDateTime ended,
@@ -203,7 +223,7 @@ public class TaskHistoryFunction extends TableFunction {
             null,
             hash, hash == null ? null : Long.valueOf(2L), hash, hash == null ? null : Long.valueOf(1L),
             runId == null ? null : TaskGraphs.graphRunGroupId(root, runId),
-            null, null, scheduledBy));
+            null, null, scheduledBy, null));
     }
 
     /** The root of the graph a task runs in: the task itself when nothing precedes it, or null when none is found. */

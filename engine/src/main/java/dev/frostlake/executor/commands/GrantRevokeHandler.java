@@ -144,6 +144,10 @@ public class GrantRevokeHandler implements CommandHandler {
                 grantPrincipalOwnership(ctx);
                 return null;
             }
+            if (ctx.grantedUser() != null) {
+                grantOnUser(ctx);
+                return null;
+            }
             final DatabaseRole databaseGrantee = ctx.databaseRoleGrantee() == null ? null
                 : AccessControlHandler.databaseRole(catalog,
                     PrincipalNames.parts(ctx.databaseRoleGrantee().referencedName(), queryExecutor));
@@ -200,6 +204,11 @@ public class GrantRevokeHandler implements CommandHandler {
                     }
                 }
                 if (isFuture) {
+                    if (databaseGrantee != null) {
+                        // A future grant is a grant on each object the scope will hold, so it is scoped as one: a
+                        // database role takes none on another database's objects (see requireOwnDatabase).
+                        requireOwnDatabase(databaseGrantee, scopeType, scopeName);
+                    }
                     final Role holder = databaseGrantee != null ? databaseGrantee : catalog.getRoleExact(targetName);
                     for (final String privilege : privileges) {
                         holder.addFutureGrant(objectKind, scopeType, scopeName, privilege, grantOption);
@@ -254,12 +263,23 @@ public class GrantRevokeHandler implements CommandHandler {
                 // GRANT global_privileges TO ROLE role_name
                 // identifiers: 0=role_name
                 final String roleName = principal(ctx.principalName(0));
+                final boolean isUser = ctx.USER() != null;
+                if (isUser) {
+                    // The user is looked up first, then a privilege that creates objects refused (live-verified).
+                    requireGrantee(true, roleName);
+                    final List<String> named = new ArrayList<>();
+                    for (final FrostlakeParser.GlobalPrivilegeContext privCtx
+                            : ctx.globalPrivilegeList().globalPrivilege()) {
+                        named.add(privilegeName(privCtx));
+                    }
+                    refuseCreationToUser(named);
+                }
                 requireAccountAuthority();
 
                 for (final FrostlakeParser.GlobalPrivilegeContext privCtx : ctx.globalPrivilegeList().globalPrivilege()) {
                     final String privilege = privilegeName(privCtx);
-                    grantTo(null, false, roleName, privilege, "ACCOUNT", "ACCOUNT", null, grantOption);
-                    logger.trace("Granted global privilege {} to role {}", privilege, roleName);
+                    grantTo(null, isUser, roleName, privilege, "ACCOUNT", "ACCOUNT", null, grantOption);
+                    logger.trace("Granted global privilege {} to {}", privilege, roleName);
                 }
 
             } else if (ctx.ACCOUNT() != null) {
@@ -267,6 +287,13 @@ public class GrantRevokeHandler implements CommandHandler {
                 // identifiers: 0=target_name
                 final String targetName = principal(ctx.principalName(0));
                 final boolean isUser = ctx.USER() != null;
+                // A privilege the list names that is none of the account's is refused before anything else; the
+                // account's own privileges are read by the alternative before this one (live-verified).
+                if (ctx.privilegeList().ALL() == null) {
+                    for (final FrostlakeParser.PrivilegeContext privCtx : ctx.privilegeList().privilege()) {
+                        refuseNoAccountPrivilege(privilegeName(privCtx));
+                    }
+                }
                 requireAccountAuthority();
 
                 if (ctx.privilegeList().ALL() != null) {
@@ -404,6 +431,9 @@ public class GrantRevokeHandler implements CommandHandler {
                 requireGrantee(ctx.USER() != null, principal(ctx.principalName(0)));
                 throw new RuntimeException("SQL execution error: OWNERSHIP can only be transferred.");
             }
+            if (ctx.grantedUser() != null) {
+                return revokeOnUser(ctx);
+            }
             final DatabaseRole databaseGrantee = ctx.databaseRoleGrantee() == null ? null
                 : AccessControlHandler.databaseRole(catalog,
                     PrincipalNames.parts(ctx.databaseRoleGrantee().referencedName(), queryExecutor));
@@ -477,6 +507,10 @@ public class GrantRevokeHandler implements CommandHandler {
                 // REVOKE global_privileges FROM ROLE role_name
                 // identifiers: 0=role_name
                 final String roleName = principal(ctx.principalName(0));
+                final boolean isUser = ctx.USER() != null;
+                if (isUser) {
+                    requireGrantee(true, roleName);
+                }
                 requireAccountAuthority();
 
                 boolean revoked = false;
@@ -484,7 +518,7 @@ public class GrantRevokeHandler implements CommandHandler {
                     revoked = false;
                     for (final FrostlakeParser.GlobalPrivilegeContext privCtx
                             : ctx.globalPrivilegeList().globalPrivilege()) {
-                        revoked |= revokeFrom(null, false, roleName, privilegeName(privCtx), "ACCOUNT", "ACCOUNT",
+                        revoked |= revokeFrom(null, isUser, roleName, privilegeName(privCtx), "ACCOUNT", "ACCOUNT",
                             optionOnly, cascade, applying);
                     }
                 }
@@ -685,6 +719,9 @@ public class GrantRevokeHandler implements CommandHandler {
                          final String grantor, final String owner, final boolean grantOption) {
         // Recorded under the object's resolved full name, never the spelling (GrantNames).
         final String objectName = GrantNames.of(catalog, objectType, written);
+        if (databaseGrantee != null) {
+            requireOwnDatabase(databaseGrantee, objectType, objectName);
+        }
         final Privilege granted = Privilege.valueOf(privilege.toUpperCase(Locale.ROOT));
         final boolean throughOption = grantor != null && !grantor.equals(owner);
         if (isUser) {
@@ -705,6 +742,27 @@ public class GrantRevokeHandler implements CommandHandler {
             kept != null ? kept : grantor != null ? grantor : catalog.currentRoleForOwner());
         if (grantOption) {
             holder.setGrantOption(objectType, objectName, granted, true);
+        }
+    }
+
+    /**
+     * Refuses a privilege on an object outside a database role's own database: "Privileges on objects in one database
+     * (such as tables or views) cannot be granted to database roles in another database", and they "must be scoped to
+     * objects contained in the database where the role exists" (documented, "Access control considerations"). Such a
+     * grant was recorded and honoured, so every role holding the database role read the other database. The refusal's
+     * wording is the engine's own.
+     *
+     * @param role       the database role granted to
+     * @param objectType the object's kind as privileges record it
+     * @param objectName the object's full name as privileges record it
+     */
+    private static void requireOwnDatabase(final DatabaseRole role, final String objectType, final String objectName) {
+        final String database = "DATABASE".equals(objectType) ? objectName
+            : objectName.indexOf('.') < 0 ? null : QualifiedName.parse(objectName).parts()[0];
+        if (database == null || !database.equals(role.getDatabase())) {
+            throw new RuntimeException(SqlCompilationError.of("Privileges on objects of "
+                + (database == null ? "the account" : "database " + database)
+                + " cannot be granted to database role " + role.getQualifiedName() + "."));
         }
     }
 
@@ -1075,6 +1133,107 @@ public class GrantRevokeHandler implements CommandHandler {
         return UserLookup.asking(catalog, queryExecutor.getSecurityManager(), name, Privilege.MANAGE_GRANTS);
     }
 
+    /** The privileges a user is granted on by, which ALL stands for (live-verified). */
+    private static final List<String> USER_PRIVILEGES = List.of("APPLY_AUTHENTICATION_POLICY", "APPLY_INGRESS_POLICY",
+        "APPLY_PASSWORD_POLICY", "APPLY_SESSION_POLICY", "IMPERSONATE", "MODIFY_PROGRAMMATIC_AUTHENTICATION_METHODS",
+        "MONITOR");
+
+    /**
+     * The privileges a GRANT or a REVOKE on a user names: its own, ALL standing for every one of them; any other is
+     * refused, {@code Invalid object type 'USER' for privilege 'SELECT'.}, and OWNERSHIP only where it stands alone
+     * (live-verified).
+     */
+    private static List<String> userPrivileges(final FrostlakeParser.PrivilegeListContext list) {
+        if (list.ALL() != null) {
+            return USER_PRIVILEGES;
+        }
+        rejectMisplacedOwnership(list, null);
+        final List<String> named = new ArrayList<>();
+        for (final FrostlakeParser.PrivilegeContext privCtx : list.privilege()) {
+            final StringBuilder word = new StringBuilder();
+            for (int i = 0; i < privCtx.getChildCount(); i++) {
+                word.append(i > 0 ? "_" : "").append(privCtx.getChild(i).getText().toUpperCase(Locale.ROOT));
+            }
+            if (!USER_PRIVILEGES.contains(word.toString())) {
+                throw new RuntimeException("SQL compilation error:\nInvalid object type 'USER' for privilege '"
+                    + word.toString().replace('_', ' ') + "'.");
+            }
+            named.add(word.toString());
+        }
+        return named;
+    }
+
+    /** The user a GRANT or a REVOKE grants on, found as a statement over grants finds one (see {@link UserLookup}). */
+    private User grantedUserOf(final FrostlakeParser.GrantedUserContext written) {
+        return grantee(principal(written.principalName()));
+    }
+
+    /**
+     * GRANT … ON USER: each privilege, once the user and the grantee are found, recorded in the name of the user's
+     * owner as a grant on an object is.
+     */
+    private void grantOnUser(final FrostlakeParser.GrantStatementContext ctx) {
+        final List<String> privileges = userPrivileges(ctx.privilegeList());
+        final User user = grantedUserOf(ctx.grantedUser());
+        final boolean isUser = ctx.USER() != null;
+        final String targetName = principal(ctx.principalName(0));
+        requireGrantee(isUser, targetName);
+        if (queryExecutor.getSecurityManager() != null) {
+            queryExecutor.getSecurityManager().checkGrantAuthority("USER", user.getName(), user.getOwner(),
+                privileges);
+        }
+        for (final String privilege : privileges) {
+            grantTo(null, isUser, targetName, privilege, "USER", user.getName(), user.getOwner(), user.getOwner(),
+                ctx.withGrantOption() != null);
+        }
+        logger.trace("Granted {} on user {} to {}", privileges, user.getName(), targetName);
+    }
+
+    /** REVOKE … ON USER: counts every privilege it takes back, as a REVOKE naming its object does (live-verified). */
+    private Object revokeOnUser(final FrostlakeParser.RevokeStatementContext ctx) {
+        final List<String> privileges = userPrivileges(ctx.privilegeList());
+        final User user = grantedUserOf(ctx.grantedUser());
+        final boolean isUser = ctx.USER() != null;
+        final String targetName = principal(ctx.principalName(0));
+        requireGrantee(isUser, targetName);
+        final boolean optionOnly = ctx.grantOptionFor() != null;
+        final boolean cascade = ctx.revokeMode() != null && ctx.revokeMode().CASCADE() != null;
+        int revoked = 0;
+        for (final boolean applying : PASSES) {
+            revoked = 0;
+            for (final String privilege : privileges) {
+                if (revokeFrom(null, isUser, targetName, privilege, "USER", user.getName(), optionOnly, cascade,
+                        applying)) {
+                    revoked++;
+                }
+            }
+        }
+        return objectsAffected(revoked);
+    }
+
+    /**
+     * Refuses an account privilege that creates an object, granted to a user: a user owns no object outside its own
+     * database (live-verified, CREATE DATABASE and CREATE ROLE alike).
+     */
+    private static void refuseCreationToUser(final List<String> privileges) {
+        for (final String privilege : privileges) {
+            if (privilege.startsWith("CREATE_")) {
+                throw new RuntimeException("SQL execution error: Cannot grant object creation privileges to users: "
+                    + "users cannot own objects outside their personal database. Use the personal database for "
+                    + "creating user-owned objects.");
+            }
+        }
+    }
+
+    /**
+     * Refuses a privilege ON ACCOUNT names that is none of the account's: {@code GRANT CREATE SCHEMA ON ACCOUNT} is
+     * {@code Invalid object type 'ACCOUNT' for privilege 'CREATE SCHEMA'.} (live-verified).
+     */
+    private static void refuseNoAccountPrivilege(final String privilege) {
+        throw new RuntimeException("SQL compilation error:\nInvalid object type 'ACCOUNT' for privilege '"
+            + privilege.replace('_', ' ') + "'.");
+    }
+
     /** Whether a privilege list names OWNERSHIP. */
     private static boolean namesOwnership(final FrostlakeParser.PrivilegeListContext list) {
         if (list == null || list.ALL() != null) {
@@ -1194,7 +1353,8 @@ public class GrantRevokeHandler implements CommandHandler {
 
     /**
      * The privileges a network policy, a network rule, a password, aggregation, authentication, join, packages or
-     * projection policy, a contact, a secret, an external volume or an integration takes; null for another kind.
+     * projection policy, a contact, a secret, an external volume, an integration or a task takes; null for another
+     * kind.
      */
     private static List<String> securityObjectPrivileges(final String objectType) {
         switch (objectType) {
@@ -1214,6 +1374,10 @@ public class GrantRevokeHandler implements CommandHandler {
                 return List.of("APPLY", "MODIFY");
             case "SECRET":
                 return List.of("READ", "USAGE");
+            case "TASK":
+                // "Task privileges": APPLYBUDGET, MONITOR, OPERATE and OWNERSHIP (documented); the refusal's words
+                // for a task are unmeasured on live.
+                return List.of("APPLYBUDGET", "MONITOR", "OPERATE", "OWNERSHIP");
             default:
                 return null;
         }
@@ -1229,17 +1393,17 @@ public class GrantRevokeHandler implements CommandHandler {
         switch (objectType) {
             case "TABLE":
             case "MATERIALIZED_VIEW":
-                return List.of("APPLYBUDGET", "DELETE", "DELETE_ERROR_TABLE", "EVOLVE_SCHEMA", "INSERT", "REBUILD",
-                    "REFERENCES", "SELECT", "SELECT_ERROR_TABLE", "TRUNCATE", "UPDATE");
+                return List.of("APPLY_COMMENT", "APPLYBUDGET", "DELETE", "DELETE_ERROR_TABLE", "EVOLVE_SCHEMA",
+                    "INSERT", "REBUILD", "REFERENCES", "SELECT", "SELECT_ERROR_TABLE", "TRUNCATE", "UPDATE");
             case "DYNAMIC_TABLE":
                 return List.of("MONITOR", "OPERATE", "SELECT");
             case "VIEW":
-                return List.of("APPLYBUDGET", "DELETE", "DELETE_ERROR_TABLE", "EVOLVE_SCHEMA", "INSERT", "REBUILD",
-                    "REFERENCES", "SELECT", "SELECT_ERROR_TABLE", "TRUNCATE", "UPDATE",
+                return List.of("APPLY_COMMENT", "APPLYBUDGET", "DELETE", "DELETE_ERROR_TABLE", "EVOLVE_SCHEMA",
+                    "INSERT", "REBUILD", "REFERENCES", "SELECT", "SELECT_ERROR_TABLE", "TRUNCATE", "UPDATE",
                     "VIEW_EXPANDED_QUERY_PROFILE");
             case "SCHEMA":
-                return List.of("ADD_SEARCH_OPTIMIZATION", "ADD_SEMANTIC_VIEW_MATERIALIZATION", "APPLYBUDGET",
-                    "CREATE_AGENT", "CREATE_AGENT_TASK", "CREATE_AGGREGATION_POLICY", "CREATE_ALERT",
+                return List.of("ADD_SEARCH_OPTIMIZATION", "ADD_SEMANTIC_VIEW_MATERIALIZATION", "APPLY_COMMENT",
+                    "APPLYBUDGET", "CREATE_AGENT", "CREATE_AGENT_TASK", "CREATE_AGGREGATION_POLICY", "CREATE_ALERT",
                     "CREATE_APPLICATION_SERVICE", "CREATE_ARTIFACT_REPOSITORY", "CREATE_AUTHENTICATION_POLICY",
                     "CREATE_BACKUP_POLICY", "CREATE_BACKUP_SET", "CREATE_CONTACT", "CREATE_CORTEX_EXTENSION",
                     "CREATE_CORTEX_SEARCH_SERVICE", "CREATE_DATA_METRIC_FUNCTION", "CREATE_DATA_MOVEMENT_POLICY",
@@ -1247,10 +1411,10 @@ public class GrantRevokeHandler implements CommandHandler {
                     "CREATE_DYNAMIC_TABLE", "CREATE_EVENT_TABLE", "CREATE_EXPERIMENT", "CREATE_EXTERNAL_AGENT",
                     "CREATE_EXTERNAL_MCP_SERVER", "CREATE_EXTERNAL_TABLE", "CREATE_FEATURE_POLICY",
                     "CREATE_FILE_FORMAT", "CREATE_FUNCTION", "CREATE_GATEWAY", "CREATE_GIT_REPOSITORY",
-                    "CREATE_HYBRID_TABLE", "CREATE_ICEBERG_TABLE", "CREATE_IMAGE_REPOSITORY",
+                    "CREATE_HYBRID_TABLE", "CREATE_ICEBERG_TABLE", "CREATE_IMAGE_REPOSITORY", "CREATE_INGRESS_POLICY",
                     "CREATE_INTERACTIVE_TABLE", "CREATE_JOIN_POLICY", "CREATE_MAINTENANCE_POLICY",
                     "CREATE_MANAGED_MCP_SERVER", "CREATE_MASKING_POLICY", "CREATE_MATERIALIZED_VIEW",
-                    "CREATE_MCP_SERVER", "CREATE_MODEL", "CREATE_MODEL_MONITOR",
+                    "CREATE_MCP_SERVER", "CREATE_METADATA_CONNECTOR", "CREATE_MODEL", "CREATE_MODEL_MONITOR",
                     "CREATE_MULTI_PARTY_APPROVAL_POLICY", "CREATE_NETWORK_RULE", "CREATE_NOTEBOOK",
                     "CREATE_NOTEBOOK_PROJECT", "CREATE_ONLINE_FEATURE_TABLE", "CREATE_OPENFLOW_CONNECTOR",
                     "CREATE_OPENFLOW_RUNTIME", "CREATE_PACKAGES_POLICY", "CREATE_PASSWORD_POLICY", "CREATE_PIPE",
@@ -1262,15 +1426,15 @@ public class GrantRevokeHandler implements CommandHandler {
                     "CREATE_TEMPORARY_TABLE", "CREATE_TYPE", "CREATE_VARIABLE", "CREATE_VIEW", "CREATE_WORKSPACE",
                     "CREATE_ZEROCOPY_CONNECTOR", "EXECUTE_AUTO_CLASSIFICATION", "MODIFY", "MONITOR", "USAGE");
             case "DATABASE":
-                return List.of("APPLYBUDGET", "CREATE_DATABASE_ROLE", "CREATE_SCHEMA", "EXECUTE_AUTO_CLASSIFICATION",
-                    "MODIFY", "MONITOR", "USAGE");
+                return List.of("APPLY_COMMENT", "APPLYBUDGET", "CREATE_DATABASE_ROLE", "CREATE_SCHEMA",
+                    "EXECUTE_AUTO_CLASSIFICATION", "MODIFY", "MONITOR", "USAGE");
             case "WAREHOUSE":
                 return List.of("MODIFY", "MONITOR", "OPERATE", "USAGE");
             case "STAGE":
                 return List.of("READ", "WRITE");
             case "FUNCTION":
             case "PROCEDURE":
-                return List.of("MONITOR", "USAGE");
+                return List.of("APPLY_COMMENT", "MONITOR", "USAGE");
             case "SEQUENCE":
                 return List.of("USAGE");
             case "STREAM":
@@ -1297,6 +1461,8 @@ public class GrantRevokeHandler implements CommandHandler {
             case "EXTERNAL_VOLUME":
             case "INTEGRATION":
                 return securityObjectPrivileges(objectType);
+            case "CORTEX_SEARCH_SERVICE":
+                return List.of("OPERATE", "USAGE");
             default:
                 return List.of("ALL");
         }

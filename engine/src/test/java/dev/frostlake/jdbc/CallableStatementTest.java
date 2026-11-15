@@ -95,7 +95,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testRegisterOutParameter() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), OUT_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), OUT_PARAMETERS);
         // Create a procedure that returns a value
         statement.execute("CREATE PROCEDURE get_constant() RETURNS INTEGER AS 'begin RETURN 42; end;'");
 
@@ -178,7 +178,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testNamedParameters() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), NAMED_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), NAMED_PARAMETERS);
         // Test named parameter parsing
         final CallableStatement cstmt = connection.prepareCall("SELECT :param1, :param2");
 
@@ -197,7 +197,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testNamedParameterNotFound() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), NAMED_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), NAMED_PARAMETERS);
         final CallableStatement cstmt = connection.prepareCall("SELECT :param1");
 
         // Try to set a parameter that doesn't exist
@@ -214,7 +214,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testRegisterOutParameterWithScale() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), OUT_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), OUT_PARAMETERS);
         final CallableStatement cstmt = connection.prepareCall("CALL test_proc(?)");
         cstmt.registerOutParameter(1, Types.DECIMAL, 2);
 
@@ -224,7 +224,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testRegisterOutParameterWithTypeName() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), OUT_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), OUT_PARAMETERS);
         final CallableStatement cstmt = connection.prepareCall("CALL test_proc(?)");
         cstmt.registerOutParameter(1, Types.VARCHAR, "VARCHAR");
 
@@ -234,7 +234,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testRegisterNamedOutParameter() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), OUT_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), OUT_PARAMETERS);
         final CallableStatement cstmt = connection.prepareCall("CALL test_proc(:result)");
         cstmt.registerOutParameter("result", Types.INTEGER);
 
@@ -257,7 +257,7 @@ public class CallableStatementTest extends BaseJdbcTest {
 
     @Test
     public void testSetNullNamedParameter() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), NAMED_PARAMETERS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), NAMED_PARAMETERS);
         final CallableStatement cstmt = connection.prepareCall("SELECT :param");
         cstmt.setNull("param", Types.INTEGER);
 

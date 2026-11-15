@@ -146,6 +146,26 @@ public class DatabaseDriver implements Driver {
         }
     }
 
+    /**
+     * The engine {@code jdbc:frostlake:direct:<name>} connections share, created as the first such connection creates
+     * it where none runs yet - so a server can serve it to clients of other transports (see
+     * {@code DatabaseHttpServer(EngineConfig, DatabaseEngine)}) and they share its data.
+     *
+     * @param name the direct name, as the URL spells it after {@code direct:}
+     * @return the engine
+     */
+    public static DatabaseEngine directEngine(final String name) {
+        synchronized (DIRECT_ENGINES) {
+            final String key = name.trim();
+            DatabaseEngine engine = DIRECT_ENGINES.get(key);
+            if (engine == null) {
+                engine = new DatabaseEngine(new EngineConfig(new Properties()));
+                DIRECT_ENGINES.put(key, engine);
+            }
+            return engine;
+        }
+    }
+
     /** Remove a registered direct engine; returns it (for shutdown) or null if the name is unknown. */
     public static DatabaseEngine unregisterDirectEngine(final String name) {
         synchronized (DIRECT_ENGINES) {

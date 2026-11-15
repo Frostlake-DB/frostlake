@@ -17,7 +17,6 @@
 package dev.frostlake.jdbc;
 
 import dev.frostlake.BaseJdbcTest;
-import dev.frostlake.LiveSnowflake;
 import dev.frostlake.http.DatabaseHttpServer;
 
 import org.junit.jupiter.api.Test;
@@ -262,7 +261,7 @@ public class SessionSurfaceAgreementTest extends BaseJdbcTest {
     }
 
     private Connection fresh() throws SQLException {
-        return isLiveSnowflake() ? LiveSnowflake.open() : new DirectConnection(sharedEngine);
+        return newSession();
     }
 
     @Test

@@ -35,6 +35,7 @@ import dev.frostlake.metastore.model.MaskingPolicy;
 import dev.frostlake.metastore.model.MaterializedView;
 import dev.frostlake.metastore.model.ObjectParameters;
 import dev.frostlake.metastore.model.Pipe;
+import dev.frostlake.metastore.model.PrivacyPolicy;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.ProjectionPolicy;
 import dev.frostlake.metastore.model.RelationKind;
@@ -44,6 +45,7 @@ import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObjectStore;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.StageType;
+import dev.frostlake.metastore.model.StorageLifecyclePolicy;
 import dev.frostlake.metastore.model.Stream;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
@@ -79,6 +81,8 @@ public class Catalog {
     private final IntegrationRegistry integrations = new IntegrationRegistry();
     /** The files COPY has loaded, for LOAD_HISTORY and COPY_HISTORY. */
     private final LoadHistory loadHistory = new LoadHistory();
+    /** The completed loads VALIDATE may validate again, by query ID (see CopyJobs). */
+    private final CopyJobs copyJobs = new CopyJobs();
     /** The refreshes the account's dynamic tables ran, for DYNAMIC_TABLE_REFRESH_HISTORY. */
     private final DynamicTableRefreshHistory dynamicTableRefreshHistory = new DynamicTableRefreshHistory();
     /** The account's query history, whose time-travel points a restored state keeps; the executor shares it. */
@@ -158,7 +162,7 @@ public class Catalog {
     // oldest first. UNDROP restores the newest, and the next UNDROP of the name the one dropped before it.
     private final Map<String, List<DroppedObject>> droppedObjects = new ConcurrentHashMap<>();
     /**
-     * The latest table version of each name purged with a retention of 0, kept only to be listed (see
+     * The latest table or schema version of each name purged with a retention of 0, kept only to be listed (see
      * {@link #listedOnlyVersions}); guarded by the dropped versions' lock.
      */
     private final Map<String, DroppedObject> listedOnly = new HashMap<>();
@@ -325,7 +329,7 @@ public class Catalog {
      */
     public Database getDatabase(final String name) {
         final Database db = databases.get(NameKeys.keyFor(databases, name));
-        if (db == null) {
+        if (db == null || HiddenDatabases.hides(db.getName())) {
             throw new RuntimeException(SqlCompilationError.doesNotExist("Database", name));
         }
         return db;
@@ -338,7 +342,8 @@ public class Catalog {
      * @return the database, or null when there is none of that name
      */
     public Database findDatabase(final String name) {
-        return name == null ? null : databases.get(NameKeys.keyFor(databases, name));
+        final Database db = name == null ? null : databases.get(NameKeys.keyFor(databases, name));
+        return db == null || HiddenDatabases.hides(db.getName()) ? null : db;
     }
 
     /**
@@ -348,10 +353,14 @@ public class Catalog {
      * must then equal a stored one. Live rejects {@code mixedDb} for a database created as
      * {@code "mixedDb"} with {@code Database 'MIXEDDB' does not exist or not authorized.}, naming the
      * resolved form rather than the spelling; so does this.
+     *
+     * <p>A database the running statement names but does not see is missing to it too (see {@link HiddenDatabases}):
+     * SHOW listings scoped to it, DESCRIBE, a query, GET_DDL and USE all answer as they answer a missing database
+     * (live-verified for a role holding no privilege on it).
      */
     public Database databaseExact(final String name) {
         final Database db = name == null ? null : databases.get(name);
-        if (db == null) {
+        if (db == null || HiddenDatabases.hides(name)) {
             throw new RuntimeException(SqlCompilationError.doesNotExist("Database", name));
         }
         return db;
@@ -643,7 +652,7 @@ public class Catalog {
 
     /** The database whose stored name is exactly {@code resolvedName}, or null. */
     private Database exactDatabaseOrNull(final String resolvedName) {
-        return resolvedName == null ? null : databases.get(resolvedName);
+        return resolvedName == null || HiddenDatabases.hides(resolvedName) ? null : databases.get(resolvedName);
     }
 
     public String getCurrentDatabase() {
@@ -1221,6 +1230,15 @@ public class Catalog {
         return loadHistory;
     }
 
+    /**
+     * The completed COPY INTO table statements VALIDATE may validate again.
+     *
+     * @return the loads, by query ID
+     */
+    public CopyJobs getCopyJobs() {
+        return copyJobs;
+    }
+
     /** The refreshes the account's dynamic tables ran, under the names they ran under. */
     public DynamicTableRefreshHistory getDynamicTableRefreshHistory() {
         return dynamicTableRefreshHistory;
@@ -1502,8 +1520,9 @@ public class Catalog {
     }
 
     /**
-     * The table versions purged with a retention of 0 that SHOW TABLES HISTORY still lists, by "TABLE:fqName": the
-     * latest of each name until the name is dropped again, which UNDROP no longer finds (live-verified).
+     * The table and schema versions purged with a retention of 0 that SHOW TABLES HISTORY and SHOW SCHEMAS HISTORY
+     * still list, by "TABLE:fqName" and "SCHEMA:fqName": the latest of each name until the name is dropped again,
+     * which UNDROP no longer finds (live-verified).
      *
      * @return a copy of the listings
      */
@@ -1539,8 +1558,10 @@ public class Catalog {
                 if (!version.isPurgedAt(now)) {
                     kept.add(version);
                 } else {
-                    // A table kept for no day is still listed, its data gone, until its name is dropped again.
-                    if (version.getRetentionDays() <= 0 && version.getObject() instanceof Table) {
+                    // A table or a schema kept for no day is still listed, its data gone, until its name is dropped
+                    // again.
+                    if (version.getRetentionDays() <= 0
+                            && (version.getObject() instanceof Table || version.getObject() instanceof Schema)) {
                         listedOnly.put(entry.getKey(), version.listedOnly());
                     }
                     if (purge != null) {
@@ -1587,7 +1608,7 @@ public class Catalog {
      * @return whether it exists
      */
     public boolean hasDatabaseExact(final String name) {
-        return name != null && databases.containsKey(name);
+        return name != null && databases.containsKey(name) && !HiddenDatabases.hides(name);
     }
 
     /** Re-insert a previously-dropped database object (UNDROP DATABASE). */
@@ -1704,6 +1725,21 @@ public class Catalog {
             return null;
         }
         return schema.getStream(objectName(qualifiedName));
+    }
+
+    /**
+     * {@link #resolveStream} by exactly its canonical name: a stream differing only in case is another (live-verified
+     * for DESCRIBE STREAM).
+     *
+     * @param qualifiedName the stream's canonical name, qualified or not
+     * @return the stream, or null when the schema or the stream does not exist
+     */
+    public Stream resolveStreamExact(final String qualifiedName) {
+        final Schema schema = resolveSchemaForObject(qualifiedName);
+        if (schema == null) {
+            return null;
+        }
+        return schema.getStreamExact(objectName(qualifiedName));
     }
 
     public void addFileFormat(final String qualifiedName, final FileFormat fileFormat) {
@@ -1914,6 +1950,37 @@ public class Catalog {
         repointPolicy(PolicyKind.JOIN, from, was, to, policy.getName());
     }
 
+    public void renamePrivacyPolicy(final String oldName, final String newName) {
+        final Schema from = resolveSchemaForObject(oldName);
+        final Schema to = resolveSchemaForObject(newName);
+        to.requireCreatable(Privilege.CREATE_PRIVACY_POLICY);
+        final PrivacyPolicy policy = from.getPrivacyPolicy(objectName(oldName));
+        final String was = policy != null ? policy.getName() : null;
+        from.renamePrivacyPolicy(objectName(oldName), objectName(newName));
+        if (from != to) {
+            // A qualified target naming another schema moves the policy there, as it moves a join policy.
+            final PrivacyPolicy moved = from.getPrivacyPolicy(objectName(newName));
+            from.dropPrivacyPolicy(objectName(newName));
+            to.addPrivacyPolicy(moved);
+        }
+        repointPolicy(PolicyKind.PRIVACY, from, was, to, policy.getName());
+    }
+
+    public void renameStorageLifecyclePolicy(final String oldName, final String newName) {
+        final Schema from = resolveSchemaForObject(oldName);
+        final Schema to = resolveSchemaForObject(newName);
+        to.requireCreatable(Privilege.CREATE_STORAGE_LIFECYCLE_POLICY);
+        final StorageLifecyclePolicy policy = from.getStorageLifecyclePolicy(objectName(oldName));
+        final String was = policy != null ? policy.getName() : null;
+        from.renameStorageLifecyclePolicy(objectName(oldName), objectName(newName));
+        if (from != to) {
+            final StorageLifecyclePolicy moved = from.getStorageLifecyclePolicy(objectName(newName));
+            from.dropStorageLifecyclePolicy(objectName(newName));
+            to.addStorageLifecyclePolicy(moved);
+        }
+        repointPolicy(PolicyKind.STORAGE_LIFECYCLE, from, was, to, policy.getName());
+    }
+
     public void renameAggregationPolicy(final String oldName, final String newName) {
         final Schema from = resolveSchemaForObject(oldName);
         final Schema to = resolveSchemaForObject(newName);
@@ -2016,6 +2083,57 @@ public class Catalog {
                 for (final View view : schema.getViews()) {
                     if (holds(view.getJoinPolicyName(), schema, home, policyName)) {
                         return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The privacy policy a possibly-qualified name resolves to, or null when nothing does.
+     *
+     * @param qualifiedName the policy name as written
+     * @return the policy, or null when the name resolves to none in that schema
+     */
+    public PrivacyPolicy findPrivacyPolicy(final String qualifiedName) {
+        return resolveSchemaForObject(qualifiedName).getPrivacyPolicy(objectName(qualifiedName));
+    }
+
+    /**
+     * The storage lifecycle policy a possibly-qualified name resolves to, or null when nothing does.
+     *
+     * @param qualifiedName the policy name as written
+     * @return the policy, or null when the name resolves to none in that schema
+     */
+    public StorageLifecyclePolicy findStorageLifecyclePolicy(final String qualifiedName) {
+        return resolveSchemaForObject(qualifiedName).getStorageLifecyclePolicy(objectName(qualifiedName));
+    }
+
+    /**
+     * True when a privacy policy (or, with {@code storage}, a storage lifecycle policy) is attached to a table, or a
+     * privacy policy to a view: live refuses to drop or replace one then.
+     *
+     * @param home       the policy's schema
+     * @param policyName the policy's own name
+     * @param storage    whether the policy is a storage lifecycle policy
+     * @return whether a table holds it
+     */
+    public boolean isPrivacyOrLifecyclePolicyInUse(final Schema home, final String policyName,
+                                                   final boolean storage) {
+        for (final Database database : databases.values()) {
+            for (final Schema schema : database.getAllSchemas()) {
+                for (final Table table : schema.getTables()) {
+                    if (holds(storage ? table.getStorageLifecyclePolicyName() : table.getPrivacyPolicyName(),
+                            schema, home, policyName)) {
+                        return true;
+                    }
+                }
+                if (!storage) {
+                    for (final View view : schema.getViews()) {
+                        if (holds(view.getPrivacyPolicyName(), schema, home, policyName)) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -2535,6 +2653,19 @@ public class Catalog {
         user.grantRole(role.getName(), currentRoleForOwner());
     }
 
+    /**
+     * Grant a role to a user as the account itself grants its first user's roles: naming no grantor, so the bare SHOW
+     * GRANTS lists the grant with an empty {@code granted_by} (live-verified).
+     *
+     * @param roleName the role
+     * @param userName the user
+     */
+    public void grantRoleToUserBySystem(final String roleName, final String userName) {
+        final User user = getUser(userName);
+        final Role role = getRoleExact(roleName);
+        user.grantRole(role.getName(), "");
+    }
+
     public void revokeRoleFromUser(final String roleName, final String userName) {
         final User user = getUser(userName);
         final Role role = getRoleExact(roleName);
@@ -2619,9 +2750,10 @@ public class Catalog {
         final Role targetRole = getRoleExact(targetRoleName);
         final Role grantedRole = getRoleExact(grantedRoleName);
 
-        // Prevent circular grants
+        // A grant that closes a loop is refused in the sentence a database role's gets.
         if (hasCircularRoleGrant(grantedRoleName, targetRoleName)) {
-            throw new RuntimeException("Cannot grant role: would create circular role hierarchy");
+            throw new RuntimeException(RoleCycle.refusal(SqlIdentifiers.spellCanonical(grantedRole.getName()),
+                SqlIdentifiers.spellCanonical(targetRole.getName())));
         }
 
         targetRole.grantRole(grantedRole.getName(), currentRoleForOwner());

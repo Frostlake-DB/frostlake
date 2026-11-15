@@ -135,6 +135,22 @@ final class UserProperties {
         checkFor(DEFAULT_USER_TYPE, properties);
     }
 
+    /**
+     * The password a property list gives, the last written; null when it gives none.
+     *
+     * @param properties the list
+     * @return the password's text, or null
+     */
+    static String writtenPassword(final List<FrostlakeParser.UserPropertyContext> properties) {
+        String password = null;
+        for (final FrostlakeParser.UserPropertyContext property : properties) {
+            if (property.PASSWORD() != null) {
+                password = text(property.STRING_LITERAL());
+            }
+        }
+        return password;
+    }
+
     /** Apply every property in the list to {@code user}, leaving unnamed properties untouched. */
     static void apply(final User user, final List<FrostlakeParser.UserPropertyContext> properties) {
         checkForm(properties);
@@ -306,6 +322,21 @@ final class UserProperties {
         unsetNames(properties);
     }
 
+    /**
+     * Whether an UNSET list names a policy bypass, which only the account's administrators may unset.
+     *
+     * @param properties the statement's properties
+     * @return whether one is named
+     */
+    static boolean unsetsBypass(final List<FrostlakeParser.UserUnsetPropertyContext> properties) {
+        for (final FrostlakeParser.UserUnsetPropertyContext property : properties) {
+            if (UserParameterList.POLICY_BYPASSES.contains(property.getText().toUpperCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The names of an UNSET list, upper case, in the order they are judged in: properties and parameters alike. */
     private static List<String> unsetNames(final List<FrostlakeParser.UserUnsetPropertyContext> properties) {
         final List<String> written = new ArrayList<>();
@@ -323,7 +354,8 @@ final class UserProperties {
         for (final String name : written) {
             final String folded = name.toUpperCase(Locale.ROOT);
             final boolean known = !name.startsWith("\"") && (UNSETTABLE.contains(folded)
-                || ParameterRegistry.isSessionParameter(folded) || LeveledParameterSettings.typeOf(folded) != null);
+                || ParameterRegistry.isSessionParameter(folded) || LeveledParameterSettings.typeOf(folded) != null
+                || UserParameterList.POLICY_BYPASSES.contains(folded));
             if (!known) {
                 throw ParameterRegistry.invalidProperty(name, "USER");
             }

@@ -110,7 +110,10 @@ public class CommentCommandHandler implements CommandHandler {
             final boolean ifExists = ctx.if_exists() != null;
             final String comment = ParseTreeText.stringValue(ctx.stringText());
 
-            if (ctx.SECRET() != null) {
+            if (ctx.commentedKind() != null) {
+                new KindComments(catalog, queryExecutor, visitor).comment(ctx.commentedKind(), ctx.qualifiedName(),
+                    comment, ifExists);
+            } else if (ctx.SECRET() != null) {
                 // Refused whatever the name, before it is looked up (live-verified).
                 throw new RuntimeException("Unsupported feature 'SECRET'.");
             } else if (ctx.DATABASE() != null) {

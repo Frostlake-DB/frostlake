@@ -19,6 +19,8 @@ package dev.frostlake.testkit;
 import dev.frostlake.DatabaseEngine;
 import dev.frostlake.LiveAccountObjects;
 import dev.frostlake.LiveSnowflake;
+import dev.frostlake.SnowflakeJdbcFl;
+import dev.frostlake.http.SnowflakeEndpoint;
 import dev.frostlake.jdbc.DatabaseDriver;
 
 import org.junit.jupiter.api.AfterAll;
@@ -60,11 +62,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  * this class is the engine's JUnit entry point.
  *
  * <p>The backend follows the suite's usual switches: {@code SF_LIVE=1} runs every statement on the live
- * account over JDBC, {@code FL_JDBC=1} through Frostlake's own driver, and otherwise an in-process engine
- * runs them. {@code -Dtestkit.backend=engine|jdbc|http|snowflake} (or {@code TESTKIT_BACKEND}) picks one
- * outright; {@code http} starts the engine's own HTTP server in-process, or attaches to
- * {@code -Dtestkit.url}. With {@code -Dtestkit.suites=a,b} (or {@code TESTKIT_SUITES}) only the suites
- * whose name contains one of the listed words run — a live replay of the whole corpus takes hours.
+ * account over JDBC, {@code SF_JDBC_FL=1} through Snowflake's own driver on an endpoint serving an in-process engine,
+ * {@code FL_JDBC=1} through Frostlake's own driver, and otherwise an in-process engine runs them.
+ * {@code -Dtestkit.backend=engine|jdbc|http|sfjdbc|snowflake} (or {@code TESTKIT_BACKEND}) picks one outright;
+ * {@code http} starts the engine's own HTTP server in-process, or attaches to {@code -Dtestkit.url}. With
+ * {@code -Dtestkit.suites=a,b} (or {@code TESTKIT_SUITES}) only the suites whose name contains one of the listed
+ * words run — a live replay of the whole corpus takes hours.
  *
  * <p>A check the transport cannot express, such as an error code over HTTP, is skipped and summarized at
  * the end rather than failed — that summary is the transport's missing-API list.
@@ -87,6 +90,9 @@ public class JsonSuiteTest {
     private static String backendName;
     /** The live account's connection, unobserved, for the cleanup's own statements; null on every other backend. */
     private static Connection liveConnection;
+    /** The sfjdbc backend's endpoint and the name of the engine it serves; null on every other backend. */
+    private static SnowflakeEndpoint sfjdbcEndpoint;
+    private static String sfjdbcName;
 
     @TestFactory
     public List<DynamicNode> jsonSuites() throws Exception {
@@ -174,7 +180,8 @@ public class JsonSuiteTest {
         final List<Object> skippedOn = Json.getArr(skip, "backends");
         if (skippedOn != null) {
             for (final Object skipped : skippedOn) {
-                if (kind.equalsIgnoreCase(String.valueOf(skipped))) {
+                if (kind.equalsIgnoreCase(String.valueOf(skipped)) || "sfjdbc".equals(kind)
+                        && skippedOverSnowflakeDriver(skippedOn, String.valueOf(skipped))) {
                     final String reason = String.valueOf(Json.getStr(skip, "reason"));
                     if (!REPLAYED_SKIPS.contains(kind)) {
                         Assumptions.abort(reason);
@@ -189,6 +196,31 @@ public class JsonSuiteTest {
             LiveSnowflake.checkAccountClaim();
         }
         runSteps(fullName, test, target, true);
+    }
+
+    /**
+     * Whether a skip holds for Snowflake's driver on Frostlake's endpoint, which answers as Frostlake over HTTP does
+     * and is read as a live account's driver reads it: a case skipped on http is skipped there too, and so is one
+     * skipped on both JDBC transports, the account's driver and Frostlake's, whose reason is what JDBC makes of the
+     * answer. Neither is replayed.
+     *
+     * @param skippedOn every backend the case is skipped on
+     * @param skipped   one of them
+     * @return true when the skip holds for the sfjdbc backend
+     */
+    private static boolean skippedOverSnowflakeDriver(final List<Object> skippedOn, final String skipped) {
+        if ("http".equalsIgnoreCase(skipped)) {
+            return true;
+        }
+        if (!"jdbc".equalsIgnoreCase(skipped)) {
+            return false;
+        }
+        for (final Object other : skippedOn) {
+            if ("snowflake".equalsIgnoreCase(String.valueOf(other))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -294,6 +326,9 @@ public class JsonSuiteTest {
         if (LiveSnowflake.enabled()) {
             return "snowflake";
         }
+        if (SnowflakeJdbcFl.enabled()) {
+            return "sfjdbc";
+        }
         if ("1".equals(System.getenv("FL_JDBC"))) {
             return "jdbc";
         }
@@ -308,6 +343,8 @@ public class JsonSuiteTest {
                 return jdbcBackend("testkit_" + System.nanoTime());
             case "http":
                 return new HttpBackend(System.getProperty("testkit.url", System.getenv("TESTKIT_URL")));
+            case "sfjdbc":
+                return sfjdbcBackend();
             case "snowflake":
                 // What the account holds before the first case is the baseline nothing here drops; every statement
                 // a case sends is read on its way, so the account-level objects it creates are this run's to drop.
@@ -317,7 +354,7 @@ public class JsonSuiteTest {
                     EnumSet.allOf(Capability.class));
             default:
                 throw new IllegalArgumentException("unknown testkit backend: " + kind
-                    + " (engine|jdbc|http|snowflake)");
+                    + " (engine|jdbc|http|sfjdbc|snowflake)");
         }
     }
 
@@ -334,6 +371,19 @@ public class JsonSuiteTest {
             EnumSet.of(Capability.UPDATE_COUNT, Capability.COLUMN_NAMES, Capability.SESSION));
     }
 
+    /**
+     * The sfjdbc backend: Snowflake's own driver, logged in to an endpoint serving a new in-process engine, the one a
+     * {@code direct:} URL of a new name holds. The endpoint and the engine go when the run closes the backend.
+     *
+     * @return the backend
+     * @throws Exception when the endpoint cannot start or the driver cannot log in
+     */
+    private static Backend sfjdbcBackend() throws Exception {
+        sfjdbcName = "testkit_sf_" + System.nanoTime();
+        sfjdbcEndpoint = SnowflakeEndpoint.start(sfjdbcName);
+        return new JdbcBackend("sfjdbc", SnowflakeJdbcFl.connect(sfjdbcEndpoint), EnumSet.allOf(Capability.class));
+    }
+
     @AfterAll
     public static void closeBackendAndReportMissingApis() throws Exception {
         if (backend != null) {
@@ -342,6 +392,14 @@ public class JsonSuiteTest {
                 dropLiveTestDatabase(backend, LiveSnowflake.holdsAccountClaim());
             }
             backend.close();
+        }
+        if (sfjdbcEndpoint != null) {
+            sfjdbcEndpoint.close();
+            sfjdbcEndpoint = null;
+            final DatabaseEngine sfjdbcEngine = DatabaseDriver.unregisterDirectEngine(sfjdbcName);
+            if (sfjdbcEngine != null) {
+                sfjdbcEngine.shutdown();
+            }
         }
         for (final Map.Entry<String, List<String>> entry : CAPABILITY_SKIPS.entrySet()) {
             logger.info("testkit missing API [{}]: {} ({} check(s), e.g. {})", backendName, entry.getKey(),

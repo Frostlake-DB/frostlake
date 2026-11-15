@@ -21,7 +21,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Syntax lines (live-verified): an alert whose condition is a DROP refuses the DROP and the token after the brackets
- * its statement reads past, as a TRUNCATE's does, and a block's CREATE whose words run on is given up at its semicolon
+ * its statement reads past, as a TRUNCATE's does, a query's bracket after a table's name is read on as any EXISTS's
+ * query reads it (see TableNameBracketLines), and a block's CREATE whose words run on is given up at its semicolon
  * with the block's later statements read on as its own, their faults reported after the CREATE's.
  */
 public class AlertDropAndBlockReadOnLinesTest extends MeasuredCellsTestSupport {
@@ -55,7 +56,18 @@ public class AlertDropAndBlockReadOnLinesTest extends MeasuredCellsTestSupport {
             {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (DROP TABLE zz a)) THEN SELECT 1",
                 "REFUSED SQL compilation error: | syntax error line 1 at position 65 unexpected 'DROP'."},
             {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (SELECT 1 FROM zz (a))) THEN SELECT 1",
-                "REFUSED SQL compilation error: | syntax error line 1 at position 82 unexpected '('."},
+                "REFUSED SQL compilation error: | syntax error line 1 at position 82 unexpected '('. | syntax error "
+                + "line 1 at position 86 unexpected ')'."},
+            {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (SELECT 1 FROM zz (a, b))) THEN SELECT 1",
+                "REFUSED SQL compilation error: | syntax error line 1 at position 82 unexpected '('. | syntax error "
+                + "line 1 at position 89 unexpected ')'."},
+            {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (SELECT 1 FROM zz (a) WHERE 1 = 1))"
+                + " THEN SELECT 1",
+                "REFUSED SQL compilation error: | syntax error line 1 at position 82 unexpected '('. | syntax error "
+                + "line 1 at position 86 unexpected 'WHERE'."},
+            {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (SELECT 1 FROM zz ((a)))) THEN SELECT 1",
+                "REFUSED SQL compilation error: | syntax error line 1 at position 82 unexpected '('. | syntax error "
+                + "line 1 at position 87 unexpected ')'."},
             {"CREATE OR REPLACE ALERT al812 SCHEDULE = '60 MINUTE' IF (EXISTS (CREATE TABLE zz (a))) THEN SELECT 1",
                 "REFUSED SQL compilation error: | syntax error line 1 at position 65 unexpected 'CREATE'. | syntax "
                 + "error line 1 at position 85 unexpected ')'."},

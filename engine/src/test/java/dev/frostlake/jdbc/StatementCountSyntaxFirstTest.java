@@ -56,7 +56,7 @@ public class StatementCountSyntaxFirstTest extends BaseJdbcTest {
 
     /** The per-statement parameter, through each transport's own unwrap surface. */
     private void setStatementCount(final int n) throws SQLException {
-        if (isLiveSnowflake()) {
+        if (isSnowflakeDriver()) {
             statement.unwrap(net.snowflake.client.api.statement.SnowflakeStatement.class)
                 .setParameter("MULTI_STATEMENT_COUNT", n);
         } else {

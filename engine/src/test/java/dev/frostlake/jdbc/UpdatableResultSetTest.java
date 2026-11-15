@@ -32,14 +32,14 @@ public class UpdatableResultSetTest extends BaseJdbcTest {
 
     /**
      * Every test here builds a {@link DirectResultSet} over the in-process engine, which means casting
-     * the connection to {@link DirectConnection} — under SF_LIVE the connection is Snowflake's own
+     * the connection to {@link DirectConnection} — with SF_LIVE or SF_JDBC_FL the connection is Snowflake's own
      * driver, so the cast throws before any assertion runs.
      */
     @BeforeEach
     public void skipWhenLive() {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "every test casts the connection to dev.frostlake.jdbc.DirectConnection to build a "
-            + "DirectResultSet over the embedded engine; under SF_LIVE the connection is Snowflake's "
+            + "DirectResultSet over the embedded engine; with SF_LIVE or SF_JDBC_FL the connection is Snowflake's "
             + "own SnowflakeConnectionImpl, so the cast fails (updatable result sets are a Frostlake "
             + "driver feature, not an account feature)");
     }

@@ -116,6 +116,32 @@ public final class SecurityObjectCommandHandler {
     }
 
     /**
+     * The password policy a user's new password is held to: the user's own, else the account's.
+     *
+     * @param catalog  the catalog
+     * @param userName the user's name, as the account holds it
+     * @return the policy, or null when the built-in one governs
+     */
+    static SecurityObject passwordPolicyOf(final Catalog catalog, final String userName) {
+        final SecurityObjectStore account = catalog.getSecurityObjects();
+        String attached = account.attachment(PASSWORD_POLICY_PREFIX + "USER|" + userName);
+        if (attached == null) {
+            attached = account.attachment(PASSWORD_POLICY_PREFIX + ACCOUNT);
+        }
+        if (attached == null) {
+            return null;
+        }
+        try {
+            final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(attached));
+            return catalog.databaseExact(name.part(0)).schemaExact(name.part(1)).getSecurityObjects()
+                .get(SecurityObjectKind.PASSWORD_POLICY, name.last());
+        } catch (final RuntimeException gone) {
+            // The policy's database or schema is no longer there: no policy of its own governs.
+            return null;
+        }
+    }
+
+    /**
      * Moves the policies attached to a user to the name the user is renamed to.
      *
      * @param catalog the catalog
@@ -241,6 +267,13 @@ public final class SecurityObjectCommandHandler {
                         final SecurityObject object) {
         return security == null
             || security.sees(kind.name(), schema.qualifiedName(object.getName()), object.getOwner());
+    }
+
+    /** Whether the session sees a network policy: SHOW lists it and DESCRIBE answers it (see {@link #sees}). */
+    private boolean seesNetworkPolicy(final SecurityObject policy) {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.sees(SecurityObjectKind.NETWORK_POLICY.name(), policy.getName(),
+            policy.getOwner());
     }
 
     private Object create(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObjectKind kind) {
@@ -522,6 +555,11 @@ public final class SecurityObjectCommandHandler {
             }
             if (properties.containsKey(key)) {
                 throw new RuntimeException(SqlCompilationError.duplicateProperty(key));
+            }
+            if (property.dottedScopeName() != null) {
+                // An agent scope's dotted name, judged as written once the other values are (see AgentSessionScopes).
+                properties.put(key, ParseTreeText.getOriginalText(property.dottedScopeName()));
+                continue;
             }
             if (leavesOut(kind, spec, property.securityPropertyValue())) {
                 continue;
@@ -977,6 +1015,34 @@ public final class SecurityObjectCommandHandler {
         }
     }
 
+    /**
+     * COMMENT ON a schema's security object, answered as its ALTER … SET COMMENT is: a policy of another kind holding
+     * the name is refused as that kind, and a missing object unless IF EXISTS forgives it.
+     *
+     * @param kind     the object's kind, one a schema holds
+     * @param name     the object's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing object
+     */
+    public void comment(final SecurityObjectKind kind, final FrostlakeParser.QualifiedNameContext name,
+                        final String comment, final boolean ifExists) {
+        final Schema schema = owningSchema(name);
+        final String objectName = lastPart(name);
+        final SecurityObject target = schema.getSecurityObjects().get(kind, objectName);
+        if (target == null) {
+            final String otherPolicy = sharesPolicyNames(kind) ? schema.policyKindHolding(objectName) : null;
+            if (otherPolicy != null) {
+                throw new RuntimeException(SqlCompilationError.objectOfOtherType(otherPolicy, kind.name()));
+            }
+            if (ifExists) {
+                return;
+            }
+            throw missing(kind, schema, objectName);
+        }
+        target.setProperty("COMMENT", comment);
+        target.setComment(comment);
+    }
+
     private Object alter(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObjectKind kind) {
         final Schema schema = kind.isSchemaObject() ? owningSchema(ctx.qualifiedName(0)) : null;
         final String name = kind.isSchemaObject() ? lastPart(ctx.qualifiedName(0))
@@ -1151,7 +1217,8 @@ public final class SecurityObjectCommandHandler {
 
     /**
      * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD POLICY} and {@code … NETWORK_POLICY}: the attachment is
-     * recorded, where {@code SHOW PASSWORD POLICIES ON} reads it back, and never enforced.
+     * recorded, where {@code SHOW PASSWORD POLICIES ON} reads it back. A password policy judges the passwords ALTER
+     * USER sets (see {@link PasswordPolicyCheck}); a network policy is never enforced.
      */
     private Object attach(final FrostlakeParser.SecurityObjectStatementContext ctx) {
         if (ctx.NETWORK_POLICY() != null && ctx.INTEGER_LITERAL() != null) {
@@ -1648,10 +1715,17 @@ public final class SecurityObjectCommandHandler {
         return new ResultSet(listing.getColumns(), kept);
     }
 
-    /** SHOW NETWORK POLICIES: every network policy of the account, by name. */
+    /**
+     * SHOW NETWORK POLICIES: every network policy of the account the session sees, by name. A role that owns a
+     * policy or holds a privilege on it sees it, as does one holding MANAGE GRANTS; any other sees none
+     * (live-verified for PUBLIC).
+     */
     private ResultSet showNetworkPolicies() {
         final List<Row> rows = new ArrayList<>();
         for (final SecurityObject policy : catalog.getSecurityObjects().list(SecurityObjectKind.NETWORK_POLICY)) {
+            if (!seesNetworkPolicy(policy)) {
+                continue;
+            }
             rows.add(new Row(Arrays.<Object>asList(
                 ShowResultHelpers.createdOn(policy.getCreatedTime()),
                 policy.getName(),
@@ -1853,7 +1927,8 @@ public final class SecurityObjectCommandHandler {
         if (kind == SecurityObjectKind.NETWORK_POLICY) {
             final String name = SqlIdentifiers.canonical(ctx.identifier());
             final SecurityObject policy = catalog.getSecurityObjects().get(kind, name);
-            if (policy == null) {
+            // A policy the session does not see is missing for it, with the same refusal as an absent one.
+            if (policy == null || !seesNetworkPolicy(policy)) {
                 throw missing(kind, null, name);
             }
             final List<Row> rows = new ArrayList<>();

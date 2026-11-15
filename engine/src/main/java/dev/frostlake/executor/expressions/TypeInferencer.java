@@ -713,6 +713,9 @@ final class TypeInferencer {
             if (CONDITIONAL_FUNCTIONS.contains(funcName)) {
                 return conditionalFoldType(funcName, foldedBranches(funcName, call.getArguments()));
             }
+            if (ANSWERS_A_VALUE_BY_ANOTHER.contains(funcName) && !call.getArguments().isEmpty()) {
+                return valueByAnotherType(call.getArguments());
+            }
             // A BINARY argument survives the constructs that hand it back or reshape it. Restricted to
             // binaries on purpose: an aggregate's declared type is NOMINAL in the registry, so reading
             // it for the other families would hand every rule a type live disagrees with.
@@ -883,9 +886,10 @@ final class TypeInferencer {
                 return declaredNumericConversionType(call.getArguments());
             }
             // AS_DECIMAL and AS_NUMBER declare the (precision, scale) written after the VARIANT, NUMBER(38,0) for
-            // none: AS_NUMBER(v, 3, 1) is NUMBER(3,1) (live-verified).
+            // none: AS_NUMBER(v, 3, 1) is NUMBER(3,1), and a number written with a fraction is read as the call reads
+            // it, AS_DECIMAL(v, 10.0, 2.0) as NUMBER(10,2) (live-verified).
             if (declared instanceof NumericType && VARIANT_NUMBER_CASTS.contains(funcName)) {
-                return declaredNumericConversionType(call.getArguments());
+                return variantNumberCastType(call.getArguments());
             }
             // The timestamp casts of a VARIANT declare the scale written after it: AS_TIMESTAMP_NTZ(v, 0) is
             // TIMESTAMP_NTZ(0) (live-verified).
@@ -1201,6 +1205,30 @@ final class TypeInferencer {
             return new NumericType("NUMBER", last.intValue(), 0);
         }
         return new NumericType("NUMBER", 38, 0);
+    }
+
+    /**
+     * The type AS_DECIMAL or AS_NUMBER declares: the precision and scale written after the VARIANT, each a number
+     * literal read as the call reads it, its whole part.
+     */
+    private static DataType variantNumberCastType(final List<Expression> args) {
+        final Integer precision = args.size() >= 2 ? numberLiteral(args.get(1)) : null;
+        final Integer scale = args.size() >= 3 ? numberLiteral(args.get(2)) : null;
+        if (precision != null && scale != null) {
+            return new NumericType("NUMBER", precision.intValue(), scale.intValue());
+        }
+        if (precision != null && args.size() == 2) {
+            return new NumericType("NUMBER", precision.intValue(), 0);
+        }
+        return new NumericType("NUMBER", 38, 0);
+    }
+
+    /** The whole part of a number literal argument, or null when it is no number literal. */
+    private static Integer numberLiteral(final Expression arg) {
+        if (!(arg instanceof LiteralExpression) || !(((LiteralExpression) arg).getValue() instanceof Number)) {
+            return null;
+        }
+        return Integer.valueOf(((Number) ((LiteralExpression) arg).getValue()).intValue());
     }
 
     /** The int a literal argument holds, or null when it is not an integer literal. */
@@ -1718,6 +1746,13 @@ final class TypeInferencer {
         if (funcName.equals("DATE_TRUNC") && args.size() >= 2) {
             final DataType subject = infer(args.get(1));
             return subject instanceof DateTimeType ? atFullPrecision((DateTimeType) subject) : null;
+        }
+        if (funcName.equals("TIME_SLICE") && !args.isEmpty()) {
+            // The slice of a DATE is a DATE, "identical to the data type of the input date_or_time_expr (i.e. either
+            // TIMESTAMP_NTZ or DATE)" (documented); any other input keeps the declared TIMESTAMP_NTZ.
+            final DataType subject = infer(args.get(0));
+            return subject instanceof DateTimeType && DateTimeType.DATE.getName().equals(subject.getName())
+                ? DateTimeType.DATE : null;
         }
         if (funcName.equals("ADD_MONTHS") || funcName.equals("TRUNC")) {
             final DataType subject = args.isEmpty() ? null : infer(args.get(0));
@@ -3296,6 +3331,9 @@ final class TypeInferencer {
         if (passesItsArgumentThrough(funcName)) {
             return infer(args.get(0));
         }
+        if (ANSWERS_A_VALUE_BY_ANOTHER.contains(funcName) && !args.isEmpty()) {
+            return valueByAnotherType(args);
+        }
         if (funcName.equals("AVG") && !(window.isOrdered() && !window.isOwnFramed())) {
             final DataType argument = aggregatedType(funcName, args.get(0));
             if (argument instanceof NumericType) {
@@ -3305,6 +3343,19 @@ final class TypeInferencer {
             return argument == null ? null : aggregateResultType(funcName, new FunctionCallExpression(funcName, args));
         }
         return aggregateResultType(funcName, new FunctionCallExpression(funcName, args));
+    }
+
+    /** The aggregates that answer one of their first argument's values, picked by their second. */
+    private static final Set<String> ANSWERS_A_VALUE_BY_ANOTHER = new HashSet<>(Arrays.asList("MAX_BY", "MIN_BY"));
+
+    /**
+     * MAX_BY's and MIN_BY's type: the value's own, whole, since the answer is one of the values, or an ARRAY of them
+     * with a count (documented: "The data type of the returned value is the same as the data type of the input
+     * expression"; "If maximum_number_of_values_in_output_array is specified, returns an ARRAY"). The registry's
+     * nominal VARIANT made a CTAS type the column from a value, a DECFLOAT as NUMBER(38,0).
+     */
+    private DataType valueByAnotherType(final List<Expression> args) {
+        return args.size() > 2 ? ArrayType.ARRAY : infer(args.get(0));
     }
 
     /** The aggregates over pairs that answer FLOAT: the correlation, the covariances and a regression's terms. */

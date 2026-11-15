@@ -23,6 +23,7 @@ import dev.frostlake.metastore.model.Table;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -266,6 +267,36 @@ public class StorageEngine {
         final Map<String, TableStorage> aside = session == null ? null : sessionTablesAside.get(session);
         final TableStorage storage = aside == null ? null : aside.remove(qualifiedName);
         if (storage != null) {
+            sessionMap(sessionTables, session).put(qualifiedName, storage);
+        }
+    }
+
+    /**
+     * Take the current session's own temporary table's rows of a key out of the engine, to wait with a dropped schema
+     * or database for an UNDROP in the same session ({@link #restoreOwnSessionTable}).
+     *
+     * @param qualifiedName the key
+     * @return the rows, or null where the session holds no such table
+     */
+    public TableStorage takeOwnSessionTable(final String qualifiedName) {
+        final Long session = StatementSession.current();
+        final Map<String, TableStorage> own = session == null ? null : sessionTables.get(session);
+        final TableStorage storage = own == null ? null : own.remove(qualifiedName);
+        if (own != null && own.isEmpty()) {
+            sessionTables.remove(session);
+        }
+        return storage;
+    }
+
+    /**
+     * Put the current session's own temporary table's rows back under a key, as {@link #takeOwnSessionTable} took them.
+     *
+     * @param qualifiedName the key
+     * @param storage       the rows
+     */
+    public void restoreOwnSessionTable(final String qualifiedName, final TableStorage storage) {
+        final Long session = StatementSession.current();
+        if (session != null && storage != null) {
             sessionMap(sessionTables, session).put(qualifiedName, storage);
         }
     }
@@ -568,11 +599,8 @@ public class StorageEngine {
         final TableStorage sourceStorage = getTableStorage(sourceQualifiedName);
         final TableStorage targetStorage = getTableStorage(targetQualifiedName);
 
-        // Copy all rows from source to target
-        for (final Row row : sourceStorage.scan()) {
-            // Create a new row with the same values
-            final Row clonedRow = new Row(new ArrayList<>(row.getValues()));
-            targetStorage.insert(clonedRow);
-        }
+        // Copy all rows from source to target, each under its source identity.
+        final List<Long> ids = new ArrayList<>();
+        targetStorage.insertCloned(sourceStorage.scanWithIds(ids), ids);
     }
 }

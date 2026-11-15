@@ -51,7 +51,7 @@ public class InformationSchemaCatalogTest extends BaseDatabaseTest {
         "CLASS_INSTANCE_FUNCTIONS", "CLASS_INSTANCE_PROCEDURES", "COLUMNS",
         "CORTEX_SEARCH_SERVICES", "CORTEX_SEARCH_SERVICE_SCORING_PROFILES",
         "CURRENT_PACKAGES_POLICY", "DATABASES", "ELEMENT_TYPES", "ENABLED_ROLES", "EVENT_TABLES",
-        "EXTERNAL_TABLES", "FIELDS", "FILE_FORMATS", "FUNCTIONS", "GIT_REPOSITORIES",
+        "EXTERNAL_TABLES", "FIELDS", "FILE_FORMATS", "FUNCTIONS", "FUNCTION_INVERSES", "GIT_REPOSITORIES",
         "HYBRID_TABLES", "INDEXES", "INDEX_COLUMNS", "INFORMATION_SCHEMA_CATALOG_NAME", "LISTINGS",
         "LOAD_HISTORY", "MODEL_VERSIONS", "NOTEBOOKS", "OBJECT_PRIVILEGES", "PACKAGES", "PIPES",
         "PROCEDURES", "REFERENTIAL_CONSTRAINTS", "REPLICATION_DATABASES", "REPLICATION_GROUPS",
@@ -270,13 +270,14 @@ public class InformationSchemaCatalogTest extends BaseDatabaseTest {
     /** An unmodeled view answers with its live column shape and no rows. */
     @Test
     public void anUnmodeledViewIsEmptyWithItsLiveShape() {
-        final ResultSet rs = engine.executeQuery("SELECT * FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS");
+        final ResultSet rs = engine.executeQuery("SELECT * FROM INFORMATION_SCHEMA.BACKUP_POLICIES");
         assertEquals(0, rs.getRowCount());
         final Set<String> columns = new HashSet<>();
         for (int i = 0; i < rs.getColumns().size(); i++) {
             columns.add(rs.getColumns().get(i).getName());
         }
-        assertEquals(new HashSet<>(Arrays.asList("CONSTRAINT_CATALOG", "CONSTRAINT_SCHEMA",
-            "CONSTRAINT_TABLE", "CONSTRAINT_NAME", "CHECK_CLAUSE")), columns);
+        assertEquals(new HashSet<>(Arrays.asList("BACKUP_POLICY_NAME", "BACKUP_POLICY_SCHEMA", "BACKUP_POLICY_CATALOG",
+            "SCHEDULE", "EXPIRE_AFTER_DAYS", "HAS_RETENTION_LOCK", "OWNER", "OWNER_ROLE_TYPE", "CREATED",
+            "LAST_ALTERED", "COMMENT")), columns);
     }
 }

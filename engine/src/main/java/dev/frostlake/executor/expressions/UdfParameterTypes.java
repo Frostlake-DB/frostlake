@@ -31,7 +31,9 @@ import dev.frostlake.types.StringType;
  *
  * <ul>
  *   <li>a VARCHAR parameter takes a text argument's width, whatever it is — wider or narrower than the
- *       declaration — and the UNBOUNDED width for anything else, a number, a date and NULL alike;</li>
+ *       declaration — and for anything else, a number, a boolean, a date and NULL alike, the UNBOUNDED width where
+ *       it is declared with a length and none where it is declared without one: over {@code f(p VARCHAR)},
+ *       {@code SYSTEM$TYPEOF(f(1))} reads VARCHAR[LOB], over {@code f(p VARCHAR(5))} VARCHAR(134217728)[LOB];</li>
  *   <li>a BINARY parameter takes a binary argument's width, and the declared one otherwise;</li>
  *   <li>an exact NUMBER parameter takes an exact number argument's precision and scale only when that
  *       scale is at least the parameter's — {@code 1.25} into NUMBER(10,2) stays NUMBER(3,2) while a
@@ -66,15 +68,30 @@ public final class UdfParameterTypes {
     }
 
     /**
-     * The type the body reads this parameter at.
+     * The type the body reads this parameter at, declared with a length.
      *
      * @param declared the parameter's declared type
      * @param argument the argument's static type, or null when it could not be typed
      * @return the type to compile the body with
      */
     public static DataType effective(final DataType declared, final DataType argument) {
+        return effective(declared, argument, false);
+    }
+
+    /**
+     * The type the body reads this parameter at.
+     *
+     * @param declared the parameter's declared type
+     * @param argument the argument's static type, or null when it could not be typed
+     * @param unsized  whether the parameter was declared with no length
+     * @return the type to compile the body with
+     */
+    public static DataType effective(final DataType declared, final DataType argument, final boolean unsized) {
         if (declared instanceof StringType) {
-            return argument instanceof StringType ? argument
+            if (argument instanceof StringType) {
+                return argument;
+            }
+            return unsized ? new LengthlessStringType()
                 : new StringType(declared.getName(), (int) DeclaredTypeFold.UNKNOWN_LENGTH_VARCHAR);
         }
         if (argument == null) {

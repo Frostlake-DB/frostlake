@@ -92,7 +92,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayGetArraySubset() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {10, 20, 30, 40, 50};
         final Array array = connection.createArrayOf("INTEGER", elements);
 
@@ -104,7 +104,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayGetArraySubsetAtEnd() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {1, 2, 3, 4, 5};
         final Array array = connection.createArrayOf("INTEGER", elements);
 
@@ -116,7 +116,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayInvalidIndex() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {1, 2, 3};
         final Array array = connection.createArrayOf("INTEGER", elements);
 
@@ -139,7 +139,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayFree() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {1, 2, 3};
         final Array array = connection.createArrayOf("INTEGER", elements);
 
@@ -195,7 +195,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayLength() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {1, 2, 3, 4, 5};
         final DirectArray array = (DirectArray) connection.createArrayOf("INTEGER", elements);
 
@@ -206,7 +206,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testCreateStruct() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] attributes = {"John", 30, true};
         final Struct struct = connection.createStruct("PERSON", attributes);
 
@@ -372,7 +372,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayOfStructs() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         // Create structs
         final String[] names = {"id", "name"};
         final DirectStruct struct1 = new DirectStruct("PERSON", names, new Object[]{1, "Alice"});
@@ -392,7 +392,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testStructWithArrayField() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         // Create array
         final Object[] numbers = {1, 2, 3, 4, 5};
         final Array array = connection.createArrayOf("INTEGER", numbers);
@@ -442,7 +442,7 @@ public class ArrayStructTest extends BaseJdbcTest {
 
     @Test
     public void testArrayToString() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), DRIVER_OBJECTS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), DRIVER_OBJECTS);
         final Object[] elements = {1, 2, 3};
         final DirectArray array = (DirectArray) connection.createArrayOf("INTEGER", elements);
 

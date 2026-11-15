@@ -25,7 +25,8 @@ import org.junit.jupiter.api.Test;
  * that is no parameter at all is an invalid property of the kind, judged first and in the account's own order; a
  * parameter of another level, set or unset, is refused for want of access, as
  * {@code Insufficient privileges to operate on schema 'TEST_SCHEMA'.}; CREATE SCHEMA and CREATE TABLE refuse one as
- * {@code cannot set parameter 'TIMEZONE' at 'SCHEMA'}. A container's classification profile is taken: unset, and
+ * {@code cannot set parameter 'TIMEZONE' at 'SCHEMA'}, and so does an ALTER that changes the comment beside nothing but
+ * parameters. A container's classification profile is taken: unset, and
  * set to a profile that must exist, {@code invalid value 'P' for property 'bundle instance name'}; a catalog's
  * namespace properties are no schema's, and no database's that is not linked to a catalog.
  */
@@ -81,8 +82,23 @@ public class ParameterLevelTest extends MeasuredCellsTestSupport {
                 "REFUSED SQL compilation error: | invalid property 'NOSUCH_PARAMETER' for 'SCHEMA'"},
             {"CREATE SCHEMA test_db.nf_sv TIMEZONE = 'UTC' NOSUCH_PARAMETER = 1",
                 "REFUSED SQL compilation error: | invalid property 'NOSUCH_PARAMETER' for 'SCHEMA'"},
+            // Beside a comment alone, a parameter of another level is refused in CREATE's words, SET or UNSET.
             {"ALTER SCHEMA test_db.test_schema SET COMMENT = 'k' TIMEZONE = 'UTC'",
-                "REFUSED SQL access control error: | Insufficient privileges to operate on schema 'TEST_SCHEMA'."},
+                "REFUSED SQL compilation error: | cannot set parameter 'TIMEZONE' at 'SCHEMA'"},
+            {"ALTER SCHEMA test_db.test_schema SET COMMENT = 'k' TIMEZONE = 'UTC' AUTOCOMMIT = TRUE",
+                "REFUSED SQL compilation error: | cannot set parameter 'AUTOCOMMIT' at 'SCHEMA'"},
+            {"ALTER SCHEMA test_db.test_schema SET COMMENT = 'k' MAX_CONCURRENCY_LEVEL = 4",
+                "REFUSED SQL compilation error: | cannot set parameter 'MAX_CONCURRENCY_LEVEL' at 'SCHEMA'"},
+            {"ALTER SCHEMA test_db.test_schema UNSET COMMENT, TIMEZONE",
+                "REFUSED SQL compilation error: | cannot set parameter 'TIMEZONE' at 'SCHEMA'"},
+            {"ALTER DATABASE test_db SET COMMENT = 'k' TIMEZONE = 'UTC'",
+                "REFUSED SQL compilation error: | cannot set parameter 'TIMEZONE' at 'DATABASE'"},
+            {"ALTER TABLE nf_p SET COMMENT = 'k' TIMEZONE = 'UTC'",
+                "REFUSED SQL compilation error: | cannot set parameter 'TIMEZONE' at 'TABLE'"},
+            {"ALTER TABLE nf_p UNSET COMMENT, TIMEZONE",
+                "REFUSED SQL compilation error: | cannot set parameter 'TIMEZONE' at 'TABLE'"},
+            {"ALTER TABLE nf_p SET COMMENT = 'k' CHANGE_TRACKING = TRUE TIMEZONE = 'UTC'",
+                "REFUSED SQL access control error: | Insufficient privileges to operate on table 'NF_P'."},
         });
         engine.execute("SHOW SCHEMAS LIKE 'TEST_SCHEMA' IN DATABASE test_db");
         assertCells(new String[][] {

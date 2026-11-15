@@ -93,6 +93,8 @@ public class CatalogObjectPersistenceTest {
             "CREATE NOTIFICATION INTEGRATION it_ns TYPE = EMAIL ENABLED = FALSE",
             "CREATE CATALOG INTEGRATION ice_cat CATALOG_SOURCE = OBJECT_STORE TABLE_FORMAT = ICEBERG ENABLED = TRUE",
             "CREATE EXTERNAL VOLUME ev_a " + LOCATIONS + " ALLOW_WRITES = FALSE COMMENT = 'vol'",
+            // The organization's administrator creates its accounts.
+            "USE ROLE ORGADMIN",
             """
             CREATE ACCOUNT acc_one ADMIN_NAME = admin ADMIN_PASSWORD = 'TestPassword1' FIRST_NAME = 'Jane'
               EMAIL = 'jane@example.com' EDITION = ENTERPRISE REGION = AWS_US_WEST_2 COMMENT = 'first'""",
@@ -100,14 +102,16 @@ public class CatalogObjectPersistenceTest {
             CREATE ACCOUNT acc_two ADMIN_NAME = admin ADMIN_PASSWORD = 'TestPassword1'
               EMAIL = 'bob@example.com' EDITION = STANDARD""",
             "DROP ACCOUNT acc_two GRACE_PERIOD_IN_DAYS = 3",
+            "USE ROLE SYSADMIN",
             """
-            CREATE MANAGED ACCOUNT reader_one ADMIN_NAME = admin, ADMIN_PASSWORD = 'Sdfed43da!44', TYPE = READER,
+            CREATE MANAGED ACCOUNT reader_one ADMIN_NAME = admin, ADMIN_PASSWORD = 'Sdfed43da!44Xy', TYPE = READER,
               COMMENT = 'for sharing'""",
             "CREATE COMPUTE POOL p1 MIN_NODES = 1 MAX_NODES = 2 INSTANCE_FAMILY = CPU_X64_XS"
                 + " INITIALLY_SUSPENDED = TRUE AUTO_SUSPEND_SECS = 60 COMMENT = 'pool'"),
             Arrays.asList("SHOW INTEGRATIONS", "DESCRIBE INTEGRATION it_api", "DESCRIBE INTEGRATION it_ns",
                 "DESCRIBE INTEGRATION ice_cat", "SHOW EXTERNAL VOLUMES", "DESCRIBE EXTERNAL VOLUME ev_a",
-                "SHOW ACCOUNTS HISTORY", "SHOW MANAGED ACCOUNTS", "SHOW COMPUTE POOLS"));
+                "USE ROLE ORGADMIN", "SHOW ACCOUNTS HISTORY", "USE ROLE SYSADMIN", "SHOW MANAGED ACCOUNTS",
+                "SHOW COMPUTE POOLS"));
     }
 
     /** The external ID an integration and a volume were given when they were created is theirs after a restart. */
@@ -171,10 +175,12 @@ public class CatalogObjectPersistenceTest {
     public void aNewAccountAfterARestartTakesAFreshLocator() {
         final Path data = dir.resolve("locator");
         final DatabaseEngine first = snapshotEngine(data);
+        first.execute("USE ROLE ORGADMIN");
         first.execute("CREATE ACCOUNT acc_a ADMIN_NAME = admin ADMIN_PASSWORD = 'TestPassword1'"
             + " EMAIL = 'a@example.com' EDITION = STANDARD");
         first.shutdown();
         final DatabaseEngine second = snapshotEngine(data);
+        second.execute("USE ROLE ORGADMIN");
         second.execute("CREATE ACCOUNT acc_b ADMIN_NAME = admin ADMIN_PASSWORD = 'TestPassword1'"
             + " EMAIL = 'b@example.com' EDITION = STANDARD");
         final List<String> locators = column(second.executeQuery("SHOW ACCOUNTS"), "account_locator");
@@ -296,7 +302,8 @@ public class CatalogObjectPersistenceTest {
                 + " COMMENT = 'first' IDLE_AUTO_SHUTDOWN_TIME_SECONDS = 600",
             STAGED_APP,
             "CREATE STREAMLIT app FROM '@stg/app' MAIN_FILE = 'streamlit_app.py' TITLE = 'My app'"
-                + " QUERY_WAREHOUSE = fl_app_wh1 IMPORTS = ('@stg/lib.py') EXTERNAL_ACCESS_INTEGRATIONS = (ext1)",
+                + " QUERY_WAREHOUSE = fl_app_wh1 RUNTIME_NAME = 'SYSTEM$WAREHOUSE_RUNTIME'"
+                + " IMPORTS = ('@stg/lib.py') EXTERNAL_ACCESS_INTEGRATIONS = (ext1)",
             "ALTER STREAMLIT app ADD LIVE VERSION FROM LAST",
             "CREATE IMAGE REPOSITORY repo COMMENT = 'images'",
             "CREATE COMPUTE POOL cs_pool MIN_NODES = 1 MAX_NODES = 1 INSTANCE_FAMILY = CPU_X64_XS",
@@ -416,9 +423,11 @@ public class CatalogObjectPersistenceTest {
             "CREATE COMPUTE POOL p1 MIN_NODES = 1 MAX_NODES = 1 INSTANCE_FAMILY = CPU_X64_XS"
                 + " INITIALLY_SUSPENDED = TRUE",
             "ALTER COMPUTE POOL p1 RESUME",
+            "USE ROLE ORGADMIN",
             "CREATE ACCOUNT acc_one ADMIN_NAME = admin ADMIN_PASSWORD = 'TestPassword1'"
                 + " EMAIL = 'a@example.com' EDITION = STANDARD",
-            "CREATE MANAGED ACCOUNT reader_one ADMIN_NAME = admin, ADMIN_PASSWORD = 'Sdfed43da!44', TYPE = READER",
+            "USE ROLE SYSADMIN",
+            "CREATE MANAGED ACCOUNT reader_one ADMIN_NAME = admin, ADMIN_PASSWORD = 'Sdfed43da!44Xy', TYPE = READER",
             "CREATE DATABASE d1",
             "CREATE SCHEMA d1.s1",
             "USE SCHEMA d1.s1",
@@ -446,7 +455,8 @@ public class CatalogObjectPersistenceTest {
             "GRANT DATABASE ROLE d1.dr1 TO ROLE r1",
             "GRANT SELECT ON TABLE d1.s1.src TO ROLE r1",
             "GRANT SELECT ON FUTURE TABLES IN SCHEMA d1.s1 TO ROLE r1"),
-            Arrays.asList("SHOW INTEGRATIONS", "SHOW EXTERNAL VOLUMES", "SHOW COMPUTE POOLS", "SHOW ACCOUNTS",
+            Arrays.asList("SHOW INTEGRATIONS", "SHOW EXTERNAL VOLUMES", "SHOW COMPUTE POOLS", "USE ROLE ORGADMIN",
+                "SHOW ACCOUNTS", "USE ROLE SYSADMIN",
                 "SHOW MANAGED ACCOUNTS", "SHOW NOTEBOOKS IN SCHEMA d1.s1", "SHOW STREAMLITS IN SCHEMA d1.s1",
                 "SHOW IMAGE REPOSITORIES IN SCHEMA d1.s1", "SHOW SERVICES IN SCHEMA d1.s1",
                 "SHOW JOB SERVICES IN SCHEMA d1.s1", "SHOW ARTIFACT REPOSITORIES IN SCHEMA d1.s1",

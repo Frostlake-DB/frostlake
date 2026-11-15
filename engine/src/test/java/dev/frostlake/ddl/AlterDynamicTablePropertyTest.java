@@ -180,7 +180,7 @@ public class AlterDynamicTablePropertyTest extends BaseDatabaseTest {
 
     /** With none, a property the account refuses is still the refusal. */
     @Test
-    public void withNoCurrentDatabaseACommentIsAPlainAlter() {
+    public void withNoCurrentDatabaseACommentIsAnObjectComment() {
         try {
             engine.execute("CREATE OR REPLACE WAREHOUSE P445_WH WITH WAREHOUSE_SIZE = XSMALL AUTO_SUSPEND = 60 INITIALLY_SUSPENDED = TRUE");
             engine.execute("CREATE OR REPLACE DATABASE P445B_DB");
@@ -189,10 +189,10 @@ public class AlterDynamicTablePropertyTest extends BaseDatabaseTest {
             engine.execute("ALTER DYNAMIC TABLE P445B_DB.PUBLIC.DT SUSPEND");
             engine.execute("CREATE OR REPLACE DATABASE P445B_IDLE");
             engine.execute("DROP DATABASE P445B_IDLE");
-            assertRefused("ALTER DYNAMIC TABLE dt SET COMMENT = 'x'",
-                "Cannot perform ALTER. This session does not have a current database. Call 'USE DATABASE', or use a qualified name.");
-            assertRefused("ALTER DYNAMIC TABLE dt UNSET COMMENT",
-                "Cannot perform ALTER. This session does not have a current database. Call 'USE DATABASE', or use a qualified name.");
+            assertRefused("ALTER DYNAMIC TABLE dt SET COMMENT = 'x'", "Cannot perform ALTER OBJECT COMMENT. This "
+                + "session does not have a current database. Call 'USE DATABASE', or use a qualified name.");
+            assertRefused("ALTER DYNAMIC TABLE dt UNSET COMMENT", "Cannot perform ALTER OBJECT COMMENT. This session "
+                + "does not have a current database. Call 'USE DATABASE', or use a qualified name.");
             assertRefused("ALTER DYNAMIC TABLE PUBLIC.dt SET DATA_RETENTION_TIME_IN_DAYS = 1",
                 "Cannot perform ALTER. This session does not have a current database. Call 'USE DATABASE', or use a qualified name.");
             assertRefused("ALTER DYNAMIC TABLE dt SUSPEND",

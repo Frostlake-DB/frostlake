@@ -57,6 +57,7 @@ public class ManagedAccountColumnsTest extends BaseDatabaseTest {
         // The account answers HISTORY only to a role that manages organization accounts, which the test session's
         // primary role does not.
         Assumptions.assumeFalse(isLiveSnowflake());
+        engine.execute("USE ROLE ORGADMIN");
         assertEquals(List.of("organization_name", "account_name", "snowflake_region", "edition", "account_url",
             "created_on", "comment", "account_locator", "account_locator_url", "managed_accounts",
             "consumption_billing_entity_name", "marketplace_consumer_billing_entity_name",

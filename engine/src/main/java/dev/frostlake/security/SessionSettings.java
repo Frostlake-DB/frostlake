@@ -66,6 +66,8 @@ public final class SessionSettings {
     private volatile SessionRoles roles;
     /** Whether SYSTEM$ABORT_SESSION ended the session: what it runs now ends, and it runs nothing more. */
     private volatile boolean aborted;
+    /** The JSON_INDENT the session's values are laid out at while it sets none; null for the engine's own width. */
+    private volatile Integer defaultJsonIndent;
 
     /** A new session's settings. */
     public SessionSettings() {
@@ -98,6 +100,27 @@ public final class SessionSettings {
         return aborted;
     }
 
+    /**
+     * The JSON_INDENT this session's semi-structured values are laid out at while it sets none - a front end answering
+     * a client that expects the account's default width gives its sessions that width - or null for the engine's own
+     * (see {@link dev.frostlake.values.VariantJsonFormat#DEFAULT_INDENT}). It lasts for the session's life.
+     *
+     * @return the width, or null
+     */
+    public Integer getDefaultJsonIndent() {
+        return defaultJsonIndent;
+    }
+
+    /**
+     * Sets the JSON_INDENT this session's values are laid out at while it sets none (see
+     * {@link #getDefaultJsonIndent}).
+     *
+     * @param defaultJsonIndent the width, or null for the engine's own
+     */
+    public void setDefaultJsonIndent(final Integer defaultJsonIndent) {
+        this.defaultJsonIndent = defaultJsonIndent;
+    }
+
     public long getSessionNumber() {
         return sessionNumber;
     }
@@ -126,6 +149,15 @@ public final class SessionSettings {
     /** The parameters ALTER SESSION set, by upper-case name. */
     Map<String, Object> parameters() {
         return parameters;
+    }
+
+    /**
+     * The parameters ALTER SESSION set, by upper-case name, as they were set: a copy, for a reader outside the session.
+     *
+     * @return the parameters
+     */
+    public Map<String, Object> setParameters() {
+        return new HashMap<String, Object>(parameters);
     }
 
     /**

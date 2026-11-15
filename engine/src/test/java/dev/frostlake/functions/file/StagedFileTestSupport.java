@@ -54,7 +54,10 @@ public abstract class StagedFileTestSupport extends FileFunctionTestSupport {
             // Live: an INTERNAL stage under the same name, with SERVER-SIDE encryption so the
             // FILE descriptor's SIZE and ETAG reflect the plain bytes (the client-side default
             // pads sizes to the cipher block — 24 bytes read back as 32). stage()/stageBytes()
-            // PUT into it, so cells whose asserts hold there can lift their guards one by one.
+            // PUT into it, so cells whose asserts hold there can lift their guards one by one. The result cache is
+            // off: the account answers a statement it ran before over a stage of the same name from its cache, so a
+            // run would read what an earlier run's files held.
+            engine.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE");
             engine.execute("CREATE STAGE st ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')");
             return;
         }

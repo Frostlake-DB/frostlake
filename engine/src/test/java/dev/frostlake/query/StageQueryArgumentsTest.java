@@ -227,6 +227,8 @@ public class StageQueryArgumentsTest extends MeasuredCellsTestSupport {
 
     @Test
     public void filesReadThroughTheArguments() {
+        // The account answers a query over a stage it ran before from its result cache, whatever the stage holds now.
+        engine.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE");
         answer(
             "CREATE OR REPLACE STAGE ust");
         answer(

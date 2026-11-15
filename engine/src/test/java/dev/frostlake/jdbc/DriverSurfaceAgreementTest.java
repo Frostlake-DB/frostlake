@@ -18,7 +18,6 @@
 package dev.frostlake.jdbc;
 
 import dev.frostlake.BaseJdbcTest;
-import dev.frostlake.LiveSnowflake;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -105,8 +104,22 @@ public class DriverSurfaceAgreementTest extends BaseJdbcTest {
         refused("SELECT 1 AS c", true, true);
     }
 
+    /**
+     * A decimal or a whole number binds as FIXED and is typed by its digits, a FLOAT or DOUBLE target binds as REAL and
+     * is a FLOAT, a VARCHAR target binds the text. The account's result cache would answer one binding with the type
+     * an earlier one of the same text had, so it is off here.
+     */
     @Test
     public void setObjectBindsItsTargetType() throws SQLException {
+        statement.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE");
+        try {
+            assertTargetTypesBind();
+        } finally {
+            statement.execute("ALTER SESSION UNSET USE_CACHED_RESULT");
+        }
+    }
+
+    private void assertTargetTypesBind() throws SQLException {
         assertEquals("7.2 / NUMBER(2,1)[SB1]", bound(new BigDecimal("7.20"), Types.DECIMAL, Integer.valueOf(1)));
         assertEquals("7 / NUMBER(1,0)[SB1]", bound(new BigDecimal("7"), Types.DECIMAL, Integer.valueOf(2)));
         assertEquals("7.25 / NUMBER(3,2)[SB2]", bound("7.25", Types.DECIMAL, Integer.valueOf(2)));
@@ -114,14 +127,14 @@ public class DriverSurfaceAgreementTest extends BaseJdbcTest {
         assertEquals("5 / VARCHAR(1)[LOB]", bound(Integer.valueOf(5), Types.VARCHAR, null));
         assertEquals("5 / NUMBER(1,0)[SB1]", bound("5", Types.INTEGER, null));
         assertEquals("7.25 / NUMBER(3,2)[SB2]", bound(new BigDecimal("7.25"), Types.NUMERIC, Integer.valueOf(3)));
-        assertEquals("7.25 / NUMBER(3,2)[SB2]", bound(new BigDecimal("7.25"), Types.DOUBLE, Integer.valueOf(1)));
+        assertEquals("7.25 / FLOAT[DOUBLE]", bound(new BigDecimal("7.25"), Types.DOUBLE, Integer.valueOf(1)));
         assertEquals("7.2 / NUMBER(2,1)[SB1]", bound(new BigDecimal("7.2"), Types.DECIMAL, null));
     }
 
     /** A scale that would round is refused; the account's driver fails there with a raw ArithmeticException. */
     @Test
     public void aScaleThatWouldRoundIsRefused() {
-        assumeFalse(LiveSnowflake.enabled(), "the account's driver leaks an ArithmeticException here");
+        assumeFalse(isSnowflakeDriver(), "the account's driver leaks an ArithmeticException here");
         final SQLException rounded = assertThrows(SQLException.class, new Executable() {
             @Override
             public void execute() throws SQLException {

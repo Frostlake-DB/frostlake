@@ -239,6 +239,7 @@ public final class StreamlitResource implements RestResource {
         sql.identifier(body, "query_warehouse", "QUERY_WAREHOUSE");
         sql.string(body, "comment", "COMMENT");
         sql.string(body, "title", "TITLE");
+        sql.string(body, "runtime_name", "RUNTIME_NAME");
         sql.stringList(body, "imports", "IMPORTS");
         sql.append(AppObjectRest.identifierList(body, "external_access_integrations",
             "EXTERNAL_ACCESS_INTEGRATIONS"));

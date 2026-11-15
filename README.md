@@ -26,6 +26,30 @@ mvn verify                      # + Apache RAT license-header audit
 The suite's other modes — through Frostlake's own JDBC driver, against a live Snowflake account, and the
 language-neutral testkit corpus — are described in [`docs/testing.md`](docs/testing.md).
 
+## Snowflake's JDBC driver
+
+Snowflake's own JDBC driver (`net.snowflake:snowflake-jdbc`) works with Frostlake unchanged. Start the HTTP
+server (`data/start-http-server.sh`, port 18082) and connect to
+`jdbc:snowflake://127.0.0.1:18082/?account=frostlake&ssl=off` with any user and password, or start one in-process
+in a test:
+
+```java
+try (SnowflakeEndpoint endpoint = SnowflakeEndpoint.start("mydb");
+     Connection conn = DriverManager.getConnection(endpoint.jdbcUrl(), "any", "any");
+     Statement stmt = conn.createStatement()) {
+    stmt.execute("CREATE TABLE t (id INT, name VARCHAR)");
+    stmt.execute("INSERT INTO t VALUES (1, 'a'), (2, 'b')");
+    try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM t")) {
+        rs.next();
+        System.out.println(rs.getLong(1));   // 2
+    }
+}
+```
+
+As against Snowflake, the driver reads its default Arrow results on JDK 16+ only with
+`--add-opens=java.base/java.nio=ALL-UNNAMED`; append `&JDBC_QUERY_RESULT_FORMAT=JSON` to the URL to do without.
+Details in [`docs/http-api.md`](docs/http-api.md#the-snowflake-jdbc-driver).
+
 ## Trademarks & Disclaimer
 
 Frostlake is an independent project and is **not affiliated with, endorsed by, or sponsored

@@ -26,6 +26,7 @@ import dev.frostlake.executor.StatementErrors;
 import dev.frostlake.executor.StatementTokens;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.DroppedObject;
+import dev.frostlake.metastore.DroppedSessionTable;
 import dev.frostlake.metastore.MaterializedViewValidity;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
@@ -42,6 +43,7 @@ import dev.frostlake.metastore.model.SecurityObjectKind;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.Tag;
 import dev.frostlake.metastore.model.Task;
+import dev.frostlake.metastore.model.TaskState;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.UnmodelledDropKind;
 import dev.frostlake.storage.Row;
@@ -122,6 +124,53 @@ public class DropCommandHandler implements CommandHandler {
      * Whether IF EXISTS forgives a failed drop: it forgives the object's absence, never an access-control
      * refusal — dropping an object another role owns is refused with or without it.
      */
+    /**
+     * DROP PRIVACY POLICY and DROP STORAGE LIFECYCLE POLICY: the policy named exactly, refused while a table holds
+     * it, and refused for a name a policy of another kind holds: {@code Object found is of type 'PRIVACY_POLICY', not
+     * specified type 'STORAGE_LIFECYCLE_POLICY'.} (live-verified).
+     *
+     * @param ctx      the statement
+     * @param ifExists whether it says IF EXISTS
+     * @param storage  whether it drops a storage lifecycle policy
+     */
+    private void dropPrivacyOrLifecyclePolicy(final FrostlakeParser.DropStatementContext ctx, final boolean ifExists,
+                                              final boolean storage) {
+        final String[] parts = dropNameParts(ctx);
+        try {
+            final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+            final String policyName = parts[parts.length - 1];
+            final String kind = storage ? "STORAGE_LIFECYCLE_POLICY" : "PRIVACY_POLICY";
+            final boolean held = storage ? schema.hasStorageLifecyclePolicy(policyName)
+                : schema.hasPrivacyPolicy(policyName);
+            if (!held) {
+                final String holder = schema.policyKindHolding(policyName);
+                if (holder != null) {
+                    throw new RuntimeException(SqlCompilationError.PREFIX + " Object found is of type '" + holder
+                        + "', not specified type '" + kind + "'.");
+                }
+                throw new RuntimeException(SqlCompilationError.doesNotExist(
+                    storage ? "Storage lifecycle policy" : "Privacy policy", schema.qualifiedName(policyName)));
+            }
+            queryExecutor.requireOwnership(kind, parts, null);
+            if (catalog.isPrivacyOrLifecyclePolicyInUse(schema, policyName, storage)) {
+                throw new RuntimeException(SqlCompilationError.PREFIX + " Policy " + policyName
+                    + " cannot be dropped/replaced as it is associated with one or more entities.");
+            }
+            if (storage) {
+                schema.dropStorageLifecyclePolicy(policyName);
+            } else {
+                schema.dropPrivacyPolicy(policyName);
+            }
+            logger.trace("Dropped {}: {}", kind, dropNameText(ctx));
+        } catch (final RuntimeException e) {
+            // IF EXISTS does not forgive a name a policy of another kind holds (live-verified).
+            if (!forgiven(ifExists, e) || SqlCompilationError.isWrongObjectType(e.getMessage())) {
+                throw e;
+            }
+            ConditionalDdlOutcome.dropSkipped();
+        }
+    }
+
     private static boolean forgiven(final boolean ifExists, final RuntimeException failure) {
         return ifExists && !String.valueOf(failure.getMessage()).startsWith(SqlAccessControlError.PREFIX);
     }
@@ -146,13 +195,16 @@ public class DropCommandHandler implements CommandHandler {
      * DROP TABLE does, keeping it for the UNDROP under the key {@code keptOut} notes. Without this the storage entries
      * outlive the drop, so re-creating the same database/schema fails with "Table storage already exists" and a CLONE
      * into the reused name appends to the stale rows instead of replacing them. Buffered writes are discarded so an
-     * uncommitted change from this transaction isn't flushed to now-missing storage at commit.
+     * uncommitted change from this transaction isn't flushed to now-missing storage at commit. The dropping session's
+     * own temporary tables wait aside in {@code ownOut}, their rows with them, and every other session's go.
      */
     private void snapshotAndReleaseStorage(final String databaseName, final Schema schema,
                                            final Map<String, List<Row>> out,
                                            final Map<String, List<Row>> hiddenOut,
-                                           final Map<String, String> keptOut) {
+                                           final Map<String, String> keptOut,
+                                           final List<DroppedSessionTable> ownOut) {
         final StorageEngine storage = queryExecutor.getStorageEngine();
+        ownOut.addAll(TemporaryObjects.setOwnSessionTablesAside(schema, storage, databaseName));
         TemporaryObjects.releaseSessionTables(schema, storage, databaseName);
         for (final Table table : schema.getTables()) {
             final String fqn = QualifiedName.key(databaseName, schema.getName(), table.getName());
@@ -160,8 +212,11 @@ public class DropCommandHandler implements CommandHandler {
                 continue;
             }
             out.put(fqn, new ArrayList<>(storage.getTableStorage(fqn).scan()));
-            // The storage waits with the dropped version, the table's time-travel history in it (live-verified).
-            final String kept = storage.keepDropped(fqn);
+            // The storage waits with the dropped version, the table's time-travel history in it (live-verified). One
+            // another session's open transaction wrote waits set aside for it, as when the table is dropped alone: its
+            // changes and its lock follow the version, never a new table of the name.
+            final String setAside = queryExecutor.getTransactionManager().setAsideIfWritten(fqn);
+            final String kept = setAside != null ? setAside : storage.keepDropped(fqn);
             if (kept != null) {
                 keptOut.put(fqn, kept);
             }
@@ -428,14 +483,17 @@ public class DropCommandHandler implements CommandHandler {
                         final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
                         final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
                         final Map<String, String> kept = new LinkedHashMap<>();
+                        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
                         for (final Schema droppedSchema : droppedDb.getAllSchemas()) {
-                            snapshotAndReleaseStorage(dbName, droppedSchema, tableRows, hiddenTableRows, kept);
+                            snapshotAndReleaseStorage(dbName, droppedSchema, tableRows, hiddenTableRows, kept,
+                                ownTemporary);
                         }
                         // Its tables' and stages' files wait for an UNDROP under a token of the version's own.
                         dropped = new DroppedObject(droppedDb, tableRows, hiddenTableRows,
                             RetentionChain.effectiveDays(droppedDb, null, null),
                             StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
                         keepStorages(dropped, kept);
+                        dropped.keepSessionTables(ownTemporary);
                         catalog.recordDropped("DATABASE:" + dbName, dropped);
                     }
                     catalog.dropDatabase(dbName, false);
@@ -482,12 +540,15 @@ public class DropCommandHandler implements CommandHandler {
                         final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
                         final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
                         final Map<String, String> kept = new LinkedHashMap<>();
-                        snapshotAndReleaseStorage(snapDbName, snapSchema, tableRows, hiddenTableRows, kept);
+                        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+                        snapshotAndReleaseStorage(snapDbName, snapSchema, tableRows, hiddenTableRows, kept,
+                            ownTemporary);
                         // Its tables' and stages' files wait for an UNDROP under a token of the version's own.
                         dropped = new DroppedObject(snapSchema, tableRows, hiddenTableRows,
                             RetentionChain.effectiveDays(snapDb, snapSchema, null),
                             StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
                         keepStorages(dropped, kept);
+                        dropped.keepSessionTables(ownTemporary);
                         catalog.recordDropped(droppedKey, dropped);
                     }
                     // DROP SCHEMA … CASCADE also drops the objects the schema still contains; without it
@@ -735,7 +796,8 @@ public class DropCommandHandler implements CommandHandler {
                     schema.dropTaskExact(taskName);
                     // A finalizer task of the dropped root finalizes nothing any more: it stands alone. A task that
                     // ran after the dropped one runs after it no more, a child of its other predecessors or, with
-                    // none left, standing alone (live-verified).
+                    // none left, standing alone (live-verified), and is suspended until resumed by hand: "These
+                    // former child tasks are suspended by default and must be resumed manually" (documented).
                     for (final Task remaining : schema.getTasks()) {
                         if (remaining.isFinalizer() && remaining.getFinalizedRootTask().equalsIgnoreCase(taskName)) {
                             remaining.setFinalizedRootTask(null);
@@ -744,6 +806,7 @@ public class DropCommandHandler implements CommandHandler {
                         while (predecessors.hasNext()) {
                             if (QualifiedName.parse(predecessors.next()).last().equals(taskName)) {
                                 predecessors.remove();
+                                remaining.setState(TaskState.SUSPENDED);
                             }
                         }
                     }
@@ -1017,6 +1080,10 @@ public class DropCommandHandler implements CommandHandler {
                     logger.trace("Dropped join policy: {}", dropNameText(ctx));
                 } catch (final RuntimeException e) { if (!forgiven(ifExists, e)) throw e;
                     ConditionalDdlOutcome.dropSkipped(); }
+            } else if (ctx.PRIVACY() != null && ctx.POLICY() != null) {
+                dropPrivacyOrLifecyclePolicy(ctx, ifExists, false);
+            } else if (ctx.lifecycle != null && ctx.POLICY() != null) {
+                dropPrivacyOrLifecyclePolicy(ctx, ifExists, true);
             } else if (ctx.AGGREGATION() != null && ctx.POLICY() != null) {
                 final String[] parts = dropNameParts(ctx);
                 try {

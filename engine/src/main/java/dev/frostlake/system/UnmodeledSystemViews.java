@@ -92,10 +92,6 @@ public class UnmodeledSystemViews {
                     colText("OBJECT_KIND", 16), col("OBJECT_NAME"), col("OBJECT_SCHEMA"), col("OBJECT_CATALOG"),
                     col("BACKUP_POLICY_NAME"), col("BACKUP_POLICY_SCHEMA"), col("BACKUP_POLICY_CATALOG"),
                     col("OWNER"), col("OWNER_ROLE_TYPE"), colTs("CREATED"), colTs("LAST_ALTERED"), col("COMMENT"));
-            case "CHECK_CONSTRAINTS":
-                return empty(
-                    col("CONSTRAINT_CATALOG"), col("CONSTRAINT_SCHEMA"), col("CONSTRAINT_TABLE"),
-                    col("CONSTRAINT_NAME"), col("CHECK_CLAUSE"));
             case "CLASSES":
                 return empty(
                     col("NAME"), col("SCHEMA_NAME"), col("DATABASE_NAME"), colVariant("VERSION"), col("OWNER"),
@@ -135,7 +131,8 @@ public class UnmodeledSystemViews {
                     col("SERVING_STATE"), colLong("SERVING_DATA_BYTES"), col("EMBEDDING_MODEL"),
                     col("PRIMARY_KEY_COLUMNS"), colLong("SCORING_PROFILE_COUNT"), col("AUTO_SUSPEND"),
                     col("REFRESH_MODE"), col("VECTOR_INDEXES"), colBool("REQUEST_LOGGING"),
-                    colBool("INHERIT_DATA_GOVERNANCE_POLICIES"));
+                    colBool("INHERIT_DATA_GOVERNANCE_POLICIES"), col("PREPROCESSING_WAREHOUSE"),
+                    col("INDEXING_WAREHOUSE"));
             case "CORTEX_SEARCH_SERVICE_SCORING_PROFILES":
                 return empty(
                     col("SERVICE_CATALOG"), col("SERVICE_SCHEMA"), col("SERVICE_NAME"), col("SCORING_PROFILE_NAME"),
@@ -177,6 +174,12 @@ public class UnmodeledSystemViews {
                     colNull("COLLATION_SCHEMA"), col("COLLATION_NAME"), colNull("UDT_CATALOG"),
                     colNull("UDT_SCHEMA"), colNull("UDT_NAME"), colNull("SCOPE_CATALOG"), colNull("SCOPE_SCHEMA"),
                     colNull("SCOPE_NAME"), colNull("MAXIMUM_CARDINALITY"), col("DTD_IDENTIFIER"));
+            case "FUNCTION_INVERSES":
+                return empty(
+                    col("FUNCTION_CATALOG"), col("FUNCTION_SCHEMA"), col("FUNCTION_NAME"), col("ARGUMENT_SIGNATURE"),
+                    col("INVERSE_FUNCTION_CATALOG"), col("INVERSE_FUNCTION_SCHEMA"), col("INVERSE_FUNCTION_NAME"),
+                    col("INVERSE_ARGUMENT_SIGNATURE"), colText("RELY", 3), colText("RELATIONSHIP_STATUS", 10),
+                    col("RELATIONSHIP_STATUS_REASON"), colTs("CREATED"), colTs("LAST_ALTERED"));
             case "GIT_REPOSITORIES":
                 return empty(
                     col("GIT_REPOSITORY_CATALOG"), col("GIT_REPOSITORY_SCHEMA"), col("GIT_REPOSITORY_NAME"),

@@ -32,8 +32,7 @@ public class JoinWordLinesTest extends MeasuredCellsTestSupport {
         answer(
             "CREATE OR REPLACE TABLE n (a INT, f FLOAT)");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 29 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING (a)");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 28 unexpected '1'. | syntax error "
@@ -68,8 +67,7 @@ public class JoinWordLinesTest extends MeasuredCellsTestSupport {
             "REFUSED SQL compilation error: | syntax error line 1 at position 26 unexpected '<EOF>'.",
             "SELECT 1 FROM t JOIN USING");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 29 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING (a) WHERE 1 = 1");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
@@ -296,26 +294,22 @@ public class JoinWordLinesTest extends MeasuredCellsTestSupport {
         answer(
             "CREATE OR REPLACE TABLE n (a INT, f FLOAT)");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 29 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING (a) x");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING ()");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 29 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING (a) ON TRUE");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected 'x'.",
             "SELECT 1 FROM t JOIN USING x.y");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 29 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING (a) (b)");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('. | syntax error "
-                + "line 1 at position 30 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 27 unexpected '('.",
             "SELECT 1 FROM t JOIN USING ((a))");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 28 unexpected '1'. | syntax error "

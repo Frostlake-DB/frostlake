@@ -63,6 +63,8 @@ public class AppObjectListing {
     /** A Streamlit app's runtime, compute pool and packages when CREATE names no runtime. */
     private static final String STREAMLIT_RUNTIME = "SYSTEM$ST_CONTAINER_RUNTIME_PY3_11";
     private static final String STREAMLIT_COMPUTE_POOL = "SYSTEM_COMPUTE_POOL_CPU";
+    /** How the name of a container runtime begins. */
+    private static final String CONTAINER_RUNTIME_PREFIX = "SYSTEM$ST_CONTAINER_RUNTIME";
     private static final String STREAMLIT_PACKAGES = "python==3.11.*,snowflake-snowpark-python,streamlit";
     private static final List<String> VERSION_LISTING_COLUMNS = Arrays.asList(
         "created_on", "name", "alias", "location_uri", "is_default", "is_live", "is_first", "is_last", "comment",
@@ -175,10 +177,13 @@ public class AppObjectListing {
             add(names, values, "runtime_environment_version", NOTEBOOK_RUNTIME_ENVIRONMENT);
         } else {
             final boolean defaultRuntime = object.getRuntimeName() == null;
+            // An app on a container runtime, the default one or one its statement names, runs in the system's compute
+            // pool unless it names its own (live-verified).
+            final boolean container = defaultRuntime || object.getRuntimeName().startsWith(CONTAINER_RUNTIME_PREFIX);
             add(names, values, "default_packages", STREAMLIT_PACKAGES);
             add(names, values, "user_packages", "");
             addAccess(names, values, object);
-            add(names, values, "compute_pool", defaultRuntime && object.getComputePool() == null
+            add(names, values, "compute_pool", container && object.getComputePool() == null
                 ? STREAMLIT_COMPUTE_POOL : object.getComputePool());
             add(names, values, "runtime_name", defaultRuntime ? STREAMLIT_RUNTIME : object.getRuntimeName());
         }

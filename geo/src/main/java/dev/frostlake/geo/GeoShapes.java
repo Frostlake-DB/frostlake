@@ -54,10 +54,16 @@ public final class GeoShapes {
 
     // ------------------------------------------------------------------ parsing
 
+    /** What an EMPTY shape reads as while a WKT text is read: the whole value is then NULL. */
+    private static final JsonNode EMPTY_SHAPE = MAPPER.createObjectNode().put("type", "EMPTY");
+
     /**
      * Parses WKT or GeoJSON input into a {@link GeoValue}; raises Snowflake's message on anything
      * else: {@code Error parsing Geo input: <input>. Did not recognize valid GeoJSON, (E)WKT or
-     * (E)WKB.}
+     * (E)WKB.} A WKT holding an EMPTY shape anywhere, {@code POINT EMPTY} or a collection with one among its members,
+     * is no value at all: null (live-verified: TO_GEOMETRY and TO_GEOGRAPHY of such a text are NULL).
+     *
+     * @return the value, or null for a WKT holding an EMPTY shape
      */
     public static GeoValue parse(final String input, final boolean geography) {
         final String trimmed = input.trim();
@@ -69,9 +75,19 @@ public final class GeoShapes {
                     return GeoValue.ofNode(model, geography, geography ? 4326 : 0);
                 }
             } else {
-                final JsonNode model = parseWkt(trimmed);
+                // EWKT: an SRID written ahead of the WKT, in any case and with blanks after its semicolon, which a
+                // GEOMETRY keeps and a GEOGRAPHY takes as 4326 alone (live-verified).
+                final int srid = ewktSrid(trimmed);
+                final String wkt = srid < 0 ? trimmed : trimmed.substring(trimmed.indexOf(';') + 1).trim();
+                if (srid >= 0 && geography && srid != 4326) {
+                    throw new IllegalArgumentException("a GEOGRAPHY is read in SRID 4326 alone");
+                }
+                final JsonNode model = parseWkt(wkt);
+                if (model == EMPTY_SHAPE) {
+                    return null;
+                }
                 if (model != null) {
-                    return GeoValue.ofNode(model, geography, geography ? 4326 : 0);
+                    return GeoValue.ofNode(model, geography, geography ? 4326 : Math.max(srid, 0));
                 }
             }
         } catch (final RuntimeException notGeo) {
@@ -79,6 +95,24 @@ public final class GeoShapes {
         }
         throw new RuntimeException("Error parsing Geo input: " + input
             + ". Did not recognize valid GeoJSON, (E)WKT or (E)WKB.");
+    }
+
+    /** The SRID an EWKT text writes ahead of its WKT ({@code SRID=4326;POINT(1 2)}), or -1 where it writes none. */
+    private static int ewktSrid(final String text) {
+        final int semicolon = text.indexOf(';');
+        if (semicolon < 6 || !text.regionMatches(true, 0, "SRID=", 0, 5)) {
+            return -1;
+        }
+        final String digits = text.substring(5, semicolon).trim();
+        if (digits.isEmpty()) {
+            return -1;
+        }
+        for (int i = 0; i < digits.length(); i++) {
+            if (!Character.isDigit(digits.charAt(i))) {
+                return -1;
+            }
+        }
+        return Integer.parseInt(digits);
     }
 
     /** The value as a GeoValue, or null when it is not one (callers raise their own type errors). */
@@ -147,6 +181,9 @@ public final class GeoShapes {
 
     private static JsonNode parseWktBody(final WktCursor c) {
         final String keyword = c.word().toUpperCase(Locale.ROOT);
+        if (isWktShape(keyword) && c.emptyWord()) {
+            return EMPTY_SHAPE;
+        }
         final ObjectNode out = MAPPER.createObjectNode();
         switch (keyword) {
             case "POINT": {
@@ -218,15 +255,20 @@ public final class GeoShapes {
                     return null;
                 }
                 final ArrayNode parts = MAPPER.createArrayNode();
+                boolean empty = false;
                 do {
                     final JsonNode part = parseWktBody(c);
                     if (part == null) {
                         return null;
                     }
+                    empty |= part == EMPTY_SHAPE;
                     parts.add(part);
                 } while (c.consume(','));
                 if (!c.consume(')')) {
                     return null;
+                }
+                if (empty) {
+                    return EMPTY_SHAPE;
                 }
                 out.set("geometries", parts);
                 out.put("type", "GeometryCollection");
@@ -234,6 +276,22 @@ public final class GeoShapes {
             }
             default:
                 return null;
+        }
+    }
+
+    /** Whether a WKT keyword names a shape, one that may be written EMPTY. */
+    private static boolean isWktShape(final String keyword) {
+        switch (keyword) {
+            case "POINT":
+            case "LINESTRING":
+            case "POLYGON":
+            case "MULTIPOINT":
+            case "MULTILINESTRING":
+            case "MULTIPOLYGON":
+            case "GEOMETRYCOLLECTION":
+                return true;
+            default:
+                return false;
         }
     }
 

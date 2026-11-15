@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.commands.ParameterNames;
 import dev.frostlake.parser.FrostlakeParser;
 
 import org.antlr.v4.runtime.ParserRuleContext;
@@ -43,11 +44,18 @@ import java.util.Set;
  *       TABLE. A temporary object glues TEMP to its first word: CREATE TEMPTABLE, CREATE TEMPFILE FORMAT.
  *       An UNDROP is named as the CREATE of its object;</li>
  *   <li>an ALTER that renames its object, or swaps it, is a RENAME;</li>
+ *   <li>a change of nothing but comments is an ALTER COLUMN COMMENT where it comments columns - COMMENT ON COLUMN,
+ *       or an ALTER TABLE whose every column action sets or unsets a comment - and an ALTER OBJECT COMMENT where it
+ *       comments a table, a view, a materialized view, a dynamic or Iceberg table, a schema, a task, a pipe, a
+ *       function or a procedure: COMMENT ON the object, or an ALTER that sets or unsets its COMMENT beside nothing
+ *       but parameters and a table's staged COPY defaults. A comment beside any other property, and the comment of
+ *       any other object, leaves the statement an ALTER;</li>
  *   <li>any other ALTER, and COMMENT ON, is an ALTER, except for the actions live manages under names of
  *       their own: ALTER SET TAG, ALTER UNSET TAG, ALTER SET MASKING POLICY, ALTER MANAGE ROW ACCESS
  *       POLICY and the other policies, CREATE SEARCH INDEX for ADD SEARCH OPTIMIZATION, a task's SUSPEND
- *       (OPERATE) and RESUME (RESOLVE), and most of what a dynamic table can be told (ALTER DYNAMIC TABLE
- *       OPERATE PROPERTY);</li>
+ *       (OPERATE) and RESUME (RESOLVE), most of what a dynamic table can be told (ALTER DYNAMIC TABLE
+ *       OPERATE PROPERTY), and a Cortex Search service's settings and layers (ALTER CORTEX SEARCH SERVICE
+ *       OPERATE);</li>
  *   <li>DROP, TRUNCATE, INSERT and DESCRIBE name themselves, while UPDATE, DELETE and MERGE are named
  *       SELECT, after the way they read their tables.</li>
  * </ul>
@@ -59,6 +67,10 @@ final class StatementKindText {
     private static final Set<Integer> TEMPORARY = new HashSet<Integer>();
     /** The CREATE modifiers the name leaves out. */
     private static final Set<Integer> UNNAMED = new HashSet<Integer>();
+    /** The objects whose comment, changed alone, is an ALTER OBJECT COMMENT: the word the object is written with. */
+    private static final Set<Integer> COMMENTED_OBJECTS = new HashSet<Integer>();
+    /** The properties beside a comment that are no parameters and still leave the change a comment's. */
+    private static final Set<String> STAGED_DEFAULTS = new HashSet<String>();
     /** The words that mark an action live manages under a name of its own, beside that name. */
     private static final int[] MANAGED_WORDS = {
         FrostlakeParser.ACCESS, FrostlakeParser.PROJECTION, FrostlakeParser.AGGREGATION,
@@ -77,6 +89,16 @@ final class StatementKindText {
         UNNAMED.add(FrostlakeParser.LOCAL);
         UNNAMED.add(FrostlakeParser.GLOBAL);
         UNNAMED.add(FrostlakeParser.SECURE);
+        final int[] commented = {
+            FrostlakeParser.TABLE, FrostlakeParser.ICEBERG, FrostlakeParser.VIEW, FrostlakeParser.MATERIALIZED,
+            FrostlakeParser.DYNAMIC, FrostlakeParser.SCHEMA, FrostlakeParser.TASK, FrostlakeParser.PIPE,
+            FrostlakeParser.FUNCTION, FrostlakeParser.PROCEDURE,
+        };
+        for (final int object : commented) {
+            COMMENTED_OBJECTS.add(object);
+        }
+        STAGED_DEFAULTS.add("STAGE_FILE_FORMAT");
+        STAGED_DEFAULTS.add("STAGE_COPY_OPTIONS");
     }
 
     private StatementKindText() {
@@ -129,7 +151,7 @@ final class StatementKindText {
             return alterKind(ddl.alterStatement());
         }
         if (ddl.commentStatement() != null) {
-            return "ALTER";
+            return commentOnKind(ddl.commentStatement());
         }
         return upper(ddl.getStart().getText());
     }
@@ -213,6 +235,9 @@ final class StatementKindText {
     }
 
     private static String alterKind(final FrostlakeParser.AlterStatementContext alter) {
+        if (alter.unmodelledCommentKind() != null) {
+            return commentOnlyAlter(alter.unmodelledCommentKind());
+        }
         final ParserRuleContext action = actionOf(alter);
         if (action == null) {
             return "ALTER";
@@ -223,6 +248,10 @@ final class StatementKindText {
             return "RENAME";
         }
         final int object = typeOfChild(alter, 1);
+        final String comment = COMMENTED_OBJECTS.contains(object) ? commentKind(action) : null;
+        if (comment != null) {
+            return comment;
+        }
         if (object == FrostlakeParser.DYNAMIC) {
             // A dynamic table's COMMENT and retention, set or unset, are plain ALTERs; the rest operate
             // the table (live-verified).
@@ -231,6 +260,11 @@ final class StatementKindText {
                     && ("COMMENT".equals(property) || "DATA_RETENTION_TIME_IN_DAYS".equals(property))
                 ? "ALTER" : "ALTER DYNAMIC TABLE OPERATE PROPERTY";
         }
+        if (object == FrostlakeParser.CORTEX && (first == FrostlakeParser.SUSPEND || first == FrostlakeParser.RESUME
+                || first == FrostlakeParser.SET && action.getChild(0) instanceof TerminalNode)) {
+            // A Cortex Search service's settings, its comment among them, and its layers are operated (live-verified).
+            return "ALTER CORTEX SEARCH SERVICE OPERATE";
+        }
         if (object == FrostlakeParser.TASK && first == FrostlakeParser.SUSPEND) {
             return "OPERATE";
         }
@@ -238,6 +272,85 @@ final class StatementKindText {
             return "RESOLVE";
         }
         return managedKind(action);
+    }
+
+    /** COMMENT ON: a column's comment, an object's of those that name it so, or a plain ALTER. */
+    private static String commentOnKind(final FrostlakeParser.CommentStatementContext comment) {
+        if (comment.COLUMN() != null) {
+            return "ALTER COLUMN COMMENT";
+        }
+        if (comment.commentedKind() != null) {
+            final FrostlakeParser.CommentedKindContext kind = comment.commentedKind();
+            if (kind.CORTEX() != null) {
+                return "ALTER CORTEX SEARCH SERVICE OPERATE";
+            }
+            return commentOnlyAlter(kind.unmodelledCommentKind());
+        }
+        for (int i = 0; i + 1 < comment.getChildCount(); i++) {
+            if (comment.getChild(i) instanceof TerminalNode
+                    && ((TerminalNode) comment.getChild(i)).getSymbol().getType() == FrostlakeParser.ON) {
+                return COMMENTED_OBJECTS.contains(typeOfChild(comment, i + 1)) ? "ALTER OBJECT COMMENT" : "ALTER";
+            }
+        }
+        return "ALTER";
+    }
+
+    /** A comment's change on a kind named by its own words: a semantic view's is an ALTER OBJECT COMMENT. */
+    private static String commentOnlyAlter(final FrostlakeParser.UnmodelledCommentKindContext kind) {
+        return kind != null && kind.SEMANTIC() != null ? "ALTER OBJECT COMMENT" : "ALTER";
+    }
+
+    /**
+     * The name of an ALTER's action that changes nothing but comments, or null for any other: ALTER COLUMN COMMENT
+     * for column actions that each set or unset a comment, ALTER OBJECT COMMENT for a SET or an UNSET of the COMMENT
+     * beside nothing but parameters and the staged COPY defaults.
+     */
+    private static String commentKind(final ParserRuleContext alterAction) {
+        // A table's UNSET list is a rule of its own inside the action.
+        final ParserRuleContext action = alterAction.getChildCount() == 1
+                && alterAction.getChild(0) instanceof FrostlakeParser.TableUnsetPropertiesContext
+            ? (ParserRuleContext) alterAction.getChild(0) : alterAction;
+        final int first = action.getStart().getType();
+        if (first == FrostlakeParser.ALTER || first == FrostlakeParser.MODIFY) {
+            boolean any = false;
+            for (int i = 1; i < action.getChildCount(); i++) {
+                if (action.getChild(i) instanceof FrostlakeParser.ViewColumnCommentContext) {
+                    any = true;
+                } else if (action.getChild(i) instanceof FrostlakeParser.AlterColumnItemContext) {
+                    if (((FrostlakeParser.AlterColumnItemContext) action.getChild(i)).alterColumnItemAction().COMMENT()
+                            == null) {
+                        return null;
+                    }
+                    any = true;
+                }
+            }
+            return any ? "ALTER COLUMN COMMENT" : null;
+        }
+        if (!(action.getChild(0) instanceof TerminalNode)
+                || first != FrostlakeParser.SET && first != FrostlakeParser.UNSET) {
+            return null;
+        }
+        boolean comment = false;
+        for (int i = 1; i < action.getChildCount(); i++) {
+            final ParseTree child = action.getChild(i);
+            final String name;
+            if (child instanceof TerminalNode) {
+                final int type = ((TerminalNode) child).getSymbol().getType();
+                if (type == FrostlakeParser.EQ || type == FrostlakeParser.COMMA
+                        || type == FrostlakeParser.STRING_LITERAL) {
+                    continue;
+                }
+                name = upper(child.getText());
+            } else {
+                name = ((ParserRuleContext) child).getStart().getText();
+            }
+            if ("COMMENT".equalsIgnoreCase(name)) {
+                comment = true;
+            } else if (!ParameterNames.isParameter(name) && !STAGED_DEFAULTS.contains(upper(name))) {
+                return null;
+            }
+        }
+        return comment ? "ALTER OBJECT COMMENT" : null;
     }
 
     /** The action an ALTER applies: the rule after the object's name, or null when there is none. */

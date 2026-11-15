@@ -129,7 +129,7 @@ public class ProceduralBlockBuilder {
         // For all non-procedural SQL statements, wrap in SqlStatement so they execute
         // conditionally (respecting IF/WHILE/FOR control flow).
         // Use getOriginalText to preserve whitespace correctly.
-        final String rawSql = BlockFlowChains.ownText(ctx, visitor.getOriginalText(ctx));
+        final String rawSql = BlockFlowChains.ownText(ctx, BlockStatementText.of(ctx, visitor.getOriginalText(ctx)));
         if (rawSql != null && !rawSql.isBlank()) {
             final SqlStatement statement = new SqlStatement(rawSql);
             statement.chainedAs(BlockFlowChains.followsAStage(ctx), BlockFlowChains.feedsTheNext(ctx));
@@ -229,11 +229,13 @@ public class ProceduralBlockBuilder {
         }
         if (ctx.callStatement() != null && ctx.callStatement().systemFunctionName() != null) {
             // A CALL of a SYSTEM$ function runs as the statement it is written as.
-            return new SqlStatement(visitor.getOriginalText(ctx.callStatement()));
+            return new SqlStatement(BlockStatementText.of(ctx.callStatement(),
+                visitor.getOriginalText(ctx.callStatement())));
         }
         if (ctx.callStatement() != null) {
             // A procedure's CALL runs as the statement it is written as too, its :names bound from the block.
-            return new CallStatement(visitor.getOriginalText(ctx.callStatement()), null);
+            return new CallStatement(BlockStatementText.of(ctx.callStatement(),
+                visitor.getOriginalText(ctx.callStatement())), null);
         }
 
         if (ctx.asyncStatement() != null) {
@@ -276,12 +278,15 @@ public class ProceduralBlockBuilder {
             if (lCtx.booleanExpr() == null && lCtx.dataTypeName() != null) {
                 // A type and no value declares the variable NULL of its type (live-verified).
                 return new DeclareStatement(varName, null,
-                    visitor.parseDataType(lCtx.dataTypeName(), lCtx.typeParameters()));
+                    visitor.parseDataType(lCtx.dataTypeName(), lCtx.typeParameters())).writtenByLet();
             }
             if (lCtx.booleanExpr() != null) {
                 // An untyped LET's initialiser is judged while the block compiles; a typed one when it is reached.
                 final BaseExpression expr = lCtx.dataTypeName() == null ? visitor.buildExpression(lCtx.booleanExpr())
                     : judged(visitor.buildExpression(lCtx.booleanExpr()), lCtx.booleanExpr());
+                if (expr != null) {
+                    expr.setWrittenFrom(lCtx.booleanExpr());
+                }
                 final SetStatement let = new SetStatement(varName, expr, lCtx.dataTypeName() != null
                     ? visitor.parseDataType(lCtx.dataTypeName(), lCtx.typeParameters()) : null);
                 if (lCtx.dataTypeName() == null) {

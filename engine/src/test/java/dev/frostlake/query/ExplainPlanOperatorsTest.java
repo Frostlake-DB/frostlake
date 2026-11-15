@@ -142,13 +142,6 @@ public class ExplainPlanOperatorsTest extends MeasuredCellsTestSupport {
                 + "Insert|TEST_DB.TEST_SCHEMA.ET|null|null|null|[0] ;; TableScan|TEST_DB.TEST_SCHEMA.EU|1|1|1024|[1]",
             "INSERT INTO et SELECT a, c FROM eu");
         assertPlan(
-            "GlobalStats|null|3|3|3072|null ;; Result|null|null|null|null|null ;; "
-                + "Delete|TEST_DB.TEST_SCHEMA.ET|null|null|null|[0] ;; InnerJoin|null|null|null|null|[1] ;; "
-                + "InnerJoin|null|null|null|null|[2] ;; TableScan|TEST_DB.TEST_SCHEMA.EV|1|1|1024|[3] ;; "
-                + "JoinFilter|null|null|null|null|[3] ;; TableScan|TEST_DB.TEST_SCHEMA.EU|1|1|1024|[5] ;; "
-                + "JoinFilter|null|null|null|null|[2] ;; TableScan|TEST_DB.TEST_SCHEMA.ET|1|1|1024|[7]",
-            "DELETE FROM et USING eu, ev WHERE et.a = eu.a AND eu.a = ev.a");
-        assertPlan(
             "GlobalStats|null|2|2|2048|null ;; Result|null|null|null|null|null ;; "
                 + "Merge|TEST_DB.TEST_SCHEMA.ET|null|null|null|[0] ;; InnerJoin|null|null|null|null|[1] ;; "
                 + "TableScan|TEST_DB.TEST_SCHEMA.EU|1|1|1024|[2] ;; JoinFilter|null|null|null|null|[2] ;; "
@@ -368,6 +361,29 @@ public class ExplainPlanOperatorsTest extends MeasuredCellsTestSupport {
             "GlobalStats|null|1|1|1024|null ;; Result|null|null|null|null|null ;; Unload|null|null|null|null|[0] "
                 + ";; TableScan|TEST_DB.TEST_SCHEMA.ET|1|1|1024|[1]",
             "COPY INTO @%et FROM et");
+    }
+
+    /**
+     * Three tables joined by keys: the one that holds the most rows is joined with the one that holds the fewest
+     * first, a tie for the fewest going to the name that sorts first, the smaller side first — EU (2 rows, before EV)
+     * with ET (3) — and the third table last under a JoinFilter, the pair first, whatever the order written.
+     */
+    @Test
+    public void aDeleteReadingTwoMoreTables() {
+        final String deleted = "GlobalStats|null|3|3|3072|null ;; Result|null|null|null|null|null ;; "
+            + "Delete|TEST_DB.TEST_SCHEMA.ET|null|null|null|[0] ;; InnerJoin|null|null|null|null|[1] ;; "
+            + "InnerJoin|null|null|null|null|[2] ;; TableScan|TEST_DB.TEST_SCHEMA.EU|1|1|1024|[3] ;; "
+            + "JoinFilter|null|null|null|null|[3] ;; TableScan|TEST_DB.TEST_SCHEMA.ET|1|1|1024|[5] ;; "
+            + "JoinFilter|null|null|null|null|[2] ;; TableScan|TEST_DB.TEST_SCHEMA.EV|1|1|1024|[7]";
+        assertPlan(deleted, "DELETE FROM et USING eu, ev WHERE et.a = eu.a AND eu.a = ev.a");
+        assertPlan(deleted, "DELETE FROM et USING ev, eu WHERE eu.a = ev.a AND et.a = eu.a");
+        assertPlan(
+            "GlobalStats|null|3|3|3072|null ;; Result|null|null|null|null|null ;; "
+                + "InnerJoin|null|null|null|null|[0] ;; InnerJoin|null|null|null|null|[1] ;; "
+                + "TableScan|TEST_DB.TEST_SCHEMA.EU|1|1|1024|[2] ;; JoinFilter|null|null|null|null|[2] ;; "
+                + "TableScan|TEST_DB.TEST_SCHEMA.ET|1|1|1024|[4] ;; JoinFilter|null|null|null|null|[1] ;; "
+                + "TableScan|TEST_DB.TEST_SCHEMA.EV|1|1|1024|[6]",
+            "SELECT 1 FROM ev, eu, et WHERE et.a = eu.a AND eu.a = ev.a");
     }
 
     @Test

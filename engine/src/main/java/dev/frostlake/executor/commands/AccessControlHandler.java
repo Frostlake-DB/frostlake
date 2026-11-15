@@ -32,6 +32,7 @@ import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
+import dev.frostlake.metastore.RoleCycle;
 import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.Taggable;
@@ -400,9 +401,16 @@ public final class AccessControlHandler {
                 throw new RuntimeException(SqlCompilationError.of("Cannot grant database role '"
                     + shown(role.getDatabase(), role.getName()) + "' to itself."));
             }
+            if (!holder.getDatabase().equals(role.getDatabase())) {
+                // A database role is granted to "another database role ... in the same database" alone (documented,
+                // GRANT DATABASE ROLE); the refusal's wording is the engine's own.
+                throw new RuntimeException(SqlCompilationError.of("Database role " + role.getQualifiedName()
+                    + " cannot be granted to database role " + holder.getQualifiedName() + " of another database."));
+            }
             if (holdsDatabaseRole(role, holder.getQualifiedName(), new HashSet<String>())) {
-                // A grant that closes a loop is refused as an account role's is: the hierarchy stays one.
-                throw new RuntimeException("Cannot grant database role: would create circular role hierarchy");
+                // A grant that closes a loop is refused, the two roles named with their database (live-verified).
+                throw new RuntimeException(RoleCycle.refusal(shown(role.getDatabase(), role.getName()),
+                    shown(holder.getDatabase(), holder.getName())));
             }
             requireDatabaseRoleAuthority(role);
             holder.grantDatabaseRole(role.getQualifiedName(), grantor);
@@ -709,37 +717,43 @@ public final class AccessControlHandler {
         final AccountDirectory directory = catalog.getAccountDirectory();
         final String name = ctx.identifier() != null ? visitor.getText(ctx.identifier()) : undroppedAccount(ctx);
         final Account existing = directory.account(name);
+        if (first != FrostlakeParser.DROP && !actsAsOrganizationAdministrator()) {
+            // Only the organization's administrator creates and restores accounts: any other role is refused before
+            // the account is looked for or the options are judged, naming no privilege (live-verified).
+            throw new PrivilegeRefusal(SqlAccessControlError.insufficientPrivileges("account", name));
+        }
         if (first == FrostlakeParser.CREATE) {
             if (existing != null || isCurrentAccount(name)) {
                 throw new RuntimeException(SqlCompilationError.of("Object '" + name + "' already exists."));
             }
             createAccount(ctx, directory, name);
         } else if (first == FrostlakeParser.DROP) {
-            final int grace = Integer.parseInt(ctx.INTEGER_LITERAL().getText());
-            if (grace < MIN_GRACE_DAYS || grace > MAX_GRACE_DAYS) {
-                throw new RuntimeException(SqlCompilationError.of("GRACE_PERIOD_IN_DAYS must be between "
-                    + MIN_GRACE_DAYS + " and " + MAX_GRACE_DAYS + "."));
+            final Integer written = ctx.INTEGER_LITERAL() == null ? null
+                : Integer.valueOf(ctx.INTEGER_LITERAL().getText());
+            if (written != null) {
+                requireGracePeriod(written.intValue());
             }
             if (isCurrentAccount(name)) {
                 throw new RuntimeException(SqlCompilationError.of("Cannot drop the current account."));
             }
             if (existing == null || existing.isDropped()) {
+                // Looked for whether the grace period is written or not (live-verified).
                 if (ctx.if_exists() != null) {
                     ConditionalDdlOutcome.dropSkipped();
                     return null;
                 }
                 throw new RuntimeException(SqlCompilationError.doesNotExist("Account", name));
             }
+            // An account that is there wants its grace period, which the statement left out.
+            final int grace = written == null ? 0 : written.intValue();
+            requireGracePeriod(grace);
             existing.drop(grace);
         } else {
             if (existing == null) {
-                // An account that is not there is refused as one the role may not operate on, by the
-                // organization privilege it would need on the current account (live-verified).
-                final SecurityManager security = queryExecutor.getSecurityManager();
-                throw new PrivilegeRefusal(SqlAccessControlError.privilegeRequired("ACCOUNT", name,
-                    security == null ? null : security.getSessionContext().getCurrentRole(),
-                    security != null && security.getSessionContext().isSecondaryRolesInUse(),
-                    "MANAGE ORGANIZATION ACCOUNTS", catalog.getAccountLocator()));
+                // To the organization's administrator, an account that is not there is one that does not exist, its
+                // name as resolved and unquoted (live-verified).
+                throw new RuntimeException(SqlCompilationError.of("Account '" + name
+                    + "' does not exist or not authorized."));
             }
             if (!existing.isDropped()) {
                 throw new RuntimeException(SqlCompilationError.of("Object '" + name + "' already exists."));
@@ -749,9 +763,26 @@ public final class AccessControlHandler {
         return null;
     }
 
-    /** The account an UNDROP names: one part, a qualifier being refused in the account's words (live-verified). */
-    private static String undroppedAccount(final FrostlakeParser.AccessControlStatementContext ctx) {
-        final String[] parts = ParseTreeText.qualifiedNameParts(ctx.qualifiedName());
+    /** Refuses a grace period out of the range a dropped account may be restored within. */
+    private static void requireGracePeriod(final int grace) {
+        if (grace < MIN_GRACE_DAYS || grace > MAX_GRACE_DAYS) {
+            throw new RuntimeException(SqlCompilationError.of("GRACE_PERIOD_IN_DAYS must be between "
+                + MIN_GRACE_DAYS + " and " + MAX_GRACE_DAYS + "."));
+        }
+    }
+
+    /** Whether the session acts as its organization's administrator; a session with no security model does. */
+    private boolean actsAsOrganizationAdministrator() {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.actsAsOrganizationAdministrator();
+    }
+
+    /**
+     * The account an UNDROP names, directly or through IDENTIFIER(): one part, a qualifier being refused in the
+     * account's words (live-verified).
+     */
+    private String undroppedAccount(final FrostlakeParser.AccessControlStatementContext ctx) {
+        final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
         if (parts.length > 1) {
             throw new RuntimeException("Cannot specify qualifier for account.");
         }
@@ -765,6 +796,10 @@ public final class AccessControlHandler {
 
     private void createAccount(final FrostlakeParser.AccessControlStatementContext ctx,
                                final AccountDirectory directory, final String name) {
+        if (ctx.accountProperty().isEmpty()) {
+            // A CREATE ACCOUNT with no property at all names its first want, in a sentence of its own (live-verified).
+            throw new RuntimeException("ADMIN_NAME needs to be specified.");
+        }
         String adminName = null;
         boolean credential = false;
         String email = null;
@@ -808,7 +843,8 @@ public final class AccessControlHandler {
             missing.add("EDITION");
         }
         if (!missing.isEmpty()) {
-            throw new RuntimeException(SqlCompilationError.of("Missing option(s): " + missing + "."));
+            // The list ends the sentence with no full stop (live-verified).
+            throw new RuntimeException(SqlCompilationError.of("Missing option(s): " + missing));
         }
         directory.putAccount(new Account(name, edition, region, regionGroup, comment, adminName, email,
             directory.nextLocator()));
@@ -839,6 +875,7 @@ public final class AccessControlHandler {
         }
         String adminName = null;
         boolean password = false;
+        String adminPassword = null;
         String type = null;
         String comment = null;
         for (final FrostlakeParser.ManagedAccountPropertyContext property : ctx.managedAccountProperty()) {
@@ -847,6 +884,7 @@ public final class AccessControlHandler {
                     : visitor.getText(property.identifier());
             } else if (property.ADMIN_PASSWORD() != null) {
                 password = true;
+                adminPassword = visitor.extractStringLiteral(property.STRING_LITERAL());
             } else if (property.TYPE() != null) {
                 type = visitor.getText(property.identifier());
             } else {
@@ -869,6 +907,8 @@ public final class AccessControlHandler {
         if (!"READER".equals(type)) {
             throw new RuntimeException(SqlCompilationError.of("invalid value '" + type + "' for property 'TYPE'"));
         }
+        // The new account's administrator is held to the built-in password policy (live-verified).
+        PasswordPolicyCheck.requireAcceptedForNewAccount(adminPassword);
         final ManagedAccount account = new ManagedAccount(name, adminName, comment, directory.nextLocator());
         directory.putManagedAccount(account);
         final ResultSet own = queryExecutor.getShowExecutor().showAccounts();

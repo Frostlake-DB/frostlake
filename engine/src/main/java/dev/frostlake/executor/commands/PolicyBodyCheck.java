@@ -92,6 +92,37 @@ final class PolicyBodyCheck {
     }
 
     /**
+     * Compiles the names of a policy body that answers a constraint no type of this engine's names, a privacy
+     * policy's PRIVACY_BUDGET: an unknown name is refused in the UDF's own words, positioned in the body's frame
+     * (live-verified). What the body answers is judged by the caller.
+     *
+     * @param queryExecutor the executor whose parser and catalog read the body, or null to skip
+     * @param catalog       the catalog the body's names resolve against
+     * @param policyName    the policy's own name, for the sentences that carry it
+     * @param body          the body as expression text
+     */
+    static void compileNames(final QueryExecutor queryExecutor, final Catalog catalog, final String policyName,
+                             final String body) {
+        if (queryExecutor == null || body == null || body.trim().isEmpty()) {
+            return;
+        }
+        final boolean inside = PolicyBodyScope.isInside();
+        PolicyBodyScope.enter();
+        try {
+            RoutineBodyCompiler.compileFunctionBody(queryExecutor, UdfLanguage.SQL, body, false, policyName,
+                new LinkedHashSet<String>(), catalog.getCurrentDatabase(), catalog.getCurrentSchema());
+        } catch (final RuntimeException refused) {
+            if (!namesAFunctionThisEngineLacks(refused)) {
+                throw refused;
+            }
+        } finally {
+            if (!inside) {
+                PolicyBodyScope.leave();
+            }
+        }
+    }
+
+    /**
      * Refuses a LIMIT or OFFSET value written as a string in a policy's body, of any policy kind: the account
      * compiles the body as a SQL UDF's, so the refusal is the UDF's, in the UDF's frame, and comes before anything
      * else the body is compiled for — a masking policy's argument and return types included (live-verified).

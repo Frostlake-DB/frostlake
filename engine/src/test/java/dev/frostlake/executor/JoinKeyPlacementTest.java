@@ -42,7 +42,7 @@ public class JoinKeyPlacementTest extends BaseDatabaseTest {
     /** The count a query answers, checking on the embedded engine that its plan holds {@code keyed}. */
     private String count(final String sql, final String keyed) {
         final String count = String.valueOf(engine.executeQuery(sql).getRows().get(0).getValue(0));
-        if (!isLiveSnowflake()) {
+        if (!sessionLivesElsewhere()) {
             final String plan = engine.getExecutor().describeLastSelectPlan();
             assertTrue(plan.contains(keyed), plan);
         }

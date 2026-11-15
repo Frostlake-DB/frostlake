@@ -26,6 +26,7 @@ import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.RetentionChain;
 import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.SystemSchema;
+import dev.frostlake.metastore.model.CheckConstraint;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DefaultValueExpression;
 import dev.frostlake.metastore.model.DynamicTable;
@@ -746,6 +747,37 @@ public class SystemViews {
             }
         }
         return target != null ? target.primaryKeyConstraintName() : null;
+    }
+
+    // ── CHECK_CONSTRAINTS ─────────────────────────────────────────────────────
+
+    /**
+     * One row for each CHECK constraint of a table the session may list: under the name a CONSTRAINT clause gave it or
+     * the SYS_CONSTRAINT_&lt;uuid&gt; it took where none was written, its clause as written, blanks included. A
+     * dropped table's and a dropped constraint's rows go with them (live-verified).
+     *
+     * @param databaseName the database, or null for the current one
+     * @param schemaName   the schema, or null for every schema
+     * @return the rows
+     */
+    public ResultSet queryCheckConstraints(final String databaseName, final String schemaName) {
+        final ResultSet result = new ResultSet(Arrays.asList(
+            col("CONSTRAINT_CATALOG"), col("CONSTRAINT_SCHEMA"), col("CONSTRAINT_TABLE"), col("CONSTRAINT_NAME"),
+            col("CHECK_CLAUSE")));
+        for (final Database db : databases(databaseName)) {
+            for (final Schema schema : schemas(db, schemaName)) {
+                for (final Table table : schema.getTables()) {
+                    if (!lists("TABLE", schema, table.getName(), table.getOwner())) {
+                        continue;
+                    }
+                    for (final CheckConstraint check : table.getCheckConstraints()) {
+                        result.addRow(new Row(db.getName(), schema.getName(), table.getName(), check.getName(),
+                            check.getExpression()));
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     // ── REFERENTIAL_CONSTRAINTS ───────────────────────────────────────────────

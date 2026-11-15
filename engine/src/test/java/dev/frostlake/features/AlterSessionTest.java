@@ -18,6 +18,7 @@ package dev.frostlake.features;
 
 import dev.frostlake.BaseDatabaseTest;
 import dev.frostlake.FrostlakeJdbc;
+import dev.frostlake.SnowflakeJdbcFl;
 import dev.frostlake.storage.ResultSet;
 
 import org.junit.jupiter.api.Test;
@@ -46,7 +47,7 @@ public class AlterSessionTest extends BaseDatabaseTest {
 
     /** True when statements ride a transport whose multi-statement gate refuses lone reads. */
     private static boolean multiStatementGated() {
-        return isLiveSnowflake() || FrostlakeJdbc.enabled();
+        return isLiveSnowflake() || FrostlakeJdbc.enabled() || SnowflakeJdbcFl.enabled();
     }
 
     @Test

@@ -109,8 +109,7 @@ public class UnknownCharacterLineTest extends MeasuredCellsTestSupport {
                 + "line 1 at position 18 unexpected 'y'.",
             "SELECT '\ud83d\ude00', (1 x y)");
         assertAnswer(
-            "REFUSED SQL compilation error: | syntax error line 1 at position 30 unexpected '('. | syntax error "
-                + "line 1 at position 32 unexpected ')'.",
+            "REFUSED SQL compilation error: | syntax error line 1 at position 30 unexpected '('.",
             "SELECT '\ud83d\ude00' FROM t JOIN USING (a)");
         assertAnswer(
             "REFUSED SQL compilation error: | syntax error line 1 at position 24 unexpected 'y'.",

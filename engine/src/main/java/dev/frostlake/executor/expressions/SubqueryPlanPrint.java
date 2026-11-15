@@ -230,7 +230,7 @@ final class SubqueryPlanPrint {
      * A set operation as the plan re-prints it — the FROM of its combining SELECT, with each column's
      * {@code SET_COMBINE(…)} in {@code combined}, or null where its shape is not modelled. Each arm is wrapped as
      * {@code (SELECT OB$i.<name> AS "<name>" FROM (<arm>) OB$i) WB$j}, its column cast to the type the arms meet in
-     * where its own type differs, {@code CAST(OB$1."1" AS NUMBER(38,0))}, and under UNION wrapped in
+     * where its own type differs, {@code CAST(OB$1."1" AS NUMBER(38,0))}, and otherwise under UNION wrapped in
      * {@code ENSURE_NULLABLE(…)} where the arm can answer no NULL but the combined column can; an untyped NULL item
      * is the met type's typed null over its read, {@code SYSTEM$NULL_TO_FIXED(OB$0.NULL)}. The chain nests as
      * {@link SetOperationNode} describes, a nested combination being one arm of the one around it, except that a
@@ -375,7 +375,7 @@ final class SubqueryPlanPrint {
                 final String name = armNames.get(arm).get(column);
                 final String read = "OB$" + inner.get(arm) + "." + columnText(name);
                 final String metName = SqlTypeNames.canonical(met.get(column));
-                String value;
+                final String value;
                 if (armNulls.get(arm).get(column).booleanValue()) {
                     final String family = StrictMessagePrinter.typedNullFamily(met.get(column));
                     if (family == null) {
@@ -383,11 +383,13 @@ final class SubqueryPlanPrint {
                     }
                     value = "SYSTEM$NULL_TO_" + family + "(" + read + ")";
                 } else {
-                    value = metName.equals(SqlTypeNames.canonical(armTypes.get(arm).get(column))) ? read
-                        : "CAST(" + read + " AS " + metName + ")";
-                    if (union && metNullable.get(column).booleanValue()
+                    if (!metName.equals(SqlTypeNames.canonical(armTypes.get(arm).get(column)))) {
+                        value = "CAST(" + read + " AS " + metName + ")";
+                    } else if (union && metNullable.get(column).booleanValue()
                             && !armNullables.get(arm).get(column).booleanValue()) {
-                        value = "ENSURE_NULLABLE(" + value + ")";
+                        value = "ENSURE_NULLABLE(" + read + ")";
+                    } else {
+                        value = read;
                     }
                 }
                 from.append(column > 0 ? ", " : "").append(value).append(" AS \"").append(name).append('"');

@@ -17,8 +17,10 @@
 package dev.frostlake;
 
 import dev.frostlake.config.EngineConfig;
+import dev.frostlake.executor.AccountParameters;
 import dev.frostlake.executor.ReadOnlyBodies;
 import dev.frostlake.executor.ReadOnlyRequest;
+import dev.frostlake.executor.RelationShapeOnly;
 import dev.frostlake.executor.RequestSessionAborts;
 import dev.frostlake.functions.scalar.file.NamedStage;
 import dev.frostlake.http.ExpiredSessionListener;
@@ -34,6 +36,7 @@ import dev.frostlake.transaction.Transaction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,7 +46,11 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Thread-safe wrapper around DatabaseEngine for concurrent multi-user access
- * Manages sessions and ensures proper isolation between concurrent requests
+ * Manages sessions and ensures proper isolation between concurrent requests.
+ *
+ * <p>A wrapper of its own engine runs read-only requests side by side under a shared lock and every other request
+ * alone. A wrapper over an engine other clients in the JVM use too (see {@link #sharing}) runs every request alone,
+ * holding the engine's monitor as an in-process connection's statement does.
  */
 public class ConcurrentDatabaseEngine {
     private static final Logger logger = LoggerFactory.getLogger(ConcurrentDatabaseEngine.class);
@@ -51,6 +58,8 @@ public class ConcurrentDatabaseEngine {
     private final DatabaseEngine engine;
     private final SessionManager sessionManager;
     private final ReentrantReadWriteLock engineLock;
+    /** Whether the engine is shared with in-process connections, which run their statements on its monitor. */
+    private final boolean sharesMonitor;
 
     // Track per-session state
     private final ConcurrentHashMap<String, SessionState> sessionStates;
@@ -70,7 +79,12 @@ public class ConcurrentDatabaseEngine {
     }
 
     private ConcurrentDatabaseEngine(final DatabaseEngine engine) {
+        this(engine, false);
+    }
+
+    private ConcurrentDatabaseEngine(final DatabaseEngine engine, final boolean sharesMonitor) {
         this.engine = engine;
+        this.sharesMonitor = sharesMonitor;
         // New sessions start where the engine's configuration points, exactly like the engine's
         // own bootstrap session, and idle out after http.session.idleTimeoutMinutes (Snowflake's four hours
         // unless set; 0 keeps them until they are released).
@@ -91,6 +105,22 @@ public class ConcurrentDatabaseEngine {
             }
         });
         logger.info("Initialized concurrent Frostlake engine");
+    }
+
+    /**
+     * A concurrent wrapper over an engine other clients in this JVM use too - the engine
+     * {@code jdbc:frostlake:direct:<name>} connections share (see {@code DatabaseDriver.directEngine}) - so the
+     * wrapper's sessions and those connections read and write one database. Every request runs alone, holding the
+     * engine's monitor as a direct connection's statement does, so a request and a direct statement never run at
+     * once; one that waits for another session's table lock gives the monitor up meanwhile, as a direct statement
+     * does. Each session stays its own: its role, its database and schema, and its transaction, which no other session
+     * reads before COMMIT. Shutting the wrapper down ends its sessions and leaves the engine running.
+     *
+     * @param engine the engine
+     * @return the wrapper
+     */
+    public static ConcurrentDatabaseEngine sharing(final DatabaseEngine engine) {
+        return new ConcurrentDatabaseEngine(engine, true);
     }
 
     /**
@@ -172,20 +202,7 @@ public class ConcurrentDatabaseEngine {
     private ExecutionResult executeInSession(final String sql, final SessionContext session,
                                              final Boolean clientAutoCommit, final boolean ending) {
         session.touch();
-
-        // Synchronize on session to prevent concurrent modifications to same session
-        // putIfAbsent rather than get/put: two requests for one session must synchronize on the
-        // SAME state object, so a lost race here would defeat the lock below.
-        final String sessionId = session.getSessionId();
-        SessionState state = sessionStates.get(sessionId);
-        if (state == null) {
-            state = new SessionState();
-            final SessionState raced = sessionStates.putIfAbsent(sessionId, state);
-            if (raced != null) {
-                state = raced;
-            }
-        }
-
+        final SessionState state = stateOf(session);
         synchronized (state) {
             // Under the session's lock, so the mode applied below is the one this request declared.
             session.followClientAutoCommit(clientAutoCommit);
@@ -199,6 +216,17 @@ public class ConcurrentDatabaseEngine {
                     // engine: that session ends what it runs now rather than running on to its end and committing.
                     RequestSessionAborts.carryOut(sql, session.getSettings().getSessionNumber(),
                         engine.getSessionDirectory());
+                }
+                if (sharesMonitor) {
+                    // On an engine shared with in-process connections every request runs alone on its monitor.
+                    synchronized (engine) {
+                        try {
+                            return runLocked(sql, session, false, ending);
+                        } finally {
+                            // A direct statement waiting for a lock this request may have let go looks again at once.
+                            engine.notifyAll();
+                        }
+                    }
                 }
                 if (readOnly) {
                     engineLock.readLock().lock();
@@ -216,80 +244,9 @@ public class ConcurrentDatabaseEngine {
                 } else {
                     engineLock.writeLock().lock();
                 }
-
                 try {
-                    if (!ending) {
-                        // Judged again under the engine's lock: an abort that another request carried out while this
-                        // one waited for the engine must still stop it before it runs.
-                        requireLiveSession(session);
-                    }
-                    // Apply session context before execution (inside lock for thread safety)
-                    applySessionContext(session);
-                    if (!readOnly) {
-                        // A statement that waits for another session's table lock gives the engine's lock up
-                        // meanwhile, so the holder's own requests can end its transaction (see TableLockGate). The
-                        // session's context is bound to this thread, so nothing of it moves while it waits.
-                        TableLockGate.register(new EngineLockRelease() {
-                            private int held;
-
-                            @Override
-                            public void release() {
-                                held = engineLock.getWriteHoldCount();
-                                for (int i = 0; i < held; i++) {
-                                    engineLock.writeLock().unlock();
-                                }
-                            }
-
-                            @Override
-                            public void pause(final long millis) throws InterruptedException {
-                                Thread.sleep(millis);
-                            }
-
-                            @Override
-                            public void reacquire() {
-                                for (int i = 0; i < held; i++) {
-                                    engineLock.writeLock().lock();
-                                }
-                            }
-                        });
-                    }
-
-                    final long startTime = System.currentTimeMillis();
-                    final ExecutionResult result;
-                    try {
-                        result = engine.execute(sql);
-                    } catch (final RuntimeException failed) {
-                        // A request that fails part-way keeps what its earlier statements did, so the
-                        // session must take it back: a transaction a BEGIN opened stays open in the session
-                        // (live-verified — CURRENT_TRANSACTION() is still set, the session reads its own
-                        // rows, and COMMIT or ROLLBACK ends it), and a USE stays in force. Left uncaptured,
-                        // the transaction stayed with this pooled thread, the session's next request cleared
-                        // it, and SHOW TRANSACTIONS listed it for the server's lifetime under no session.
-                        captureSessionContext(session);
-                        throw failed;
-                    }
-                    final long duration = System.currentTimeMillis() - startTime;
-
-                    logger.debug("Executed SQL in session {} ({}ms): {}",
-                        session.getSessionId(), duration, sql.substring(0, Math.min(50, sql.length())));
-
-                    // Update session context after execution (reads this thread's scope, so it must run
-                    // before the finally block clears it)
-                    captureSessionContext(session);
-
-                    return result;
-
+                    return runLocked(sql, session, readOnly, ending);
                 } finally {
-                    TableLockGate.unregister();
-                    // Always drop this thread's per-session scopes (idempotent) — a failed statement must
-                    // not leak its session's context into whatever runs on this pooled thread next.
-                    engine.getCatalog().clearSessionScope();
-                    engine.getTransactionManager().clearSessionAutoCommit();
-                    engine.getQueryResultCache().clearSessionScope();
-                    engine.getSecurityManager().getSessionContext().unbindSettings();
-                    // The transaction now belongs to the session (captured above): unbind it from this
-                    // pooled thread, which serves other sessions next.
-                    engine.getTransactionManager().setCurrentTransaction(null);
                     if (readOnly) {
                         engineLock.readLock().unlock();
                     } else {
@@ -301,6 +258,207 @@ public class ConcurrentDatabaseEngine {
                     session.getSessionId(), e.getMessage(), e);
                 throw e;
             }
+        }
+    }
+
+    /**
+     * Runs a request in its session's scope, once it holds the engine: the engine's lock, or its monitor where the
+     * engine is shared.
+     *
+     * @param sql      the statement text
+     * @param session  the session to run in
+     * @param readOnly whether the request holds the shared lock only
+     * @param ending   whether the request is the rollback that ends the session
+     * @return the statement's result
+     */
+    private ExecutionResult runLocked(final String sql, final SessionContext session, final boolean readOnly,
+                                      final boolean ending) {
+        try {
+            if (!ending) {
+                // Judged again under the engine's lock: an abort that another request carried out while this
+                // one waited for the engine must still stop it before it runs.
+                requireLiveSession(session);
+            }
+            // Apply session context before execution (inside lock for thread safety)
+            applySessionContext(session);
+            if (sharesMonitor) {
+                // A statement that waits for another session's table lock waits on the engine's monitor, which it
+                // gives up meanwhile, as a direct connection's statement does (see TableLockGate).
+                TableLockGate.register(monitorRelease());
+            } else if (!readOnly) {
+                // A statement that waits for another session's table lock gives the engine's lock up
+                // meanwhile, so the holder's own requests can end its transaction (see TableLockGate). The
+                // session's context is bound to this thread, so nothing of it moves while it waits.
+                TableLockGate.register(new EngineLockRelease() {
+                    private int held;
+
+                    @Override
+                    public void release() {
+                        held = engineLock.getWriteHoldCount();
+                        for (int i = 0; i < held; i++) {
+                            engineLock.writeLock().unlock();
+                        }
+                    }
+
+                    @Override
+                    public void pause(final long millis) throws InterruptedException {
+                        Thread.sleep(millis);
+                    }
+
+                    @Override
+                    public void reacquire() {
+                        for (int i = 0; i < held; i++) {
+                            engineLock.writeLock().lock();
+                        }
+                    }
+                });
+            }
+
+            final long startTime = System.currentTimeMillis();
+            final ExecutionResult result;
+            try {
+                result = engine.execute(sql);
+            } catch (final RuntimeException failed) {
+                // A request that fails part-way keeps what its earlier statements did, so the
+                // session must take it back: a transaction a BEGIN opened stays open in the session
+                // (live-verified — CURRENT_TRANSACTION() is still set, the session reads its own
+                // rows, and COMMIT or ROLLBACK ends it), and a USE stays in force. Left uncaptured,
+                // the transaction stayed with this pooled thread, the session's next request cleared
+                // it, and SHOW TRANSACTIONS listed it for the server's lifetime under no session.
+                captureSessionContext(session);
+                throw failed;
+            }
+            final long duration = System.currentTimeMillis() - startTime;
+
+            logger.debug("Executed SQL in session {} ({}ms): {}",
+                session.getSessionId(), duration, sql.substring(0, Math.min(50, sql.length())));
+
+            // Update session context after execution (reads this thread's scope, so it must run
+            // before the finally block clears it)
+            captureSessionContext(session);
+
+            return result;
+
+        } finally {
+            TableLockGate.unregister();
+            clearScopes();
+        }
+    }
+
+    /**
+     * Drops this thread's per-session scopes (idempotent) — a failed statement must not leak its session's context
+     * into whatever runs on this pooled thread next — and unbinds the transaction, which belongs to the session (its
+     * request captured it) and not to this thread, which serves other sessions next.
+     */
+    private void clearScopes() {
+        engine.getCatalog().clearSessionScope();
+        engine.getTransactionManager().clearSessionAutoCommit();
+        engine.getQueryResultCache().clearSessionScope();
+        engine.getSecurityManager().getSessionContext().unbindSettings();
+        engine.getTransactionManager().setCurrentTransaction(null);
+    }
+
+    /** How a request waiting for a table lock gives up the engine's monitor: each pause waits on it. */
+    private EngineLockRelease monitorRelease() {
+        return new EngineLockRelease() {
+            @Override
+            public void release() {
+                // The monitor is given up by each pause.
+            }
+
+            @Override
+            public void pause(final long millis) throws InterruptedException {
+                engine.wait(millis);
+            }
+
+            @Override
+            public void reacquire() {
+                // Each pause takes the monitor back as it returns.
+            }
+        };
+    }
+
+    /**
+     * The object a session's requests synchronize on. putIfAbsent rather than get/put: two requests for one session
+     * must synchronize on the SAME state object, so a lost race here would defeat the lock.
+     */
+    private SessionState stateOf(final SessionContext session) {
+        final String sessionId = session.getSessionId();
+        SessionState state = sessionStates.get(sessionId);
+        if (state == null) {
+            state = new SessionState();
+            final SessionState raced = sessionStates.putIfAbsent(sessionId, state);
+            if (raced != null) {
+                state = raced;
+            }
+        }
+        return state;
+    }
+
+    /**
+     * The results a query would answer in a session, each with its columns and no rows, compiled as a view's body is
+     * (see {@link RelationShapeOnly}) and never run: what the Snowflake driver's describe asks of a prepared statement.
+     * It takes no query ID and no history row, and leaves the session as it was. A query that does not compile is
+     * refused as it would be when run.
+     *
+     * @param sql     the query, its placeholders written as values
+     * @param session the session it would run in
+     * @return its results, without rows
+     */
+    public List<ResultSet> shapeOf(final String sql, final SessionContext session) {
+        try {
+            return inSession(session, new SessionWork<List<ResultSet>>() {
+                @Override
+                public List<ResultSet> run(final DatabaseEngine bound) {
+                    final boolean previous = RelationShapeOnly.begin();
+                    try {
+                        return bound.getExecutor().executeUnrecorded(sql);
+                    } finally {
+                        RelationShapeOnly.end(previous);
+                    }
+                }
+            });
+        } catch (final IOException unreachable) {
+            throw new IllegalStateException(unreachable);
+        }
+    }
+
+    /**
+     * Does work on the engine in a session's scope - its current database and schema, its role, its settings and its
+     * transaction - alone, as a request of the session runs, and leaves the session as it was: no statement runs, so
+     * nothing is recorded and the session takes nothing back.
+     *
+     * @param session the session
+     * @param work    the work
+     * @param <T>     what it answers
+     * @return what it answers
+     * @throws IOException where the work reads or writes a file and fails
+     */
+    public <T> T inSession(final SessionContext session, final SessionWork<T> work) throws IOException {
+        requireLiveSession(session);
+        session.touch();
+        synchronized (stateOf(session)) {
+            engineLock.writeLock().lock();
+            try {
+                if (sharesMonitor) {
+                    synchronized (engine) {
+                        return inScope(session, work);
+                    }
+                }
+                return inScope(session, work);
+            } finally {
+                engineLock.writeLock().unlock();
+            }
+        }
+    }
+
+    /** {@link #inSession}'s work, once it holds the engine. */
+    private <T> T inScope(final SessionContext session, final SessionWork<T> work) throws IOException {
+        try {
+            applySessionContext(session);
+            return work.run(engine);
+        } finally {
+            clearScopes();
         }
     }
 
@@ -393,6 +551,41 @@ public class ConcurrentDatabaseEngine {
         try {
             final Object zone = engine.getSecurityManager().getSessionContext().getSessionParameter("TIMEZONE");
             return zone == null ? null : zone.toString();
+        } finally {
+            engine.getSecurityManager().getSessionContext().unbindSettings();
+        }
+    }
+
+    /**
+     * A session parameter's value - the session's own, its user's or the account's, the zone this engine's account
+     * sets among them (see {@link AccountParameters}) - read from the session's own settings, as SHOW PARAMETERS reads
+     * it.
+     *
+     * @param session the session
+     * @param name    the parameter's name, upper-cased
+     * @return its value, or null where nothing sets it
+     */
+    public Object sessionParameter(final SessionContext session, final String name) {
+        engine.getSecurityManager().getSessionContext().bindSettings(session.getSettings());
+        try {
+            final Object value = engine.getSecurityManager().getSessionContext().getSessionParameter(name);
+            return value != null ? value : AccountParameters.value(engine.getCatalog(), name);
+        } finally {
+            engine.getSecurityManager().getSessionContext().unbindSettings();
+        }
+    }
+
+    /**
+     * Whether a session's CLIENT_RESULT_COLUMN_CASE_INSENSITIVE is TRUE - its own, its user's or the account's - read
+     * from the session's own settings, as {@link #sessionTimezone} reads its zone.
+     *
+     * @param session the session
+     * @return whether it is
+     */
+    public boolean resultColumnsCaseInsensitive(final SessionContext session) {
+        engine.getSecurityManager().getSessionContext().bindSettings(session.getSettings());
+        try {
+            return engine.getSecurityManager().getSessionContext().resultColumnsCaseInsensitive();
         } finally {
             engine.getSecurityManager().getSessionContext().unbindSettings();
         }
@@ -523,15 +716,28 @@ public class ConcurrentDatabaseEngine {
         // What the session created TEMPORARY ends with it: under the engine's write lock, like the DROP it is.
         engineLock.writeLock().lock();
         try {
+            if (sharesMonitor) {
+                synchronized (engine) {
+                    dropWhatSessionLeft(session);
+                }
+            } else {
+                dropWhatSessionLeft(session);
+            }
+        } finally {
+            engineLock.writeLock().unlock();
+        }
+        removeSession(session.getSessionId());
+    }
+
+    /** Rolls back the transactions an ending session left and drops what it created TEMPORARY. */
+    private void dropWhatSessionLeft(final SessionContext session) {
+        try {
             rollBackLeftTransactions(session.getSettings().getSessionNumber());
             engine.dropTemporaryObjectsOf(session.getSettings().getSessionNumber());
         } catch (final RuntimeException failed) {
             logger.warn("Dropping the temporary objects of ended session {} failed: {}", session.getSessionId(),
                 failed.getMessage());
-        } finally {
-            engineLock.writeLock().unlock();
         }
-        removeSession(session.getSessionId());
     }
 
     /**
@@ -567,11 +773,20 @@ public class ConcurrentDatabaseEngine {
                                    final String relative) {
         engineLock.readLock().lock();
         try {
-            final NamedStage named = engine.getExecutor().namedStage(database, schema, stage);
-            return named == null ? null : named.fileAt(relative);
+            if (sharesMonitor) {
+                synchronized (engine) {
+                    return stageFile(database, schema, stage, relative);
+                }
+            }
+            return stageFile(database, schema, stage, relative);
         } finally {
             engineLock.readLock().unlock();
         }
+    }
+
+    private Path stageFile(final String database, final String schema, final String stage, final String relative) {
+        final NamedStage named = engine.getExecutor().namedStage(database, schema, stage);
+        return named == null ? null : named.fileAt(relative);
     }
 
     // Component access
@@ -589,8 +804,15 @@ public class ConcurrentDatabaseEngine {
      */
     public void shutdown() {
         logger.info("Shutting down concurrent Frostlake engine");
+        if (sharesMonitor) {
+            // The engine goes on serving its other clients, so the sessions end as released ones do - every one,
+            // however recently it ran: what each left open is rolled back, what it created TEMPORARY dropped.
+            sessionManager.expireSessionsIdleFor(-1L);
+        }
         sessionManager.shutdown();
-        engine.shutdown();
+        if (!sharesMonitor) {
+            engine.shutdown();
+        }
         sessionStates.clear();
     }
 

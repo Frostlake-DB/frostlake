@@ -117,6 +117,13 @@ public class CaretOperatorTest extends MeasuredCellsTestSupport {
             assertAnswer(
                 "REFUSED Compilation of SQL UDF failed: Unsupported feature '^'.",
                 "CREATE OR REPLACE FUNCTION eu2(a INT) RETURNS INT AS 'a ^ 2'");
+            // A function's query, a table function's too, is refused bare.
+            assertAnswer(
+                "REFUSED Unsupported feature '^'.",
+                "CREATE OR REPLACE FUNCTION eu2(a INT) RETURNS INT AS 'SELECT a ^ 2'");
+            assertAnswer(
+                "REFUSED Unsupported feature '^'.",
+                "CREATE OR REPLACE FUNCTION eu2() RETURNS TABLE (n INT) AS 'SELECT a ^ 2 FROM nb_t'");
             assertAnswer(
                 "REFUSED Unsupported feature '^'.",
                 "SELECT a FROM nb_t GROUP BY a HAVING a ^ 2 > 1");

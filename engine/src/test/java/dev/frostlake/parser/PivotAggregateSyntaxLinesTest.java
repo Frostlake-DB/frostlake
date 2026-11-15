@@ -53,7 +53,7 @@ public class PivotAggregateSyntaxLinesTest extends MeasuredCellsTestSupport {
                 + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 52 unexpected 'mon'.",
             "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt) FOR mon IN (ANY))");
         assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
-                + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 47 unexpected ')'.",
+                + "error line 1 at position 42 unexpected '('.",
             "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt))");
         assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
                 + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 57 unexpected 'mon'.",
@@ -74,5 +74,32 @@ public class PivotAggregateSyntaxLinesTest extends MeasuredCellsTestSupport {
         assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
                 + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 52 unexpected 'mon'.",
             "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt) FOR mon IN ('JAN'), x)");
+    }
+
+    /** With no FOR, the bracket closing the clause is refused only where no bracket after a word was. */
+    @Test
+    public void pivotAggregatesWithNoFor() {
+        engine.execute("CREATE OR REPLACE TABLE s2088 (mon VARCHAR, amt INT)");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 40 unexpected '('.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), MAX(amt))");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 38 unexpected ')'.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), x)");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 42 unexpected '('.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt)) p");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 52 unexpected '('.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt), MIN(amt))");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 42 unexpected '('. | syntax error line 1 at position 48 unexpected '1'.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt, 1))");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 35 unexpected ','. | syntax "
+                + "error line 1 at position 42 unexpected '('.",
+            "SELECT * FROM s2088 PIVOT (SUM(amt), COUNT((amt)))");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 50 unexpected ','. | syntax "
+                + "error line 1 at position 57 unexpected '('.",
+            "SELECT * FROM (SELECT * FROM s2088 PIVOT (SUM(amt), COUNT(amt)))");
     }
 }

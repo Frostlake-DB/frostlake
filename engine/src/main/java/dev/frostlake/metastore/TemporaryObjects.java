@@ -25,11 +25,14 @@ import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.storage.StorageEngine;
+import dev.frostlake.storage.TableStorage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Set;
 
 
@@ -192,9 +195,42 @@ public final class TemporaryObjects {
     }
 
     /**
+     * Set the current session's own temporary tables of a schema that is dropped aside, their rows with them: they wait
+     * with the dropped version and come back with an UNDROP in the same session, as the account brings a session's
+     * temporary table back with its schema (live-verified). Run before {@link #releaseSessionTables}, which then takes
+     * every other session's.
+     *
+     * @param schema        the schema
+     * @param storageEngine the storage their rows live in
+     * @param database      the schema's database
+     * @return the tables set aside
+     */
+    public static List<DroppedSessionTable> setOwnSessionTablesAside(final Schema schema,
+                                                                    final StorageEngine storageEngine,
+                                                                    final String database) {
+        final List<DroppedSessionTable> aside = new ArrayList<>();
+        final Long session = StatementSession.current();
+        if (session == null) {
+            return aside;
+        }
+        for (final Table table : schema.allTables()) {
+            if (!table.isSessionTemporary() || !session.equals(table.getCreatedInSession())) {
+                continue;
+            }
+            final TableStorage rows =
+                storageEngine.takeOwnSessionTable(QualifiedName.key(database, schema.getName(), table.getName()));
+            if (rows != null) {
+                schema.removeSessionTable(table);
+                aside.add(new DroppedSessionTable(schema.getName(), table, rows));
+            }
+        }
+        return aside;
+    }
+
+    /**
      * Release every session's own temporary tables of a schema that is dropped or replaced: they go with it, from
-     * whichever session holds them, and do not come back with an UNDROP. What is left are the tables every session
-     * shares.
+     * whichever session holds them, and do not come back with an UNDROP - but for the dropping session's own, which
+     * {@link #setOwnSessionTablesAside} kept. What is left are the tables every session shares.
      *
      * @param schema        the schema
      * @param storageEngine the storage their rows live in

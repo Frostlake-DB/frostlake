@@ -32,6 +32,7 @@ import dev.frostlake.executor.RelationShapeOnly;
 import dev.frostlake.executor.ScalarBodyRowItems;
 import dev.frostlake.executor.SelectItemAccessors;
 import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.StoredColumnValues;
 import dev.frostlake.executor.SubqueryAhead;
 import dev.frostlake.executor.SubqueryCompilation;
@@ -49,6 +50,8 @@ import dev.frostlake.values.ValueRange;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 
+import java.math.BigDecimal;
+import java.text.CollationKey;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -89,6 +92,17 @@ final class SubqueryEvaluator {
     private final Map<String, List<Expression>> outerKeys = new HashMap<>();
     /** The copies run for each row: no equality correlation, or one that could not be computed once for all. */
     private final Set<String> perRowOnly = new HashSet<>();
+    /** The once-for-all query whose prepared keys each copy's scalar aggregate reads, by the copy's memo key. */
+    private final Map<String, String> preparedQueries = new HashMap<>();
+    /** Each copy's residual over its keyed rows, by its residual key (see {@link #residualExists}), parsed once. */
+    private final Map<String, Expression> residuals = new HashMap<>();
+    /** The evaluator of each copy's residual over its keyed rows, by its residual key, built once. */
+    private final Map<String, ExpressionEvaluator> residualEvaluators = new HashMap<>();
+
+    /** What a copy's memo key is followed by in the keys of its residual's analysis and rows. */
+    private static final String RESIDUAL = "\u0000residual";
+    /** The name of the relation a residual is evaluated over. */
+    private static final String RESIDUAL_ROWS = "$RESIDUAL_ROWS";
 
     SubqueryEvaluator(final ExpressionEvaluatorVisitor visitor) {
         this.visitor = visitor;
@@ -313,7 +327,7 @@ final class SubqueryEvaluator {
         final PreparedKeyedValues keyed = keyedValuesOf(expr);
         boolean missed = false;
         if (keyed != null) {
-            final List<Object> probe = outerKeyValues(memoKey(expr));
+            final List<Object> probe = preparedProbe(memoKey(expr), preparedQueries.get(memoKey(expr)));
             if (probe != null && (holdsNull(probe) || keyed.answers(probe))) {
                 if (!holdsNull(probe) && keyed.holds(probe)) {
                     final Object cell = keyed.valueOf(probe);
@@ -344,20 +358,27 @@ final class SubqueryEvaluator {
         final SubqueryMemo memo = visitor.getSubqueryMemo();
         final String key = memoKey(expr);
         final EqualityCorrelation correlation = memo == null ? null : equalityCorrelationOf(key, body);
-        if (correlation == null || !correlation.answersARowPerKeptRow()) {
+        if (correlation == null) {
+            return memo == null ? null : residualExists(key, expr, body, memo);
+        }
+        if (!correlation.answersARowPerKeptRow()) {
             return null;
         }
-        final String keysQuery = correlation.keysQuery();
+        // Computed over the keys the outer table holds (see heldKeysConjunct); a row's fault there runs the subquery
+        // per outer row instead.
+        final String keysQuery = correlation.keysQuery(heldKeysConjunct(correlation, key));
         PreparedKeySet keys = memo.cachedKeySet(keysQuery);
         if (keys == null) {
             final ResultSet computed = computedOnce(key, keysQuery, correlation.keyCount(), correlation.keyCount());
             if (computed == null) {
                 return null;
             }
-            keys = PreparedKeySet.build(computed.getRows(), correlation.keyCount());
+            final ExpressionCollation[] collations = keyCollations(computed, correlation.keyCount());
+            keys = PreparedKeySet.build(collatedRows(computed.getRows(), collations), correlation.keyCount());
             memo.recordKeySet(keysQuery, keys);
+            memo.recordKeyCollations(keysQuery, collations);
         }
-        final List<Object> probe = outerKeyValues(key);
+        final List<Object> probe = preparedProbe(key, keysQuery);
         if (probe == null) {
             return null;
         }
@@ -365,6 +386,291 @@ final class SubqueryEvaluator {
             return Boolean.FALSE;
         }
         return keys.answers(probe) ? Boolean.valueOf(keys.contains(probe)) : null;
+    }
+
+    /**
+     * An EXISTS whose subquery reads the outer row through equalities and through other conjuncts as well (see
+     * {@link CorrelatedSubqueryRule#residualCorrelation}), answered by testing the residual over the inner rows of the
+     * outer row's keys, which are computed once for the statement: the answer running the subquery for the row gives,
+     * in time that grows with the rows of each key rather than with the whole inner relation. Null where it cannot be
+     * settled that way, and the subquery runs.
+     *
+     * <p>Which inner rows are computed follows the account (live-verified). Under EXISTS the residual's columns are
+     * computed over every inner row the subquery's other conjuncts keep, a row's fault raised whatever its key, unless
+     * the outer WHERE filters the key itself: such a filter, a comparison of the outer key column with a constant, a
+     * list or a range of constants beside the EXISTS, bounds the inner key the same way. Under NOT EXISTS they are
+     * computed over the inner rows whose key the outer table holds, a fault of another key's row never met.
+     */
+    private Boolean residualExists(final String copy, final SubqueryExpression expr, final SubqueryExpression body,
+                                   final SubqueryMemo memo) {
+        final String key = copy + RESIDUAL;
+        if (perRowOnly.contains(key)) {
+            return null;
+        }
+        EqualityCorrelation correlation = equalityCorrelations.get(key);
+        if (correlation == null) {
+            correlation = analyzedResidual(key, body);
+            if (correlation == null) {
+                perRowOnly.add(key);
+                return null;
+            }
+            equalityCorrelations.put(key, correlation);
+        }
+        final boolean negated = expr.isNegatedExistence();
+        final String rowsQuery = correlation.residualRowsQuery(negated ? heldKeysConjunct(correlation, key)
+            : transferredKeyFilter(expr, correlation, key));
+        PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
+        if (rows == null) {
+            final int keys = correlation.keyCount();
+            final ResultSet computed = computedOnce(key, rowsQuery, keys + correlation.residualItemCount(), keys,
+                !negated);
+            if (computed == null || residualColumnsCollate(computed, keys)) {
+                perRowOnly.add(key);
+                return null;
+            }
+            final ExpressionCollation[] collations = keyCollations(computed, keys);
+            rows = PreparedKeyedRows.build(collatedRows(computed.getRows(), collations), keys, computed.getColumns());
+            memo.recordKeyedRows(rowsQuery, rows);
+            memo.recordKeyCollations(rowsQuery, collations);
+        }
+        final List<Object> probe = preparedProbe(key, rowsQuery);
+        if (probe == null) {
+            return null;
+        }
+        if (holdsNull(probe)) {
+            return Boolean.FALSE;
+        }
+        if (!rows.answers(probe)) {
+            return null;
+        }
+        final List<Row> group = rows.rowsOf(probe);
+        if (group.isEmpty()) {
+            return Boolean.FALSE;
+        }
+        ExpressionEvaluator evaluator = residualEvaluators.get(key);
+        if (evaluator == null) {
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            final List<TableColumn> columns = new ArrayList<>();
+            for (final ResultSetColumn column : rows.itemColumns()) {
+                columns.add(new TableColumn(column.getName(), column.getDataType(), true, null, false, false, false));
+            }
+            evaluator = new ExpressionEvaluator(new Table(RESIDUAL_ROWS, columns, false),
+                queryExecutor.getFunctionRegistry(), queryExecutor.getCatalog(), queryExecutor);
+            residualEvaluators.put(key, evaluator);
+        }
+        evaluator.setOuterLateralContext(buildLateralContext());
+        final Expression residual = residuals.get(key);
+        for (final Row row : group) {
+            if (SqlTruth.isTrue(evaluator.evaluate(residual, row))) {
+                return Boolean.TRUE;
+            }
+        }
+        return Boolean.FALSE;
+    }
+
+    /**
+     * The outer WHERE's filters on an EXISTS's key column, written over the inner key: the conjuncts beside the
+     * EXISTS that compare the column with a constant, hold it in a list of constants or between two, each with the
+     * inner key in its place. Null where the EXISTS is no conjunct of the WHERE being filtered, its correlation has
+     * more than one key or its outer key is no column, or no conjunct filters the key.
+     */
+    private String transferredKeyFilter(final SubqueryExpression expr, final EqualityCorrelation correlation,
+                                        final String key) {
+        final List<Expression> outer = outerKeys.get(key);
+        final Expression condition = OuterFilters.current();
+        if (correlation.keyCount() != 1 || outer == null || outer.size() != 1
+                || !(outer.get(0) instanceof ColumnReferenceExpression) || condition == null) {
+            return null;
+        }
+        final List<Expression> conjuncts = new ArrayList<>();
+        filterConjuncts(condition, conjuncts);
+        boolean beside = false;
+        for (final Expression conjunct : conjuncts) {
+            beside |= conjunct instanceof UnaryOperationExpression
+                && ((UnaryOperationExpression) conjunct).getOperator() == UnaryOperator.EXISTS
+                && ((UnaryOperationExpression) conjunct).getOperand() == expr;
+        }
+        if (!beside) {
+            return null;
+        }
+        final ColumnReferenceExpression column = (ColumnReferenceExpression) outer.get(0);
+        final String inner = "(" + correlation.getInnerKeys().get(0) + ")";
+        final List<String> filters = new ArrayList<>();
+        for (final Expression conjunct : conjuncts) {
+            final String filter = keyFilterOf(conjunct, column, inner);
+            if (filter != null) {
+                filters.add(filter);
+            }
+        }
+        return filters.isEmpty() ? null : String.join(" AND ", filters);
+    }
+
+    /** The conjuncts of a condition, through AND. */
+    private static void filterConjuncts(final Expression condition, final List<Expression> conjuncts) {
+        if (condition instanceof BinaryOperationExpression
+                && ((BinaryOperationExpression) condition).getOperator() == BinaryOperator.AND) {
+            filterConjuncts(((BinaryOperationExpression) condition).getLeft(), conjuncts);
+            filterConjuncts(((BinaryOperationExpression) condition).getRight(), conjuncts);
+            return;
+        }
+        conjuncts.add(condition);
+    }
+
+    /**
+     * A conjunct filtering the outer key column by constants, written over the inner key: {@code a.id < 3} as
+     * {@code (b.k) < 3}, {@code a.id IN (1, 2)}, {@code a.id BETWEEN 1 AND 2}; null for any other conjunct.
+     */
+    private static String keyFilterOf(final Expression conjunct, final ColumnReferenceExpression column,
+                                      final String inner) {
+        if (conjunct instanceof BinaryOperationExpression) {
+            final BinaryOperationExpression comparison = (BinaryOperationExpression) conjunct;
+            final String symbol = comparisonSymbol(comparison.getOperator());
+            if (symbol == null) {
+                return null;
+            }
+            if (sameColumn(comparison.getLeft(), column) && constantText(comparison.getRight()) != null) {
+                return inner + " " + symbol + " " + constantText(comparison.getRight());
+            }
+            if (sameColumn(comparison.getRight(), column) && constantText(comparison.getLeft()) != null) {
+                return constantText(comparison.getLeft()) + " " + symbol + " " + inner;
+            }
+            return null;
+        }
+        if (conjunct instanceof InExpression) {
+            final InExpression in = (InExpression) conjunct;
+            if (in.isNot() || in.getSubquery() != null || in.getValues() == null || in.getValues().isEmpty()
+                    || !sameColumn(in.getValue(), column)) {
+                return null;
+            }
+            final List<String> members = new ArrayList<>();
+            for (final Expression member : in.getValues()) {
+                final String text = constantText(member);
+                if (text == null) {
+                    return null;
+                }
+                members.add(text);
+            }
+            return inner + " IN (" + String.join(", ", members) + ")";
+        }
+        if (conjunct instanceof BetweenExpression) {
+            final BetweenExpression between = (BetweenExpression) conjunct;
+            final String lower = constantText(between.getLower());
+            final String upper = constantText(between.getUpper());
+            return between.isNot() || lower == null || upper == null || !sameColumn(between.getValue(), column) ? null
+                : inner + " BETWEEN " + lower + " AND " + upper;
+        }
+        return null;
+    }
+
+    /** A comparison operator's symbol, or null for any other operator. */
+    private static String comparisonSymbol(final BinaryOperator operator) {
+        switch (operator) {
+            case EQUAL:
+                return "=";
+            case NOT_EQUAL:
+                return "<>";
+            case LESS_THAN:
+                return "<";
+            case LESS_THAN_OR_EQUAL:
+                return "<=";
+            case GREATER_THAN:
+                return ">";
+            case GREATER_THAN_OR_EQUAL:
+                return ">=";
+            default:
+                return null;
+        }
+    }
+
+    /** Whether an expression is a reference to the given column, by name and, where both give one, qualifier. */
+    private static boolean sameColumn(final Expression expression, final ColumnReferenceExpression column) {
+        if (!(expression instanceof ColumnReferenceExpression)) {
+            return false;
+        }
+        final ColumnReferenceExpression reference = (ColumnReferenceExpression) expression;
+        return reference.getColumnName().equalsIgnoreCase(column.getColumnName())
+            && (!reference.isQualified() || !column.isQualified()
+                || reference.getTableName().equalsIgnoreCase(column.getTableName()));
+    }
+
+    /** A numeric or text literal as written again, or null for any other expression. */
+    private static String constantText(final Expression expression) {
+        if (!(expression instanceof LiteralExpression) || ((LiteralExpression) expression).getValue() == null) {
+            return null;
+        }
+        final LiteralExpression literal = (LiteralExpression) expression;
+        if (literal.getType() == LiteralType.INTEGER || literal.getType() == LiteralType.DECIMAL) {
+            return literal.getValue() instanceof BigDecimal ? ((BigDecimal) literal.getValue()).toPlainString()
+                : String.valueOf(literal.getValue());
+        }
+        return literal.getType() == LiteralType.STRING
+            ? "'" + String.valueOf(literal.getValue()).replace("'", "''") + "'" : null;
+    }
+
+    /**
+     * A copy's correlation with a residual, analyzed once as {@link #analyzedCorrelation} analyzes an equality
+     * correlation: null where it has none, where a part of it answers anew each time it is computed, or where an
+     * outer name it reads carries a collation.
+     */
+    private EqualityCorrelation analyzedResidual(final String key, final SubqueryExpression body) {
+        final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+        final FrostlakeParser.SelectStatementContext parsed = queryExecutor.subqueryStatement(body.getSubquery());
+        if (parsed == null) {
+            return null;
+        }
+        final Set<String> outerNames = new HashSet<>();
+        for (final String name : buildLateralContext().keySet()) {
+            outerNames.add(name.toUpperCase(Locale.ROOT));
+        }
+        final EqualityCorrelation correlation =
+            new CorrelatedSubqueryRule(queryExecutor, outerNames).residualCorrelation(parsed);
+        if (correlation == null || !correlation.answersARowPerKeptRow()) {
+            return null;
+        }
+        try {
+            for (final String text : correlation.innerTexts()) {
+                if (VolatileCalls.writes(ExpressionEvaluator.parse(text))) {
+                    return null;
+                }
+            }
+            final List<Expression> outer = new ArrayList<>();
+            for (final String text : correlation.getOuterKeys()) {
+                final Expression outerKey = ExpressionEvaluator.parse(text);
+                if (VolatileCalls.writes(outerKey) || visitor.collationOf(outerKey).toRules() != null) {
+                    return null;
+                }
+                outer.add(outerKey);
+            }
+            final Expression residual = ExpressionEvaluator.parse(correlation.getResidual());
+            if (VolatileCalls.writes(residual)) {
+                return null;
+            }
+            final ColumnReferenceCollectWalk names = new ColumnReferenceCollectWalk();
+            residual.accept(names);
+            for (final ColumnReferenceExpression name : names.references()) {
+                if (!name.isQualified() && name.getColumnName().startsWith("$R")) {
+                    continue;
+                }
+                if (visitor.collationOf(name).toRules() != null) {
+                    return null;
+                }
+            }
+            outerKeys.put(key, outer);
+            residuals.put(key, residual);
+        } catch (final RuntimeException unparsed) {
+            return null;
+        }
+        return correlation;
+    }
+
+    /** Whether a column of the residual's, after the keys, carries a collation, which the residual would then apply. */
+    private static boolean residualColumnsCollate(final ResultSet computed, final int keys) {
+        for (int i = keys; i < computed.getColumns().size(); i++) {
+            if (columnCollation(computed, i).toRules() != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -395,9 +701,12 @@ final class SubqueryEvaluator {
                 perRowOnly.add(key);
                 return null;
             }
-            values = PreparedKeyedValues.build(computed.getRows(), correlation.keyCount());
+            final ExpressionCollation[] collations = keyCollations(computed, correlation.keyCount());
+            values = PreparedKeyedValues.build(collatedRows(computed.getRows(), collations), correlation.keyCount());
             memo.recordKeyedValues(groupedQuery, values);
+            memo.recordKeyCollations(groupedQuery, collations);
         }
+        preparedQueries.put(key, groupedQuery);
         return values;
     }
 
@@ -496,38 +805,103 @@ final class SubqueryEvaluator {
             return null;
         }
         if (memo.cachedResult(query) == null || results.isEmpty() || results.get(0) == null
-                || results.get(0).getColumns().size() != width
-                || comparesUnderACollation(key, results.get(0), keys)) {
+                || results.get(0).getColumns().size() != width) {
             perRowOnly.add(key);
             return null;
         }
         return results.get(0);
     }
 
-    /**
-     * Whether a key of a copy's equality correlation compares under a collation, which a hash of the values as they
-     * are cannot answer: any inner key's column, the second and later as well as the first, or any outer key.
-     */
-    private boolean comparesUnderACollation(final String key, final ResultSet computed, final int keys) {
+    /** The collation each key column of a once-for-all query's answer carries. */
+    private static ExpressionCollation[] keyCollations(final ResultSet computed, final int keys) {
+        final ExpressionCollation[] collations = new ExpressionCollation[keys];
         for (int i = 0; i < keys; i++) {
-            if (columnCollation(computed, i).toRules() != null) {
-                return true;
-            }
+            collations[i] = columnCollation(computed, i);
         }
+        return collations;
+    }
+
+    /**
+     * The rows of a once-for-all query with each text key replaced by its form under its column's collation, so equal
+     * keys under the collation hash alike ({@code 'A'} and {@code 'a'} under {@code 'en-ci'}); the rows as they are
+     * where no key column carries a collation.
+     */
+    private static List<Row> collatedRows(final List<Row> rows, final ExpressionCollation[] collations) {
+        final CollationSpec[] rules = new CollationSpec[collations.length];
+        boolean any = false;
+        for (int i = 0; i < collations.length; i++) {
+            rules[i] = collations[i].toRules();
+            any |= rules[i] != null;
+        }
+        if (!any) {
+            return rows;
+        }
+        final List<Row> collated = new ArrayList<>(rows.size());
+        for (final Row row : rows) {
+            final List<Object> values = new ArrayList<>(row.getValues());
+            for (int i = 0; i < rules.length; i++) {
+                values.set(i, collatedForm(values.get(i), rules[i]));
+            }
+            collated.add(new Row(values));
+        }
+        return collated;
+    }
+
+    /**
+     * The outer row's keys as a copy's prepared keys hold them: each under the collation its comparison with the inner
+     * key settles on, which must be the inner key column's own (live: an explicit COLLATE or a collated outer column
+     * over a plain inner one compares otherwise). Null where the copy runs for each row: the keys cannot be read, the
+     * collations cannot be combined, or they settle on another collation.
+     */
+    private List<Object> preparedProbe(final String key, final String query) {
+        final List<Object> values = outerKeyValues(key);
+        final SubqueryMemo memo = visitor.getSubqueryMemo();
+        final ExpressionCollation[] collations = memo == null || query == null ? null
+            : memo.cachedKeyCollations(query);
         final List<Expression> outer = outerKeys.get(key);
-        if (outer == null) {
-            return false;
+        if (values == null || collations == null || outer == null || outer.size() != collations.length) {
+            return null;
         }
-        for (final Expression expression : outer) {
+        final List<Object> probe = new ArrayList<>(values.size());
+        for (int i = 0; i < collations.length; i++) {
+            final ExpressionCollation settled;
             try {
-                if (visitor.collationOf(expression).toRules() != null) {
-                    return true;
-                }
-            } catch (final RuntimeException unsettled) {
-                return true;
+                settled = ExpressionCollation.combine(collations[i], visitor.collationOf(outer.get(i)));
+            } catch (final RuntimeException incompatible) {
+                return null;
             }
+            if (settled.getSpec() == null ? collations[i].getSpec() != null
+                    : !settled.getSpec().equals(collations[i].getSpec())) {
+                return null;
+            }
+            final CollationSpec rules = collations[i].toRules();
+            probe.add(rules == null ? values.get(i) : collatedForm(values.get(i), rules));
         }
-        return false;
+        return probe;
+    }
+
+    /** A text key's form under a collation, equal for texts the collation finds equal; any other value as it is. */
+    private static Object collatedForm(final Object value, final CollationSpec rules) {
+        return value instanceof String ? equalityForm(rules.equalityKey((String) value)) : value;
+    }
+
+    /** An equality key as a text: a collator's key by its bytes, a pair by its parts, a text as itself. */
+    private static String equalityForm(final Object equality) {
+        if (equality instanceof CollationKey) {
+            final StringBuilder hex = new StringBuilder("#");
+            for (final byte b : ((CollationKey) equality).toByteArray()) {
+                hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+            }
+            return hex.toString();
+        }
+        if (equality instanceof List) {
+            final StringBuilder parts = new StringBuilder("[");
+            for (final Object part : (List<?>) equality) {
+                parts.append(equalityForm(part)).append('|');
+            }
+            return parts.append(']').toString();
+        }
+        return "=" + equality;
     }
 
     /** The outer row's keys of a copy's equality correlation, or null where they cannot be read for the row. */
@@ -541,6 +915,54 @@ final class SubqueryEvaluator {
             return null;
         }
         return values;
+    }
+
+    /**
+     * The conjunct keeping an equality correlation's inner rows to the keys its outer relation's table holds, or null
+     * where the key is not traced. Live computes an IN's members over the inner rows whose key some row of the outer
+     * TABLE holds, before the outer query's filters and those of a derived table over it, and over no row of another
+     * key: a member's fault in a row of a held key refuses the statement, whichever outer rows the query keeps, and one
+     * in a row of a key the table does not hold is never met (live-verified). A key traced is one stored column of the
+     * outer row, read directly or passed through a derived relation; any other key leaves every inner row. A table a
+     * row access policy guards, and a key column a masking or a projection policy reads, are not read for it.
+     */
+    private String heldKeysConjunct(final EqualityCorrelation correlation, final String key) {
+        final List<Expression> outer = outerKeys.get(key);
+        if (correlation.keyCount() != 1 || outer == null || outer.size() != 1
+                || !(outer.get(0) instanceof ColumnReferenceExpression)) {
+            return null;
+        }
+        final ColumnReferenceExpression reference = (ColumnReferenceExpression) outer.get(0);
+        try {
+            final Table owner = scopeRelationCarrying(reference.getTableName(), reference.getColumnName());
+            if (owner == null) {
+                return null;
+            }
+            Table stored = owner.residentSource();
+            String column = reference.getColumnName();
+            if (stored == null) {
+                final DerivedColumnLineage lineage = DerivedColumnLineage.of(owner, column);
+                if (lineage == null || lineage.storedTable() == null) {
+                    return null;
+                }
+                stored = lineage.storedTable();
+                column = lineage.storedColumn();
+            }
+            final String table = stored.getQualifiedName();
+            if (table == null || column == null || stored.hasRowAccessPolicy()) {
+                // A table a row access policy guards is read through it, which may run this very membership again.
+                return null;
+            }
+            final TableColumn keyColumn = stored.columnAt(stored.getColumnIndex(column));
+            if (keyColumn.hasMaskingPolicy() || keyColumn.hasProjectionPolicy()) {
+                return null;
+            }
+            return "(" + correlation.getInnerKeys().get(0) + ") IN (SELECT "
+                + SqlIdentifiers.spellCanonical(keyColumn.getName()) + " FROM "
+                + SqlIdentifiers.spellAlreadyCanonicalPath(table) + ")";
+        } catch (final RuntimeException untraced) {
+            return null;
+        }
     }
 
     /** Whether one of a probe's keys is NULL, which no inner key equals. */
@@ -724,7 +1146,7 @@ final class SubqueryEvaluator {
         if (correlation == null || !correlation.answersARowPerKeptRow() || correlation.getMemberItem() == null) {
             return NOT_KEYED;
         }
-        final String membersQuery = correlation.membersQuery();
+        final String membersQuery = correlation.membersQuery(heldKeysConjunct(correlation, key));
         PreparedKeyedMembers members = memo.cachedKeyedMembers(membersQuery);
         if (members == null) {
             final ResultSet computed = computedOnce(key, membersQuery, correlation.keyCount() + 1,
@@ -732,11 +1154,13 @@ final class SubqueryEvaluator {
             if (computed == null) {
                 return NOT_KEYED;
             }
-            members = PreparedKeyedMembers.build(computed.getRows(), correlation.keyCount(),
+            final ExpressionCollation[] collations = keyCollations(computed, correlation.keyCount());
+            members = PreparedKeyedMembers.build(collatedRows(computed.getRows(), collations), correlation.keyCount(),
                 columnCollation(computed, correlation.keyCount()));
             memo.recordKeyedMembers(membersQuery, members);
+            memo.recordKeyCollations(membersQuery, collations);
         }
-        final List<Object> outer = outerKeyValues(key);
+        final List<Object> outer = preparedProbe(key, membersQuery);
         if (outer == null || !holdsNull(outer) && !members.answers(outer)) {
             return NOT_KEYED;
         }
@@ -1213,6 +1637,9 @@ final class SubqueryEvaluator {
         }
         final QueryExecutor queryExecutor = visitor.getQueryExecutor();
         final FrostlakeParser.SelectStatementContext parsed = queryExecutor.subqueryStatement(run.getSubquery());
+        if (parsed != null && scalar && opensWithOuterAggregate(queryExecutor, parsed)) {
+            throw unsupported(true, place);
+        }
         if (parsed != null && !outerHoldsOneRowAtMost(queryExecutor)) {
             final Set<String> outerNames = new HashSet<>();
             for (final String name : buildLateralContext().keySet()) {
@@ -1258,17 +1685,25 @@ final class SubqueryEvaluator {
             if (scalar ? rule.refusesScalar(parsed)
                     : rule.refusesMembership(parsed, in, in && !not, subject == null ? null : printed(subject),
                         in && not)) {
-                final Function called = scalar ? visitor.sqlFunctionBeingCalled() : null;
-                if (called != null) {
-                    throw UnsupportedSubqueryException.inside(called);
-                }
-                final SourcePosition at = ExpressionSource.resolve(place);
-                throw new UnsupportedSubqueryException(SqlCompilationError.of("Unsupported subquery type cannot be evaluated"
-                    + (at == null ? "" : " at line " + at.getLine() + ", position " + at.getCharPositionInLine())));
+                throw unsupported(scalar, place);
             }
         }
         judgedCorrelations.add(key);
         return false;
+    }
+
+    /**
+     * The refusal of a correlated subquery live cannot turn into a join: placed where it is written, or naming the SQL
+     * function whose body holds a scalar one.
+     */
+    private UnsupportedSubqueryException unsupported(final boolean scalar, final SourcePosition place) {
+        final Function called = scalar ? visitor.sqlFunctionBeingCalled() : null;
+        if (called != null) {
+            return UnsupportedSubqueryException.inside(called);
+        }
+        final SourcePosition at = ExpressionSource.resolve(place);
+        return new UnsupportedSubqueryException(SqlCompilationError.of("Unsupported subquery type cannot be evaluated"
+            + (at == null ? "" : " at line " + at.getLine() + ", position " + at.getCharPositionInLine())));
     }
 
     /** An expression written back as text the rule can read, or null where it cannot be printed. */
@@ -1389,10 +1824,68 @@ final class SubqueryEvaluator {
     }
 
     /**
+     * The refusal of a scalar subquery standing alone as a select item that opens with the outer query's aggregate
+     * over a row drawn from catalog tables (see {@link #opensWithOuterAggregate}), made as the statement compiles: live
+     * refuses it before any row reaches it, over an empty table and under a WHERE no row passes (live-verified). It
+     * waits for the rest of the statement to be judged, and a row reaching the subquery is refused the same way first.
+     *
+     * @param expr the select item's subquery
+     * @return the refusal, or null
+     */
+    UnsupportedSubqueryException openingOuterAggregateRefusal(final SubqueryExpression expr) {
+        final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+        if (queryExecutor == null || expr.isExistence()) {
+            return null;
+        }
+        final FrostlakeParser.SelectStatementContext parsed = queryExecutor.subqueryStatement(expr.getSubquery());
+        // No row is bound yet: the outer names are the scope's own.
+        return parsed != null && opensWithOuterAggregate(queryExecutor, parsed, outerNamesContext().keySet())
+            ? unsupported(true, expr.getPosition()) : null;
+    }
+
+    /**
+     * Whether a scalar subquery opens with the outer query's aggregate (see
+     * {@link CorrelatedSubqueryRule#opensWithOuterAggregate}) over a row drawn from catalog tables, which live refuses
+     * whatever the tables hold: neither {@link #outerHoldsOneRowAtMost} nor the statistics pinning the names it reads
+     * spare it. Over a derived table's row the call is judged as any other (live-verified).
+     */
+    private boolean opensWithOuterAggregate(final QueryExecutor queryExecutor,
+                                            final FrostlakeParser.SelectStatementContext parsed) {
+        return opensWithOuterAggregate(queryExecutor, parsed, buildLateralContext().keySet());
+    }
+
+    /** Whether a scalar subquery opens with the outer query's aggregate, read over the given outer names. */
+    private boolean opensWithOuterAggregate(final QueryExecutor queryExecutor,
+                                            final FrostlakeParser.SelectStatementContext parsed,
+                                            final Set<String> names) {
+        final List<Table> relations = new ArrayList<>();
+        if (visitor.getMultiTableAllTables() != null && !visitor.getMultiTableAllTables().isEmpty()) {
+            relations.addAll(visitor.getMultiTableAllTables());
+        } else if (visitor.getTable() != null) {
+            relations.add(visitor.getTable());
+        }
+        if (relations.isEmpty()) {
+            return false;
+        }
+        for (final Table relation : relations) {
+            if (!relation.isCatalogResident()) {
+                return false;
+            }
+        }
+        final Set<String> outerNames = new HashSet<>();
+        for (final String name : names) {
+            outerNames.add(name.toUpperCase(Locale.ROOT));
+        }
+        return new CorrelatedSubqueryRule(queryExecutor, outerNames, visitor.scopeRelations())
+            .opensWithOuterAggregate(parsed);
+    }
+
+    /**
      * Whether every catalog table the evaluated row is drawn from holds at most one row. Live evaluates a
      * correlated subquery row by row over such an outer relation instead of planning it as a join, so no
      * shape is refused there, and a second inner row surfaces as the single-row fault instead. A table
-     * function beside the table does not count.
+     * function beside the table does not count. A scalar subquery opening with the outer query's aggregate is refused
+     * all the same (see {@link #opensWithOuterAggregate}).
      */
     private boolean outerHoldsOneRowAtMost(final QueryExecutor queryExecutor) {
         final List<Table> relations = new ArrayList<>();
@@ -1497,11 +1990,19 @@ final class SubqueryEvaluator {
             // join carry is ambiguous.
             final Set<String> shared = sharedBareNames(table, visitor.getMultiTableAllTables());
             final Set<String> bare = new HashSet<>();
+            // A relation its FROM clause aliased is known by the alias alone - live, the alias replaces the name - so
+            // its name binds no qualified key: a subquery's own relation of that name answers for n.g, though the
+            // query around it reads n under an alias (FROM n o). The alias keys are bound below.
+            final Map<String, Table> fromKeys = visitor.getMultiTableAliasToTable();
+            final boolean knownByName = fromKeys == null || fromKeys.isEmpty() || fromKeys.containsKey(table.getName())
+                || !fromKeys.containsValue(table);
             for (int i = 0; i < columns.size(); i++) {
                 final String colName = columns.get(i).getName();
                 final Object value = row.getValue(i);
-                context.put(table.getName() + "." + colName, value);
-                noteCollation(collated, bound, table.getName() + "." + colName, columns.get(i));
+                if (knownByName) {
+                    context.put(table.getName() + "." + colName, value);
+                    noteCollation(collated, bound, table.getName() + "." + colName, columns.get(i));
+                }
                 if (bare.add(colName)) {
                     context.put(colName, shared.contains(colName) ? OuterNameBindings.AMBIGUOUS : value);
                     noteCollation(collated, bound, colName, collationCarrier(columns.get(i)));

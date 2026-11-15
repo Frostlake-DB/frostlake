@@ -43,16 +43,25 @@ import dev.frostlake.types.StringType;
 
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.misc.Interval;
+import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.JsonToken;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The ALERT statements: CREATE [OR REPLACE | OR ALTER] ALERT (with its properties, condition and action, or as a
  * CLONE), ALTER ALERT (RESUME, SUSPEND, SET, UNSET, MODIFY CONDITION, MODIFY ACTION), DROP ALERT, SHOW ALERTS,
  * DESCRIBE ALERT and EXECUTE ALERT. The condition and the action are kept as written; they are parsed, not
- * resolved, when the alert is created, so a missing object fails the evaluation rather than the CREATE.
+ * resolved, when the alert is created, so a missing object fails the evaluation rather than the CREATE. An alert
+ * written without a schedule is an alert on new data (documented), whose condition must read a table or a view and
+ * which EXECUTE ALERT does not run.
  */
 public final class AlertCommandHandler {
 
@@ -122,6 +131,7 @@ public final class AlertCommandHandler {
             alert = new Alert(name, sourceText(definition.alertCondition()),
                 ParseTreeText.taskBodyText(definition.taskBody()));
             applyProperties(catalog, alert, definition.alertProperty());
+            requireNewDataCondition(alert, definition.alertCondition());
         }
         if (schema.hasAlertExact(name)) {
             final Alert replaced = schema.getAlertExact(name);
@@ -145,12 +155,25 @@ public final class AlertCommandHandler {
     /**
      * CREATE OR ALTER ALERT over an existing alert: the statement describes the whole alert, so its condition,
      * action and properties replace the alert's, a property it leaves out is unset, and the state and the tags
-     * stay as they were.
+     * stay as they were. A started alert takes the statement only where it changes nothing (live-verified).
      */
     private void alterInPlace(final Schema schema, final Alert alert,
                               final FrostlakeParser.AlertDefinitionContext definition) {
-        // The properties are judged on a copy first, so a refused statement leaves the alert as it was.
-        applyProperties(catalog, alert.copy(alert.getName()), definition.alertProperty());
+        // The statement is judged on a copy first, so a refused statement leaves the alert as it was.
+        final Alert judged = alert.copy(alert.getName());
+        judged.setWarehouse(null);
+        judged.setSchedule(null);
+        judged.setComment(null);
+        judged.setConfig(null);
+        judged.setRunbook(null);
+        judged.setSuspendAfterNumFailures(null);
+        applyProperties(catalog, judged, definition.alertProperty());
+        judged.setCondition(sourceText(definition.alertCondition()));
+        judged.setAction(ParseTreeText.taskBodyText(definition.taskBody()));
+        requireNewDataCondition(judged, definition.alertCondition());
+        if (alert.getState() == AlertState.STARTED && !sameDefinition(alert, judged)) {
+            throw notSuspended(alert);
+        }
         final String schedule = alert.getSchedule();
         alert.setWarehouse(null);
         alert.setSchedule(null);
@@ -183,13 +206,88 @@ public final class AlertCommandHandler {
             } else if (property.COMMENT() != null) {
                 alert.setComment(SqlStringLiterals.decode(property.STRING_LITERAL().getText()));
             } else if (property.CONFIG() != null) {
-                alert.setConfig(SqlStringLiterals.decode(property.STRING_LITERAL().getText()));
+                final String config = SqlStringLiterals.decode(property.STRING_LITERAL().getText());
+                requireConfigObject(config);
+                alert.setConfig(config);
             } else if (property.RUNBOOK() != null) {
                 alert.setRunbook(SqlStringLiterals.decode(property.STRING_LITERAL().getText()));
             } else {
                 alert.setSuspendAfterNumFailures(Integer.valueOf(property.INTEGER_LITERAL().getText()));
             }
         }
+    }
+
+    /**
+     * A CONFIG spells a JSON object, read strictly up to its closing brace — whatever follows it is not read — and
+     * kept as written: {@code Invalid config. Must be a string representation of a valid JSON Object.} for any other
+     * text, an empty one, an array or a scalar among them (live-verified).
+     *
+     * @param config the text written
+     */
+    private static void requireConfigObject(final String config) {
+        try (JsonParser parser = JsonMapper.builder().build().createParser(config)) {
+            if (parser.nextToken() == JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                return;
+            }
+        } catch (final JacksonException malformed) {
+            // Refused below, as any text that does not begin with an object is.
+        }
+        throw new RuntimeException("Invalid config. Must be a string representation of a valid JSON Object.");
+    }
+
+    /** Whether a definition written over an alert describes it as it stands. */
+    private static boolean sameDefinition(final Alert alert, final Alert written) {
+        return Objects.equals(alert.getCondition(), written.getCondition())
+            && Objects.equals(alert.getAction(), written.getAction())
+            && Objects.equals(alert.getSchedule(), written.getSchedule())
+            && Objects.equals(alert.getWarehouse(), written.getWarehouse())
+            && Objects.equals(alert.getComment(), written.getComment())
+            && Objects.equals(alert.getConfig(), written.getConfig())
+            && Objects.equals(alert.getRunbook(), written.getRunbook())
+            && Objects.equals(alert.getSuspendAfterNumFailures(), written.getSuspendAfterNumFailures());
+    }
+
+    /** The refusal of a change to a started alert: only its state and its tags change while it runs. */
+    private static RuntimeException notSuspended(final Alert alert) {
+        return new RuntimeException("Unable to alter property for alert " + alert.getName()
+            + " since it is not suspended.");
+    }
+
+    /**
+     * The condition of an alert on new data, one without a schedule: the alert runs when the table or the view its
+     * condition reads takes new rows, so a condition calling a stored procedure, or a query reading nothing but a
+     * VALUES clause, a query without a FROM among them, is refused as the alert is written (live-verified).
+     */
+    private static void requireNewDataCondition(final Alert alert,
+                                                final FrostlakeParser.AlertConditionContext condition) {
+        if (alert.getSchedule() != null || condition.showStatement() != null) {
+            return;
+        }
+        if (condition.callStatement() != null || !readsRelation(condition)) {
+            throw new RuntimeException(
+                "Streaming alert condition must not call a stored procedure or query from a VALUES clause");
+        }
+    }
+
+    /** Whether a query reads a relation: any source of a FROM but a VALUES clause and the brackets around one. */
+    private static boolean readsRelation(final ParseTree node) {
+        if (node instanceof FrostlakeParser.TableSourceContext) {
+            final FrostlakeParser.TableSourceContext source = (FrostlakeParser.TableSourceContext) node;
+            if (source.VALUES() == null && source.selectStatement() == null && source.tableReference() == null) {
+                return true;
+            }
+        }
+        if (node instanceof FrostlakeParser.SelectOperandContext
+                && ((FrostlakeParser.SelectOperandContext) node).TABLE_QUERY() != null) {
+            return true;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (readsRelation(node.getChild(i))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Refuses a property written twice, {@code duplicate property 'COMMENT';}. */
@@ -225,6 +323,28 @@ public final class AlertCommandHandler {
         return schema.getAlertExact(alertName);
     }
 
+    /**
+     * COMMENT ON ALERT, answered as ALTER ALERT … SET COMMENT is: a missing alert is refused unless IF EXISTS
+     * forgives it, the change asks MODIFY, and a running alert must be suspended first.
+     *
+     * @param name     the alert's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing alert
+     */
+    public void comment(final FrostlakeParser.QualifiedNameContext name, final String comment, final boolean ifExists) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(name);
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        if (ifExists && !schema.hasAlertExact(parts[parts.length - 1])) {
+            return;
+        }
+        final Alert alert = require(name);
+        queryExecutor.requirePrivilege(Privilege.MODIFY, "ALERT", parts, null);
+        if (alert.getState() == AlertState.STARTED) {
+            throw notSuspended(alert);
+        }
+        alert.setComment(comment);
+    }
+
     /** ALTER ALERT … RESUME | SUSPEND | SET | UNSET | MODIFY CONDITION | MODIFY ACTION (tags are the caller's). */
     public void alter(final FrostlakeParser.QualifiedNameContext name, final FrostlakeParser.AlertActionContext action) {
         final String[] parts = ParseTreeText.qualifiedNameParts(name);
@@ -233,6 +353,9 @@ public final class AlertCommandHandler {
         // OPERATE resumes and suspends an alert; every other change is its owner's (documented).
         queryExecutor.requirePrivilege(action.RESUME() != null || action.SUSPEND() != null ? Privilege.OPERATE
             : Privilege.MODIFY, "ALERT", parts, null);
+        if (action.RESUME() == null && action.SUSPEND() == null && alert.getState() == AlertState.STARTED) {
+            throw notSuspended(alert);
+        }
         final TaskScheduler scheduler = queryExecutor.getTaskScheduler();
         if (action.RESUME() != null) {
             if (scheduler != null) {
@@ -293,6 +416,7 @@ public final class AlertCommandHandler {
                 }
             }
         } else if (action.CONDITION() != null) {
+            requireNewDataCondition(alert, action.alertCondition());
             alert.setCondition(sourceText(action.alertCondition()));
         } else if (action.ACTION() != null) {
             alert.setAction(ParseTreeText.taskBodyText(action.taskBody()));
@@ -357,12 +481,17 @@ public final class AlertCommandHandler {
 
     /**
      * EXECUTE ALERT name: the condition is evaluated now, and the action run when it returns rows. It answers
-     * {@code Alert <NAME> is scheduled to run immediately.}
+     * {@code Alert <NAME> is scheduled to run immediately.} An alert on new data is run by its rows alone:
+     * {@code Execute Alert is not supported for a streaming alert.} (live-verified).
      */
     public ResultSet execute(final FrostlakeParser.QualifiedNameContext name) {
         final String[] parts = ParseTreeText.qualifiedNameParts(name);
         final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
         final Alert alert = require(name);
+        ManualRunPrivileges.requireAlert(queryExecutor, schema, alert.getName(), alert.getOwner(), parts);
+        if (alert.getSchedule() == null) {
+            throw new RuntimeException("Execute Alert is not supported for a streaming alert.");
+        }
         final TaskScheduler scheduler = queryExecutor.getTaskScheduler();
         if (scheduler == null) {
             throw new RuntimeException("Task scheduler not initialized");

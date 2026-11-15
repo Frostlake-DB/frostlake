@@ -83,6 +83,12 @@ public final class PolicyReferences {
                 if (covers(kind, PolicyKind.JOIN)) {
                     table.setJoinPolicyName(repointed(table.getJoinPolicyName(), from, to));
                 }
+                if (covers(kind, PolicyKind.PRIVACY)) {
+                    table.setPrivacyPolicyName(repointed(table.getPrivacyPolicyName(), from, to));
+                }
+                if (covers(kind, PolicyKind.STORAGE_LIFECYCLE)) {
+                    table.setStorageLifecyclePolicyName(repointed(table.getStorageLifecyclePolicyName(), from, to));
+                }
             }
             // A view's attachments go along as a table's do (live-verified: a schema's clone names its own copies of
             // the policies a view of it carries).
@@ -95,6 +101,9 @@ public final class PolicyReferences {
                 }
                 if (covers(kind, PolicyKind.JOIN)) {
                     view.setJoinPolicyName(repointed(view.getJoinPolicyName(), from, to));
+                }
+                if (covers(kind, PolicyKind.PRIVACY)) {
+                    view.setPrivacyPolicyName(repointed(view.getPrivacyPolicyName(), from, to));
                 }
                 if (view.hasResolvedColumns()) {
                     for (final TableColumn column : view.getResolvedColumns()) {
@@ -127,9 +136,12 @@ public final class PolicyReferences {
                 table.setRowAccessPolicyName(completed(table.getRowAccessPolicyName(), schema));
                 table.setAggregationPolicyName(completed(table.getAggregationPolicyName(), schema));
                 table.setJoinPolicyName(completed(table.getJoinPolicyName(), schema));
+                table.setPrivacyPolicyName(completed(table.getPrivacyPolicyName(), schema));
+                table.setStorageLifecyclePolicyName(completed(table.getStorageLifecyclePolicyName(), schema));
             }
             for (final View view : schema.getViews()) {
                 view.setRowAccessPolicyName(completed(view.getRowAccessPolicyName(), schema));
+                view.setPrivacyPolicyName(completed(view.getPrivacyPolicyName(), schema));
             }
         }
     }

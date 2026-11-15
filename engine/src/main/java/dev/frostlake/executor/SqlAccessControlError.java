@@ -120,19 +120,29 @@ public final class SqlAccessControlError {
     }
 
     /**
-     * The refusal of the listing of the organization's accounts, which only the organization account answers: what the
-     * session may not operate on is the account's own system, named with no kind, and what it lacks is the
-     * organization's MANAGE ACCOUNTS on the current account (live-verified, the two spaces before the name included).
+     * The refusal of a listing of the organization's accounts to a role that does not administer the organization:
+     * what the session may not operate on is the account's own system, named with no kind, and no privilege is named
+     * (live-verified, the two spaces before the name included).
+     *
+     * @return the refusal
+     */
+    public static String organizationListingRefused() {
+        return insufficientPrivileges("", "SYSTEM");
+    }
+
+    /**
+     * The refusal of SHOW ACCOUNTS to a role that neither administers the organization nor the account: the listing
+     * needs CREATE LISTING on the account (live-verified).
      *
      * @param primaryRole the session's primary role
      * @param secondary   whether the session asked for secondary roles
-     * @param locator     the current account's locator
+     * @param locator     the account's locator
      * @return the refusal
      */
-    public static String manageAccountsRequired(final String primaryRole, final boolean secondary,
-                                                final String locator) {
+    public static String accountListingRefused(final String primaryRole, final boolean secondary,
+                                               final String locator) {
         return insufficientPrivileges("", "SYSTEM") + " Your primary role " + primaryRole
-            + (secondary ? " or one of your secondary roles" : "") + " must have MANAGE ACCOUNTS granted on ACCOUNT "
+            + (secondary ? " or one of your secondary roles" : "") + " must have CREATE LISTING granted on ACCOUNT "
             + locator + ".";
     }
 

@@ -25,6 +25,11 @@ import java.util.List;
  * a.id AND b.k = a.v AND b.n > 3)}. Every other part of the subquery reads its own relations alone, so what it keeps
  * for an outer row is what it keeps for every outer row with equal keys, and the subquery can be computed once for all
  * of them (see {@link CorrelatedSubqueryRule#equalityCorrelation}).
+ *
+ * <p>A correlation may also carry a residual: conjuncts that read the outer row other than through the equalities,
+ * {@code b.k > a.v} beside {@code b.id = a.id}. The rows the subquery keeps are then computed once with the columns
+ * the residual reads, and an outer row tests the residual over the rows of its own keys alone (see
+ * {@link CorrelatedSubqueryRule#residualCorrelation}).
  */
 public final class EqualityCorrelation {
 
@@ -35,6 +40,8 @@ public final class EqualityCorrelation {
     private final String aggregateItem;
     private final boolean rowPerKeptRow;
     private final String memberItem;
+    private final List<String> residual = new ArrayList<>();
+    private final List<String> residualItems = new ArrayList<>();
 
     /**
      * @param innerKeys      each equality's side over the subquery's relations, as written
@@ -58,6 +65,54 @@ public final class EqualityCorrelation {
         this.memberItem = memberItem;
     }
 
+    /**
+     * @param conjuncts the conjuncts reading the outer row other than the equalities, each over the columns
+     *                  {@code "$R<n>"} of the items
+     * @param items     each column's expression over the subquery's relations, as written, in column order
+     * @return this correlation with those conjuncts as its residual
+     */
+    public EqualityCorrelation withResidual(final List<String> conjuncts, final List<String> items) {
+        final EqualityCorrelation copy = new EqualityCorrelation(innerKeys, outerKeys, from, otherConjuncts,
+            aggregateItem, rowPerKeptRow, memberItem);
+        copy.residual.addAll(conjuncts);
+        copy.residualItems.addAll(items);
+        return copy;
+    }
+
+    /**
+     * @return the conjuncts reading the outer row other than the equalities, joined by AND, each part reading the
+     *         subquery's relations alone written as the column {@code "$R<n>"} of {@link #residualRowsQuery}'s rows
+     *         after the keys; null where the equalities are the subquery's only reading of the outer row
+     */
+    public String getResidual() {
+        if (residual.isEmpty()) {
+            return null;
+        }
+        final StringBuilder text = new StringBuilder();
+        for (int i = 0; i < residual.size(); i++) {
+            text.append(i > 0 ? " AND (" : "(").append(residual.get(i)).append(')');
+        }
+        return text.toString();
+    }
+
+    /** @return how many columns the residual reads */
+    public int residualItemCount() {
+        return residualItems.size();
+    }
+
+    /**
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
+     * @return the query of the inner keys and the residual's columns of each row the other conjuncts keep, the keys
+     *         first
+     */
+    public String residualRowsQuery(final String heldKeys) {
+        final StringBuilder items = new StringBuilder();
+        for (int i = 0; i < residualItems.size(); i++) {
+            items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
+        }
+        return "SELECT " + String.join(", ", innerKeys) + items + " FROM " + from + filter(heldKeys);
+    }
+
     /** @return the select list's one item an IN compares with, or null when the select list is anything else */
     public String getMemberItem() {
         return memberItem;
@@ -68,7 +123,20 @@ public final class EqualityCorrelation {
      *         first
      */
     public String membersQuery() {
-        return "SELECT " + String.join(", ", innerKeys) + ", " + memberItem + " FROM " + from + filter();
+        return membersQuery(null);
+    }
+
+    /**
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
+     * @return {@link #membersQuery()} over the rows the conjunct keeps as well
+     */
+    public String membersQuery(final String heldKeys) {
+        return "SELECT " + String.join(", ", innerKeys) + ", " + memberItem + " FROM " + from + filter(heldKeys);
+    }
+
+    /** @return the equalities' sides over the subquery's relations, as written */
+    public List<String> getInnerKeys() {
+        return new ArrayList<>(innerKeys);
     }
 
     /**
@@ -94,10 +162,14 @@ public final class EqualityCorrelation {
         return aggregateItem;
     }
 
-    /** @return every text the subquery computes over its own relations: the inner keys and the other conjuncts */
+    /**
+     * @return every text the subquery computes over its own relations: the inner keys, the other conjuncts and the
+     *         residual's columns
+     */
     public List<String> innerTexts() {
         final List<String> texts = new ArrayList<>(otherConjuncts);
         texts.addAll(innerKeys);
+        texts.addAll(residualItems);
         return texts;
     }
 
@@ -105,7 +177,15 @@ public final class EqualityCorrelation {
      * @return the query of the inner keys the subquery's other conjuncts keep, one row for each row they keep
      */
     public String keysQuery() {
-        return "SELECT " + String.join(", ", innerKeys) + " FROM " + from + filter();
+        return keysQuery(null);
+    }
+
+    /**
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
+     * @return {@link #keysQuery()} over the rows the conjunct keeps as well
+     */
+    public String keysQuery(final String heldKeys) {
+        return "SELECT " + String.join(", ", innerKeys) + " FROM " + from + filter(heldKeys);
     }
 
     /**
@@ -114,16 +194,22 @@ public final class EqualityCorrelation {
      */
     public String groupedQuery() {
         final String keys = String.join(", ", innerKeys);
-        return "SELECT " + keys + ", " + aggregateItem + " FROM " + from + filter() + " GROUP BY " + keys;
+        return "SELECT " + keys + ", " + aggregateItem + " FROM " + from + filter(null) + " GROUP BY " + keys;
     }
 
-    private String filter() {
-        if (otherConjuncts.isEmpty()) {
+    /** The WHERE of the other conjuncts, a conjunct read ahead of them first where one is given. */
+    private String filter(final String heldKeys) {
+        final List<String> conjuncts = new ArrayList<>();
+        if (heldKeys != null) {
+            conjuncts.add(heldKeys);
+        }
+        conjuncts.addAll(otherConjuncts);
+        if (conjuncts.isEmpty()) {
             return "";
         }
         final StringBuilder where = new StringBuilder(" WHERE ");
-        for (int i = 0; i < otherConjuncts.size(); i++) {
-            where.append(i > 0 ? " AND (" : "(").append(otherConjuncts.get(i)).append(')');
+        for (int i = 0; i < conjuncts.size(); i++) {
+            where.append(i > 0 ? " AND (" : "(").append(conjuncts.get(i)).append(')');
         }
         return where.toString();
     }

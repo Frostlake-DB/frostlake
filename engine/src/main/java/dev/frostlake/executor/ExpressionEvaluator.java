@@ -17,6 +17,7 @@
 package dev.frostlake.executor;
 
 import dev.frostlake.executor.expressions.AntlrExpressionParser;
+import dev.frostlake.executor.expressions.AstPrinterVisitor;
 import dev.frostlake.executor.expressions.BindVariableExpression;
 import dev.frostlake.executor.expressions.CallOrdinalWalk;
 import dev.frostlake.executor.expressions.CollationSpec;
@@ -38,11 +39,13 @@ import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.StoredRead;
 import dev.frostlake.metastore.model.Table;
+import dev.frostlake.storage.ColumnSource;
 import dev.frostlake.storage.Row;
 import dev.frostlake.types.DataType;
 import dev.frostlake.values.ValueRange;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -324,6 +327,29 @@ public class ExpressionEvaluator {
         return preparedVisitor().compileSubqueries(expression, enclosingNames);
     }
 
+    /**
+     * The refusal of a scalar subquery opening with this query's aggregate that a select item evaluates whatever its
+     * row holds (see {@link ExpressionEvaluatorVisitor#openingOuterAggregateRefusal}); null for any other item.
+     *
+     * @param item the select item, parsed
+     * @return the refusal that waits for the statement around the subquery, or null
+     */
+    public RuntimeException openingOuterAggregateRefusal(final Expression item) {
+        return preparedVisitor().openingOuterAggregateRefusal(item);
+    }
+
+    /**
+     * {@link #openingOuterAggregateRefusal(Expression)}, only a constant settling a branch's condition where the input
+     * is open (see {@link ExpressionEvaluatorVisitor#openingOuterAggregateRefusal(Expression, boolean)}).
+     *
+     * @param item      the select item, parsed
+     * @param inputOpen whether only a constant settles a condition
+     * @return the refusal that waits for the statement around the subquery, or null
+     */
+    public RuntimeException openingOuterAggregateRefusal(final Expression item, final boolean inputOpen) {
+        return preparedVisitor().openingOuterAggregateRefusal(item, inputOpen);
+    }
+
     /** Compile one subquery in this evaluator's scope, as {@link #compileSubqueries} compiles each. */
     public RuntimeException compileSubquery(final SubqueryExpression subquery, final Map<String, Object> enclosingNames) {
         return preparedVisitor().compileSubquery(subquery, enclosingNames);
@@ -340,6 +366,16 @@ public class ExpressionEvaluator {
         }
         return expression instanceof SubqueryExpression
             ? preparedVisitor().multiColumnRowText((SubqueryExpression) expression) : null;
+    }
+
+    /**
+     * Refuses a predicate that is a subquery of one ROW item by that ROW's type (see
+     * {@link ExpressionEvaluatorVisitor#rejectRowSubqueryPredicate}).
+     *
+     * @param predicate the parsed predicate
+     */
+    public void rejectRowSubqueryPredicate(final Expression predicate) {
+        preparedVisitor().rejectRowSubqueryPredicate(predicate);
     }
 
     /** How many columns an expression that is a subquery selects; 0 for anything else or an unplannable one. */
@@ -406,6 +442,28 @@ public class ExpressionEvaluator {
      */
     public void validateCallShapes(final Expression expression) {
         preparedVisitor().validateCallShapesOnly(expression);
+    }
+
+    /**
+     * Whether an expression calls a user-defined function anywhere in it (see {@link #callsUserFunction(List)}).
+     *
+     * @param expression the parsed expression
+     * @return whether one of its calls names a function someone created
+     */
+    public boolean callsUserFunction(final Expression expression) {
+        final boolean[] found = {false};
+        expression.accept(new AstPrinterVisitor() {
+            @Override
+            public String visitFunctionCall(final FunctionCallExpression expr) {
+                if (expr.getNameExpression() == null && expr.getFunctionName() != null
+                        && callsUserFunction(expr.getNameParts() != null ? expr.getNameParts()
+                            : Collections.singletonList(expr.getFunctionName().toUpperCase(Locale.ROOT)))) {
+                    found[0] = true;
+                }
+                return super.visitFunctionCall(expr);
+            }
+        });
+        return found[0];
     }
 
     /**
@@ -832,6 +890,23 @@ public class ExpressionEvaluator {
      * @param text the item as its projection reads it, or null
      * @return how it reads one; NONE where it reads none or cannot be told
      */
+    /**
+     * The stored table a select item projects a column of as it is (see ColumnSource). Never throws.
+     *
+     * @param text the item as its projection reads it, or null
+     * @return the table, or null where the item reads none or cannot be told
+     */
+    public ColumnSource columnSourceOf(final String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return preparedVisitor().columnSourceOf(parse(text));
+        } catch (final RuntimeException undetermined) {
+            return null;
+        }
+    }
+
     public StoredRead storedReadOf(final String text) {
         if (text == null || text.trim().isEmpty()) {
             return StoredRead.NONE;
@@ -878,6 +953,21 @@ public class ExpressionEvaluator {
     public boolean projectsLiteralConstant(final Expression expression) {
         try {
             return preparedVisitor().projectsLiteralConstant(expression);
+        } catch (final RuntimeException undetermined) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether an expression reads a derived relation's column whose values are drawn anew for each row - see
+     * TableColumn#isVolatileDraw. Never throws.
+     *
+     * @param expression the expression
+     * @return true where it reads one
+     */
+    public boolean readsVolatileDraw(final Expression expression) {
+        try {
+            return preparedVisitor().readsVolatileDraw(expression);
         } catch (final RuntimeException undetermined) {
             return false;
         }

@@ -16,6 +16,7 @@
 
 package dev.frostlake;
 
+import dev.frostlake.http.SnowflakeEndpoint;
 import dev.frostlake.jdbc.DirectConnection;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -37,19 +39,28 @@ public abstract class BaseJdbcTest {
 
     // Shared concurrent engine for all tests
     protected static DatabaseEngine sharedEngine;
+    /** With SF_JDBC_FL=1, the endpoint serving the shared engine to Snowflake's own driver. */
+    private static SnowflakeEndpoint sharedEndpoint;
 
     // Thread-local connection for each test
     protected Connection connection;
     protected Statement statement;
 
     @BeforeAll
-    public static void setupSharedEngine() {
+    public static void setupSharedEngine() throws IOException {
         sharedEngine = new DatabaseEngine();
+        if (SnowflakeJdbcFl.enabled()) {
+            sharedEndpoint = SnowflakeEndpoint.start(sharedEngine);
+        }
         logger.info("Shared DatabaseEngine initialized");
     }
 
     @AfterAll
     public static void teardownSharedEngine() {
+        if (sharedEndpoint != null) {
+            SnowflakeJdbcFl.closeOnServerThread(sharedEndpoint);
+            sharedEndpoint = null;
+        }
         if (sharedEngine != null) {
             sharedEngine.shutdown();
             logger.info("Shared DatabaseEngine shutdown");
@@ -59,9 +70,10 @@ public abstract class BaseJdbcTest {
     @BeforeEach
     public void setupConnection() throws SQLException {
         // A direct JDBC connection to the shared engine — or, with SF_LIVE=1, a fresh session on a
-        // real Snowflake account, so the same java.sql-level tests validate both backends.
+        // real Snowflake account, so the same java.sql-level tests validate both backends; with SF_JDBC_FL=1, a
+        // session of Snowflake's own driver on the endpoint serving the shared engine.
         connection = LiveSnowflake.enabled() ? LiveAccountObjects.observing(LiveSnowflake.open())
-            : new DirectConnection(sharedEngine);
+            : newSession();
         statement = connection.createStatement();
         if (!LiveSnowflake.enabled()) {
             // The live session reads column labels ignoring case (see LiveSnowflake.open); so does this one.
@@ -127,6 +139,28 @@ public abstract class BaseJdbcTest {
     /** Whether this run targets live Snowflake — for tests that must skip driver-internal checks there. */
     protected static boolean isLiveSnowflake() {
         return LiveSnowflake.enabled();
+    }
+
+    /**
+     * A new session of the run's own kind, which the caller closes: on the live account, on Frostlake's endpoint
+     * through Snowflake's driver with {@code SF_JDBC_FL=1}, or a direct connection to the shared engine.
+     *
+     * @return the session
+     * @throws SQLException when it cannot be opened
+     */
+    protected static Connection newSession() throws SQLException {
+        if (LiveSnowflake.enabled()) {
+            return LiveSnowflake.open();
+        }
+        return SnowflakeJdbcFl.enabled() ? SnowflakeJdbcFl.connect(sharedEndpoint) : new DirectConnection(sharedEngine);
+    }
+
+    /**
+     * Whether the connection is Snowflake's own driver — on a live account or, with {@code SF_JDBC_FL=1}, on
+     * Frostlake's endpoint — for tests that reach what only one of the two drivers offers.
+     */
+    protected static boolean isSnowflakeDriver() {
+        return LiveSnowflake.enabled() || SnowflakeJdbcFl.enabled();
     }
 
     /**

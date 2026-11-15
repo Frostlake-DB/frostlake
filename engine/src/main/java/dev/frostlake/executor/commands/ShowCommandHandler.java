@@ -22,17 +22,20 @@ import dev.frostlake.executor.PrivilegeRefusal;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.RelationShapeOnly;
 import dev.frostlake.executor.SchemaObjectName;
+import dev.frostlake.executor.ShapeReadPolicies;
 import dev.frostlake.executor.ShowCommandExecutor;
 import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.executor.SqlAccessControlError;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
+import dev.frostlake.executor.UserLookup;
 import dev.frostlake.executor.operators.ResultSetProvider;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.SystemSchema;
+import dev.frostlake.metastore.model.Account;
 import dev.frostlake.metastore.model.AppObjectKind;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.Privilege;
@@ -44,6 +47,7 @@ import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.UnmodelledDropKind;
 import dev.frostlake.parser.UnmodelledKindWords;
+import dev.frostlake.security.SecurityManager;
 import dev.frostlake.security.SessionContext;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
@@ -341,12 +345,7 @@ public class ShowCommandHandler implements CommandHandler {
 
     /** Whether a canonical name is exactly a database's. */
     private boolean namesADatabase(final String name) {
-        for (final Database database : catalog.getAllDatabases()) {
-            if (database.getName().equals(name)) {
-                return true;
-            }
-        }
-        return false;
+        return catalog.hasDatabaseExact(name);
     }
 
     /**
@@ -694,6 +693,17 @@ public class ShowCommandHandler implements CommandHandler {
                 return showExecutor.showFileFormatsInDatabase(scope.name());
             }
             return showExecutor.showFileFormats(scope.name());
+        } else if ((ctx.PRIVACY() != null || ctx.lifecycle != null) && ctx.POLICIES() != null) {
+            final boolean storage = ctx.lifecycle != null;
+            final ShowListingScope scope = listingScope(ctx,
+                storage ? ShowListing.STORAGE_LIFECYCLE_POLICIES : ShowListing.PRIVACY_POLICIES, forced);
+            if (scope.isAccount()) {
+                return showExecutor.showPrivacyOrLifecyclePoliciesInAccount(storage);
+            }
+            if (scope.isDatabase()) {
+                return showExecutor.showPrivacyOrLifecyclePoliciesInDatabase(scope.name(), storage);
+            }
+            return showExecutor.showPrivacyOrLifecyclePolicies(scope.name(), storage);
         } else if (ctx.JOIN() != null && ctx.POLICIES() != null) {
             final ShowListingScope scope = listingScope(ctx, ShowListing.JOIN_POLICIES, forced);
             if (scope.isAccount()) {
@@ -817,14 +827,22 @@ public class ShowCommandHandler implements CommandHandler {
                 // The organization's listing reads a LIKE, and no STARTS WITH after one (live-verified).
                 throw SyntaxAfter.unexpected(ctx.stringText());
             }
-            // Only the organization account lists the organization's accounts, which this account is not: the
-            // listing is refused whatever the role, LIKE or no LIKE (live-verified).
-            final SessionContext session = queryExecutor.getSecurityManager() == null ? null
-                : queryExecutor.getSecurityManager().getSessionContext();
-            throw new PrivilegeRefusal(SqlAccessControlError.manageAccountsRequired(
-                session == null ? null : session.getCurrentRole(), session != null && session.isSecondaryRolesInUse(),
-                catalog.getAccountLocator()));
+            // The organization's accounts are listed to its administrator alone, any other role refused as an
+            // operation on the account's own system, naming no privilege; and only the organization account lists
+            // any, which this account is not, so the administrator reads SHOW ACCOUNTS's columns and no row
+            // (live-verified).
+            if (!actsAsOrganizationAdministrator()) {
+                throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
+            }
+            // HISTORY reads SHOW ACCOUNTS HISTORY's columns, with no row either (live-verified).
+            final ResultSet shape = ctx.HISTORY() != null
+                ? showExecutor.showAccounts(true, new ArrayList<Account>(), 0) : showExecutor.showAccounts();
+            return new ResultSet(shape.getColumns(), new ArrayList<Row>());
         } else if (ctx.ACCOUNTS() != null) {
+            if (ctx.TERSE() != null) {
+                // A terse listing of the accounts parses and is refused, as a compilation's fault (live-verified).
+                throw new RuntimeException(SqlCompilationError.of("Operation not available"));
+            }
             if (ctx.showAccountsScope() != null) {
                 // The listing takes no scope: an IN with nothing after it is unfinished, any other is refused whole.
                 if (ctx.showAccountsScope().getChildCount() == 1) {
@@ -832,6 +850,23 @@ public class ShowCommandHandler implements CommandHandler {
                 }
                 throw new RuntimeException(SqlCompilationError.of(
                     "Unsupported statement type. correct syntax: 'SHOW ACCOUNTS'."));
+            }
+            // What the listing answers depends on the session's roles (live-verified): the organization's
+            // administrator reads every column, HISTORY included; the account's administrator five of them and no
+            // HISTORY, refused as an operation on the account's own system; any other role is refused, naming the
+            // CREATE LISTING the listing needs.
+            if (!actsAsOrganizationAdministrator()) {
+                if (ctx.HISTORY() != null) {
+                    throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
+                }
+                final SecurityManager security = queryExecutor.getSecurityManager();
+                if (!security.actsAsAccountAdministrator()) {
+                    throw new PrivilegeRefusal(SqlAccessControlError.accountListingRefused(
+                        security.getSessionContext().getCurrentRole(),
+                        security.getSessionContext().isSecondaryRolesInUse(), catalog.getAccountLocator()));
+                }
+                return showExecutor.accountsAsAccountAdministrator(catalog.getAccountDirectory().accounts(),
+                    catalog.getAccountDirectory().managedAccounts().size());
             }
             return showExecutor.showAccounts(ctx.HISTORY() != null, catalog.getAccountDirectory().accounts(),
                 catalog.getAccountDirectory().managedAccounts().size());
@@ -847,6 +882,12 @@ public class ShowCommandHandler implements CommandHandler {
         }
 
         throw new RuntimeException("Unsupported SHOW statement");
+    }
+
+    /** Whether the session acts as its organization's administrator; a session with no security model does. */
+    private boolean actsAsOrganizationAdministrator() {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.actsAsOrganizationAdministrator();
     }
 
     /**
@@ -1052,12 +1093,14 @@ public class ShowCommandHandler implements CommandHandler {
             @Override
             public ResultSet getResultSet() {
                 final boolean previous = RelationShapeOnly.begin();
+                final boolean describing = ShapeReadPolicies.begin();
                 try {
                     final List<ResultSet> results =
                         queryExecutor.executeUnrecorded("SELECT * FROM "
                             + SqlIdentifiers.spellAlreadyCanonicalPathEscaped(dtName) + " LIMIT 0");
                     return results.get(results.size() - 1);
                 } finally {
+                    ShapeReadPolicies.end(describing);
                     RelationShapeOnly.end(previous);
                 }
             }
@@ -1203,7 +1246,8 @@ public class ShowCommandHandler implements CommandHandler {
             return new AppObjectListing(catalog).describe(ctx.NOTEBOOK() != null ? AppObjectKind.NOTEBOOK
                 : AppObjectKind.STREAMLIT, ctx.qualifiedName());
         }
-        if (ctx.IDENTIFIER() != null) {
+        // A storage lifecycle policy's kind word is a plain word too, where its own alternative reads it.
+        if (ctx.IDENTIFIER() != null && ctx.lifecycle == null) {
             if (UnmodelledKindWords.readsDescribeTail(ctx.IDENTIFIER())) {
                 // A kind the account knows judges the properties first, as every modelled kind does, and then
                 // misses its object.
@@ -1344,11 +1388,16 @@ public class ShowCommandHandler implements CommandHandler {
             requireRoutineArgumentTypes(ctx, getText(ctx.qualifiedName()));
             return showExecutor.describeProcedure(qualifiedNameParts(ctx.qualifiedName()), writtenSignature(ctx));
         } else if (ctx.USER() != null) {
+            requireDescribableUser(getText(ctx.identifier()));
             return showExecutor.describeUser(getText(ctx.identifier()));
         } else if (ctx.SEARCH() != null && ctx.OPTIMIZATION() != null) {
             return showExecutor.describeSearchOptimization(getText(ctx.qualifiedName()));
         } else if (ctx.JOIN() != null) {
             return showExecutor.describeJoinPolicy(getText(ctx.qualifiedName()));
+        } else if (ctx.PRIVACY() != null) {
+            return showExecutor.describePrivacyOrLifecyclePolicy(getText(ctx.qualifiedName()), false);
+        } else if (ctx.lifecycle != null) {
+            return showExecutor.describePrivacyOrLifecyclePolicy(getText(ctx.qualifiedName()), true);
         } else if (ctx.AGGREGATION() != null) {
             return showExecutor.describeAggregationPolicy(getText(ctx.qualifiedName()));
         } else if (ctx.PROJECTION() != null) {
@@ -1606,6 +1655,37 @@ public class ShowCommandHandler implements CommandHandler {
         return new ResultSet(rs.getColumns(), filtered);
     }
 
+    /** The position of a listing's column of that name. */
+    private static int columnIndex(final ResultSet listing, final String name) {
+        for (int i = 0; i < listing.getColumns().size(); i++) {
+            if (listing.getColumns().get(i).getName().equals(name)) {
+                return i;
+            }
+        }
+        throw new IllegalStateException("no column " + name);
+    }
+
+    /**
+     * DESCRIBE USER of another user needs OWNERSHIP of that user (documented: "Individual users can see their own
+     * properties ... To view the properties of another user, you must use a role that has the following privilege:
+     * OWNERSHIP"); a user describes themselves, and the SYSTEM user, which holds every privilege, anyone. A missing
+     * user is refused as before. The refusal's words are unmeasured on live.
+     *
+     * @param name the user's canonical name
+     */
+    private void requireDescribableUser(final String name) {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        if (security == null || !catalog.hasUserExact(name)) {
+            return;
+        }
+        final String current = security.getSessionContext().getCurrentUser();
+        if ("SYSTEM".equals(current) || name.equals(current)
+                || security.actsAsOwner(catalog.getUserExact(name).getOwner())) {
+            return;
+        }
+        throw new RuntimeException(SqlAccessControlError.insufficientPrivileges("user", name));
+    }
+
     private ResultSet handleShowGrants(final FrostlakeParser.ShowStatementContext ctx) {
         if (ctx.showGrantsIn() != null) {
             // SHOW GRANTS IN: whatever the parser let follow the IN is not what the account reads there.
@@ -1626,14 +1706,24 @@ public class ShowCommandHandler implements CommandHandler {
                 // The word alone is the account itself, never a table of that name (live-verified).
                 return showExecutor.showGrantsOnAccount();
             }
+            if (target.USER() != null && parts.length > 1) {
+                // A user belongs to the account: a qualified name names nothing (live-verified).
+                throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
+            }
+            if (target.USER() != null) {
+                // A user that is not there asks a role without MANAGE GRANTS for it, as a grant naming the user does
+                // (live-verified).
+                UserLookup.asking(catalog, queryExecutor.getSecurityManager(), parts[0], Privilege.MANAGE_GRANTS);
+            }
             final String objectType = target.securableKind() != null ? SecurableKinds.of(target.securableKind())
-                : target.VOLUME() != null ? "EXTERNAL_VOLUME" : null;
+                : target.VOLUME() != null ? "EXTERNAL_VOLUME" : target.USER() != null ? "USER" : null;
             if (objectType == null) {
                 // A bare name is a relation of any kind, and anything else is no object at all; a relation kind
                 // other than TABLE and VIEW finds the relation of the name whatever its own kind (live-verified).
                 final String kind = target.relationGrantsKind() == null ? null
                     : SecurableKinds.joined(target.relationGrantsKind());
                 final GrantedObject relation = queryExecutor.shownRelation(parts, kind);
+                GrantRowSight.requireSeen(queryExecutor.getSecurityManager(), relation);
                 return asEventTable(showExecutor.showGrantsOnObject(relation.getKind(), written, relation), parts,
                     relation);
             }
@@ -1641,6 +1731,7 @@ public class ShowCommandHandler implements CommandHandler {
                 // TABLE and VIEW find a materialized view or a dynamic table too, listed under its own kind.
                 final GrantedObject other = queryExecutor.materializedOrDynamic(parts);
                 if (other != null) {
+                    GrantRowSight.requireSeen(queryExecutor.getSecurityManager(), other);
                     return showExecutor.showGrantsOnObject(other.getKind(), written, other);
                 }
             }
@@ -1659,16 +1750,27 @@ public class ShowCommandHandler implements CommandHandler {
                 queryExecutor.routineGrantNames(objectType, parts, writtenTypes);
             }
             final GrantedObject granted = queryExecutor.grantedObject(objectType, parts, arity, writtenTypes);
+            GrantRowSight.requireSeen(queryExecutor.getSecurityManager(), granted);
             return asEventTable(showExecutor.showGrantsOnObject(objectType, written, granted), parts, granted);
         } else if (ctx.TO() != null) {
-            // SHOW GRANTS TO USER/ROLE identifier
+            // SHOW GRANTS TO USER/ROLE identifier: the rows on what the session sees; a user's own listing whole.
             final String targetType = ctx.USER() != null ? "USER" : "ROLE";
             final String targetName = PrincipalNames.of(ctx.grantsPrincipal(), queryExecutor);
-            return showExecutor.showGrantsTo(targetType, targetName);
+            final ResultSet listing = showExecutor.showGrantsTo(targetType, targetName);
+            final SecurityManager security = queryExecutor.getSecurityManager();
+            if (security != null && "USER".equals(targetType)
+                    && targetName.equals(security.getSessionContext().getExecutingUser())) {
+                return listing;
+            }
+            return GrantRowSight.seen(listing, catalog, security, columnIndex(listing, "granted_on"),
+                columnIndex(listing, "name"));
         }
         if (ctx.OF() != null && ctx.ROLE() != null && ctx.grantsPrincipal() != null) {
-            // SHOW GRANTS OF ROLE identifier
-            return showExecutor.showGrantsOfRole(PrincipalNames.of(ctx.grantsPrincipal(), queryExecutor));
+            // SHOW GRANTS OF ROLE identifier: who holds a role the session sees.
+            final ResultSet listing = showExecutor.showGrantsOfRole(PrincipalNames.of(ctx.grantsPrincipal(),
+                queryExecutor));
+            return GrantRowSight.seen(listing, catalog, queryExecutor.getSecurityManager(), -1,
+                columnIndex(listing, "role"));
         }
         if (ctx.ON() == null && ctx.TO() == null && ctx.OF() == null) {
             // Bare SHOW GRANTS: what the current user holds.

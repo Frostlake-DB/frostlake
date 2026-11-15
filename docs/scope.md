@@ -22,15 +22,21 @@ expressions. Frostlake records and reports exactly that. Nothing in the executor
 no plan changes, no lookup structure, no measurable speed difference — so the rule above is intact.
 Anything that would change how a query executes is out of scope.
 
-## STORAGE LIFECYCLE POLICY — declined until it can be measured
+## STORAGE LIFECYCLE AND PRIVACY POLICIES — metadata only
 
-Archival tiering has no meaning for an in-memory engine, and the surface cannot be pinned down on
-the account Frostlake is verified against: `CREATE STORAGE LIFECYCLE POLICY … STORAGE_LIFECYCLE_ACTION(…)`
-answers *Unknown function STORAGE_LIFECYCLE_ACTION*, so no policy can be created to attach, while
-`SHOW STORAGE LIFECYCLE POLICIES` answers an empty result and `ALTER TABLE t ADD STORAGE LIFECYCLE
-POLICY p` reports a syntax error at end of input — the clause takes more than a policy name, and
-what more is not observable here. Emulating a shape from documentation alone is how invented
-metadata gets in, so this waits until an account can answer for it.
+Both kinds are modelled as the account declares them: created (a storage lifecycle policy with its tags), listed,
+HISTORY included, described, altered and dropped, attached — a storage lifecycle policy to a table ON the columns its
+arguments read, a privacy policy to a table or a view with its entity key — and reported by POLICY_REFERENCES and
+GET_DDL. Archival tiering and privacy budgets mean nothing to an in-memory engine, so neither kind changes what a
+query does: no row is archived or expires, and no budget is charged. As with SEARCH OPTIMIZATION, the observable
+surface is the metadata, and that is what Frostlake records and reports.
+
+## DBT PROJECT — never created
+
+Frostlake does not run dbt. CREATE DBT PROJECT judges where the project's files are read from as the account does —
+a FROM is wanted, its text must name a stage, the stage must be there, and a dbt_project.yml must be at the place
+named — and then refuses the project as an unsupported feature, since making one means compiling it with dbt.
+SHOW DBT PROJECTS lists none, and every statement that names a project finds nothing.
 
 ## INTERVAL AS A DATA TYPE — a decision that was REVERSED; the type is implemented
 
@@ -149,7 +155,7 @@ task's statement runs to completion.
 
 A client that walks an account's metadata issues SHOW commands for kinds Frostlake has no object of: resource
 monitors, shares, connections, applications and application packages, indexes, channels, snapshots, Git
-repositories, semantic views, session, authentication, packages and privacy policies, external and data metric
+repositories, semantic views, DBT projects, session, authentication and packages policies, external and data metric
 functions, replication databases, replication and failover groups, replication accounts, and delegated
 authorizations. None of these can be created here, and none is planned for its own sake: they are account
 administration, sharing, replication and ingestion surfaces with nothing behind them in an in-memory engine.

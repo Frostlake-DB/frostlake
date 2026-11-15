@@ -88,7 +88,7 @@ public class SyntaxBreadthSingletonsTest extends BaseDatabaseTest {
     public void alterSessionSetAppliesEveryCommaSeparatedAssignment() {
         engine.execute("ALTER SESSION SET autocommit = FALSE, QUERY_TAG = 'qtag', JSON_INDENT = 1");
         // The statement runs on both backends; only the read-back is embedded-only.
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(sessionLivesElsewhere(),
             "reads the applied values back through engine.getSessionContext()/isAutoCommit(), which exist "
             + "only on the embedded engine — a live session's parameters live on the account");
         assertEquals("qtag", engine.getSessionContext().getSessionParameter("QUERY_TAG"));

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 import dev.frostlake.BaseDatabaseTest;
 import dev.frostlake.FrostlakeJdbc;
+import dev.frostlake.SnowflakeJdbcFl;
 import dev.frostlake.storage.ResultSet;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -39,8 +40,8 @@ public class ExecuteImmediateStatementCountTest extends BaseDatabaseTest {
 
     @Override
     protected void setupTest() {
-        // The JDBC-mode harness lifts the session's count for its own scripts; these cells start from the default.
-        if (FrostlakeJdbc.enabled()) {
+        // The driver harnesses lift the session's count for their own scripts; these cells start from the default.
+        if (FrostlakeJdbc.enabled() || SnowflakeJdbcFl.enabled()) {
             engine.execute("ALTER SESSION SET MULTI_STATEMENT_COUNT = 1");
         }
     }
@@ -122,8 +123,8 @@ public class ExecuteImmediateStatementCountTest extends BaseDatabaseTest {
      */
     @Test
     public void underACountOfZeroTheTextRunsAsAMultiStatementRequest() {
-        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled(),
-            "the live and FL-over-JDBC harnesses declare each request's own MULTI_STATEMENT_COUNT");
+        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled() || SnowflakeJdbcFl.enabled(),
+            "the driver harnesses declare each request's own MULTI_STATEMENT_COUNT");
         engine.execute("ALTER SESSION SET MULTI_STATEMENT_COUNT = 0");
         try {
             engine.execute("EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE ms1 (a INT); CREATE OR REPLACE TABLE ms2 (a INT)'");

@@ -88,7 +88,7 @@ public class BatchUpdateTest extends BaseJdbcTest {
 
     @Test
     public void testStatementBatchWithNullSQL() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), EMPTY_BATCH_SQL);
+        Assumptions.assumeFalse(isSnowflakeDriver(), EMPTY_BATCH_SQL);
         assertThrows(SQLException.class, new Executable() {
             @Override
             public void execute() throws SQLException {
@@ -99,7 +99,7 @@ public class BatchUpdateTest extends BaseJdbcTest {
 
     @Test
     public void testStatementBatchWithEmptySQL() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), EMPTY_BATCH_SQL);
+        Assumptions.assumeFalse(isSnowflakeDriver(), EMPTY_BATCH_SQL);
         assertThrows(SQLException.class, new Executable() {
             @Override
             public void execute() throws SQLException {
@@ -360,7 +360,7 @@ public class BatchUpdateTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedBatchStopsAtFirstFailingRow() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "live array binding is all-or-nothing; Frostlake executes per row, keeping rows before the failure");
         statement.execute("CREATE TABLE batch14 (n NUMBER(10,0))");
 

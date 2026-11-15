@@ -36,6 +36,9 @@ public final class LobSize {
     /** The most bytes a binary value holds, 64 MB. */
     public static final long MAX_BINARY_BYTES = 67_108_864L;
 
+    /** The most characters a refusal shows of a value too long for its place. */
+    private static final int SHOWN = 200;
+
     private LobSize() {
     }
 
@@ -61,5 +64,109 @@ public final class LobSize {
         if (bytes > maximum) {
             throw new RuntimeException("String '(padded string)' is too long and would be truncated");
         }
+    }
+
+    /**
+     * A value as a refusal of it as too long shows it: whole up to 200 characters, its first 200 and {@code ...} past
+     * them, {@code String 'abbb…bbb...' is too long and would be truncated} (live-verified).
+     *
+     * @param value the value
+     * @return what the refusal shows of it
+     */
+    public static String shown(final String value) {
+        if (value.length() <= SHOWN || value.codePointCount(0, value.length()) <= SHOWN) {
+            return value;
+        }
+        return value.substring(0, value.offsetByCodePoints(0, SHOWN)) + "...";
+    }
+
+    /**
+     * Refuse a text longer than a text can be, as the concatenation that made it: {@code TO_JSON(a) || 'x'} over an
+     * array whose text passes the size is {@code String '[1,2,...' is too long and would be truncated in 'CONCAT'}
+     * (live-verified).
+     *
+     * @param text the concatenation
+     * @return the text, when it fits
+     */
+    public static String requireConcatenated(final String text) {
+        if (text.length() > MAX_TEXT_BYTES && text.codePointCount(0, text.length()) > MAX_TEXT_BYTES) {
+            throw tooLongIn(text, "CONCAT");
+        }
+        return text;
+    }
+
+    /**
+     * The refusal of a text a function builds past what a text can be, showing the text and naming the function the
+     * account builds it with: INSERT's result is {@code String 'bbb…...' is too long and would be truncated in
+     * 'CONCAT'}, and HEX_ENCODE shows its argument, {@code ... in 'HEX_ENCODE'} (live-verified).
+     *
+     * @param text     the text shown, or as much of its beginning as is past 200 characters
+     * @param function the function named
+     * @return the refusal
+     */
+    public static RuntimeException tooLongIn(final String text, final String function) {
+        return new RuntimeException("String '" + shown(text) + "' is too long and would be truncated in '" + function
+            + "'");
+    }
+
+    /**
+     * The refusal of a result too long to hold that the account names rather than shows: {@code String '(REPLACE
+     * result)' is too long and would be truncated}, REGEXP_REPLACE's {@code (regexp_replace result)} and LISTAGG's
+     * {@code (LISTAGG result)} (live-verified).
+     *
+     * @param named what the refusal names
+     * @return the refusal
+     */
+    public static RuntimeException tooLongNamed(final String named) {
+        return new RuntimeException("String '(" + named + ")' is too long and would be truncated");
+    }
+
+    /**
+     * Refuse a text a semi-structured value converts to that is longer than a text can be: {@code
+     * ARRAY_INSERT([1, 2], 14000000, 9)::VARCHAR} is {@code String '[1,2,undefined,...' is too long and would be
+     * truncated}, where a text that fits, at thirteen million holes, converts whole (live-verified).
+     *
+     * @param text the converted text
+     * @return the text, when it fits
+     */
+    public static String requireConverted(final String text) {
+        if (text.length() > MAX_TEXT_BYTES && text.codePointCount(0, text.length()) > MAX_TEXT_BYTES) {
+            throw tooLong(text);
+        }
+        return text;
+    }
+
+    /**
+     * Refuse a text a function builds once it would hold more characters than a text can, showing its beginning: a
+     * REPLACE or REGEXP_REPLACE whose replacements multiply its subject's length is refused before the whole of it is
+     * held, as {@code String '<its first 200 characters>...' is too long and would be truncated}.
+     *
+     * @param beginning  the text's beginning, at least 201 characters of it where it has them
+     * @param characters how many characters the whole text would hold
+     */
+    public static void requireBuilt(final CharSequence beginning, final long characters) {
+        if (characters > MAX_TEXT_BYTES) {
+            throw tooLong(beginning.toString());
+        }
+    }
+
+    /**
+     * How many characters of a text's beginning a refusal of it needs: twice what it shows, so the beginning still
+     * holds 200 characters however many of them are surrogate pairs.
+     *
+     * @return the length of the beginning to keep
+     */
+    public static int shownBeginning() {
+        return 2 * SHOWN + 2;
+    }
+
+    /**
+     * The refusal of a text too long for its place, showing as much of it as the account shows.
+     *
+     * @param text the text, or as much of its beginning as is past 200 characters
+     * @return the refusal
+     */
+    public static RuntimeException tooLong(final String text) {
+        return new RuntimeException("String '" + shown(text) + "' is too long and would be truncated");
     }
 }

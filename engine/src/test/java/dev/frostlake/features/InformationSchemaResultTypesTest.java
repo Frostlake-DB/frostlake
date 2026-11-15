@@ -123,7 +123,8 @@ public class InformationSchemaResultTypesTest extends BaseDatabaseTest {
             types("SELECT row_count, last_load_time, file_name FROM INFORMATION_SCHEMA.LOAD_HISTORY LIMIT 0"));
         assertEquals("VARIANT, VARCHAR(4), VARCHAR(5)",
             types("SELECT version, owner_role_type, is_service_class FROM INFORMATION_SCHEMA.CLASSES LIMIT 0"));
-        assertEquals("29, BOOLEAN", engine.executeQuery("SELECT * FROM INFORMATION_SCHEMA.CORTEX_SEARCH_SERVICES LIMIT 0")
+        assertEquals("31, BOOLEAN", engine.executeQuery(
+                "SELECT * FROM INFORMATION_SCHEMA.CORTEX_SEARCH_SERVICES LIMIT 0")
             .getColumns().size() + ", " + types("SELECT inherit_data_governance_policies "
                 + "FROM INFORMATION_SCHEMA.CORTEX_SEARCH_SERVICES LIMIT 0"));
     }

@@ -43,7 +43,8 @@ public class RestStreamlitTest extends BaseRestTest {
     public void anAppIsCreatedFetchedListedDroppedAndUndropped() throws Exception {
         assertEquals("Streamlit ST_BASIC successfully created.", ok(post(BASE, "{\"name\":\"st_basic\","
             + "\"source_location\":\"@st_db.s.stg/app\",\"main_file\":\"streamlit_app.py\",\"title\":\"App\","
-            + "\"query_warehouse\":\"st_wh\",\"comment\":\"c\",\"imports\":[\"@st_db.s.stg/lib.py\"],"
+            + "\"query_warehouse\":\"st_wh\",\"comment\":\"c\",\"runtime_name\":\"SYSTEM$WAREHOUSE_RUNTIME\","
+            + "\"imports\":[\"@st_db.s.stg/lib.py\"],"
             + "\"external_access_integrations\":[\"ext_int\"]}")).path("status").asString());
         final JsonNode fetched = ok(get(BASE + "/st_basic"));
         assertEquals("ST_BASIC", fetched.path("name").asString());

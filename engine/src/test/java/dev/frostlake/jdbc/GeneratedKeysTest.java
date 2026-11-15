@@ -52,7 +52,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testStatementWithGeneratedKeysFlag() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys2 (id INTEGER, name VARCHAR)");
         statement.executeUpdate(
             "INSERT INTO gen_keys2 VALUES (1, 'Alice')",
@@ -71,7 +71,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testStatementExecuteWithGeneratedKeys() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys3 (id INTEGER, name VARCHAR)");
         statement.execute(
             "INSERT INTO gen_keys3 VALUES (1, 'Alice')",
@@ -88,7 +88,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testStatementWithColumnIndexes() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys4 (id INTEGER, name VARCHAR)");
         statement.executeUpdate(
             "INSERT INTO gen_keys4 VALUES (1, 'Alice')",
@@ -105,7 +105,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testStatementWithColumnNames() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys5 (id INTEGER, name VARCHAR)");
         statement.executeUpdate(
             "INSERT INTO gen_keys5 VALUES (1, 'Alice')",
@@ -122,7 +122,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedStatementWithGeneratedKeys() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys6 (id INTEGER, name VARCHAR)");
 
         final PreparedStatement pstmt = connection.prepareStatement(
@@ -147,7 +147,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedStatementWithColumnIndexes() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys7 (id INTEGER, name VARCHAR)");
 
         final PreparedStatement pstmt = connection.prepareStatement(
@@ -171,7 +171,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedStatementWithColumnNames() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys8 (id INTEGER, name VARCHAR)");
 
         final PreparedStatement pstmt = connection.prepareStatement(
@@ -195,7 +195,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testMultipleInserts() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys9 (id INTEGER, name VARCHAR)");
 
         statement.executeUpdate(
@@ -239,7 +239,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testGeneratedKeysAfterUpdate() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys11 (id INTEGER, name VARCHAR)");
         statement.execute("INSERT INTO gen_keys11 VALUES (1, 'Alice')");
 
@@ -257,7 +257,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testGeneratedKeysResultSetMetadata() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys12 (id INTEGER, name VARCHAR)");
         statement.executeUpdate(
             "INSERT INTO gen_keys12 VALUES (1, 'Alice')",
@@ -276,7 +276,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedStatementExecuteWithGeneratedKeys() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys13 (id INTEGER, name VARCHAR)");
 
         final PreparedStatement pstmt = connection.prepareStatement(
@@ -300,7 +300,7 @@ public class GeneratedKeysTest extends BaseJdbcTest {
 
     @Test
     public void testPreparedStatementMultipleExecutions() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(), RETURN_GENERATED_KEYS);
+        Assumptions.assumeFalse(isSnowflakeDriver(), RETURN_GENERATED_KEYS);
         statement.execute("CREATE TABLE gen_keys14 (id INTEGER, name VARCHAR)");
 
         final PreparedStatement pstmt = connection.prepareStatement(

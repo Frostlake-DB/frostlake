@@ -25,9 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * A subquery whose body is a set operation is re-printed from its plan wherever a refusal quotes it: the arms
  * combined under one {@code SET_COMBINE} per column, each wrapped with its own relations, its column cast to the
- * type the arms meet in and, under UNION, marked {@code ENSURE_NULLABLE} where it holds no NULL but the combined
- * column may. INTERSECT binds before the other operators, a run of one operator is one combination, and the
- * relations are numbered in the order the plan completes them. Each expected answer is the account's own.
+ * type the arms meet in where its own type differs and otherwise, under UNION, marked {@code ENSURE_NULLABLE} where
+ * it holds no NULL but the combined column may. INTERSECT binds before the other operators, a run of one operator is
+ * one combination, and the relations are numbered in the order the plan completes them. Each expected answer is the
+ * account's own.
  */
 public class SetOperationSubqueryEchoTest extends BaseDatabaseTest {
 
@@ -62,11 +63,11 @@ public class SetOperationSubqueryEchoTest extends BaseDatabaseTest {
     public void eachOperatorCombinesItsArms() {
         assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"MAX(V)\", WB$1.\"1\") AS \"MAX(V)\" FROM (SELECT OB$0.\"MAX(V)\""
                 + " AS \"MAX(V)\" FROM (SELECT MAX(G.V) AS \"MAX(V)\" FROM G AS G) OB$0) WB$0 UNION ALL (SELECT"
-                + " ENSURE_NULLABLE(CAST(OB$1.\"1\" AS NUMBER(38,0))) AS \"1\" FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$1) WB$1"
+                + " CAST(OB$1.\"1\" AS NUMBER(38,0)) AS \"1\" FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$1) WB$1"
                 + NOT_VALID,
             orderedBy("SELECT MAX(v) FROM g UNION ALL SELECT 1"));
         assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.V, WB$1.\"1\") AS \"V\" FROM (SELECT OB$0.V AS \"V\" FROM (SELECT G.V"
-                + " AS \"V\" FROM G AS G) OB$0) WB$0 UNION (SELECT ENSURE_NULLABLE(CAST(OB$1.\"1\" AS NUMBER(38,0))) AS \"1\""
+                + " AS \"V\" FROM G AS G) OB$0) WB$0 UNION (SELECT CAST(OB$1.\"1\" AS NUMBER(38,0)) AS \"1\""
                 + " FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$1) WB$1" + NOT_VALID,
             orderedBy("SELECT v FROM g UNION SELECT 1"));
         final String minus = REFUSED + "SELECT SET_COMBINE(WB$0.V, WB$1.\"1\") AS \"V\" FROM (SELECT OB$0.V AS \"V\" FROM"
@@ -105,6 +106,33 @@ public class SetOperationSubqueryEchoTest extends BaseDatabaseTest {
     }
 
     @Test
+    public void aCastArmIsNotMarkedNullable() {
+        assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"1\", WB$1.V) AS \"1\" FROM (SELECT CAST(OB$0.\"1\" AS"
+                + " NUMBER(38,0)) AS \"1\" FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$0) WB$0 UNION ALL (SELECT"
+                + " OB$1.V AS \"V\" FROM (SELECT G.V AS \"V\" FROM G AS G) OB$1) WB$1" + NOT_VALID,
+            orderedBy("SELECT 1 UNION ALL SELECT v FROM g"));
+        assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"'A'\", WB$1.X) AS \"'A'\" FROM (SELECT CAST(OB$0.\"'A'\" AS"
+                + " VARCHAR(3)) AS \"'A'\" FROM (SELECT 'a' AS \"'A'\"" + DUAL + ") OB$0) WB$0 UNION ALL (SELECT"
+                + " OB$1.X AS \"X\" FROM (SELECT G.X AS \"X\" FROM G AS G) OB$1) WB$1" + NOT_VALID,
+            orderedBy("SELECT 'a' UNION ALL SELECT x FROM g"));
+        assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"1.5\", WB$1.V) AS \"1.5\" FROM (SELECT CAST(OB$0.\"1.5\" AS"
+                + " NUMBER(38,1)) AS \"1.5\" FROM (SELECT 1.5 AS \"1.5\"" + DUAL + ") OB$0) WB$0 UNION ALL (SELECT"
+                + " CAST(OB$1.V AS NUMBER(38,1)) AS \"V\" FROM (SELECT G.V AS \"V\" FROM G AS G) OB$1) WB$1"
+                + NOT_VALID,
+            orderedBy("SELECT 1.5 UNION ALL SELECT v FROM g"));
+        // An arm of the met type keeps its mark, first or not.
+        assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.W, WB$1.V) AS \"W\" FROM (SELECT ENSURE_NULLABLE(OB$0.W)"
+                + " AS \"W\" FROM (SELECT G.W AS \"W\" FROM G AS G) OB$0) WB$0 UNION (SELECT OB$1.V AS \"V\" FROM"
+                + " (SELECT G.V AS \"V\" FROM G AS G) OB$1) WB$1" + NOT_VALID,
+            orderedBy("SELECT w FROM g UNION SELECT v FROM g"));
+        assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"1\", WB$1.NULL) AS \"1\" FROM (SELECT"
+                + " ENSURE_NULLABLE(OB$0.\"1\") AS \"1\" FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$0) WB$0 UNION ALL"
+                + " (SELECT SYSTEM$NULL_TO_FIXED(OB$1.NULL) AS \"NULL\" FROM (SELECT null AS \"NULL\"" + DUAL
+                + ") OB$1) WB$1" + NOT_VALID,
+            orderedBy("SELECT 1 UNION ALL SELECT NULL"));
+    }
+
+    @Test
     public void intersectBindsFirstAndARunCombinesAtOnce() {
         assertEquals(REFUSED + "SELECT SET_COMBINE(WB$0.\"1\", WB$1.\"2\", WB$2.\"3\") AS \"1\" FROM (SELECT OB$0.\"1\" AS \"1\""
                 + " FROM (SELECT 1 AS \"1\"" + DUAL + ") OB$0) WB$0 UNION ALL (SELECT OB$1.\"2\" AS \"2\" FROM (SELECT 2 AS \"2\""
@@ -134,7 +162,7 @@ public class SetOperationSubqueryEchoTest extends BaseDatabaseTest {
     public void aMembershipTestReadsTheSameCombination() {
         assertEquals("SQL compilation error: error line 1 at position 7|not enough arguments for function [CHARINDEX(1 = ANY("
                 + "SELECT SET_COMBINE(WB$0.V, WB$1.\"1\") AS \"V\" FROM (SELECT OB$0.V AS \"V\" FROM (SELECT G.V AS \"V\" FROM G"
-                + " AS G) OB$0) WB$0 UNION ALL (SELECT ENSURE_NULLABLE(CAST(OB$1.\"1\" AS NUMBER(38,0))) AS \"1\" FROM (SELECT 1"
+                + " AS G) OB$0) WB$0 UNION ALL (SELECT CAST(OB$1.\"1\" AS NUMBER(38,0)) AS \"1\" FROM (SELECT 1"
                 + " AS \"1\"" + DUAL + ") OB$1) WB$1))], expected 2, got 1",
             answer("SELECT CHARINDEX(1 IN (SELECT v FROM g UNION ALL SELECT 1))"));
         assertEquals("SQL compilation error: error line 1 at position 7|not enough arguments for function [CHARINDEX(1 = ANY("

@@ -107,6 +107,10 @@ enum ShowListing {
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     JOIN_POLICIES("JOIN POLICY", "JOIN_POLICYS", ShowTailGrammar.FULL, false, ShowScopeAnswer.MISSING_APPLICATION,
         ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    PRIVACY_POLICIES("PRIVACY POLICY", "PRIVACY_POLICYS", ShowTailGrammar.FULL, false,
+        ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    STORAGE_LIFECYCLE_POLICIES("STORAGE LIFECYCLE POLICY", "STORAGE_LIFECYCLE_POLICYS", ShowTailGrammar.FULL, false,
+        ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     ROW_ACCESS_POLICIES("ROW ACCESS POLICY", "ROW_ACCESS_POLICYS", ShowTailGrammar.FULL, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     OBJECTS("OBJECT", "OBJECTS", ShowTailGrammar.FULL, false, ShowScopeAnswer.OBJECT_DOES_NOT_EXIST,
@@ -162,14 +166,14 @@ enum ShowListing {
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     SEMANTIC_VIEWS("SEMANTIC VIEW", "SEMANTIC_VIEWS", ShowTailGrammar.FULL, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    DBT_PROJECTS("DBT PROJECT", "DBT_PROJECTS", ShowTailGrammar.FULL, false,
+        ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     /** The session and the authentication policies read no WITH PRIVILEGES. */
     SESSION_POLICIES("SESSION POLICY", null, ShowTailGrammar.NO_PRIVILEGES, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     AUTHENTICATION_POLICIES("AUTHENTICATION POLICY", null, ShowTailGrammar.NO_PRIVILEGES, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     PACKAGES_POLICIES("PACKAGES POLICY", "PACKAGES_POLICYS", ShowTailGrammar.FULL, false,
-        ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
-    PRIVACY_POLICIES("PRIVACY POLICY", "PRIVACY_POLICYS", ShowTailGrammar.FULL, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     /** The external and the data metric functions answer every scope as FUNCTIONS does. */
     EXTERNAL_FUNCTIONS("FUNCTION", "FUNCTIONS", ShowTailGrammar.FULL, false,
@@ -282,6 +286,8 @@ enum ShowListing {
             case PROJECTION_POLICIES:
             case AGGREGATION_POLICIES:
             case JOIN_POLICIES:
+            case PRIVACY_POLICIES:
+            case STORAGE_LIFECYCLE_POLICIES:
             case EVENT_TABLES:
             case DYNAMIC_TABLES:
             // The hybrid, Iceberg and Cortex Search listings are unmeasured and keep the schema they have always
@@ -305,9 +311,9 @@ enum ShowListing {
             case SNAPSHOTS:
             case GIT_REPOSITORIES:
             case SEMANTIC_VIEWS:
+            case DBT_PROJECTS:
             case AUTHENTICATION_POLICIES:
             case PACKAGES_POLICIES:
-            case PRIVACY_POLICIES:
             case EXTERNAL_FUNCTIONS:
             case DATA_METRIC_FUNCTIONS:
                 return true;
@@ -476,7 +482,7 @@ enum ShowListing {
             if (kind.AUTHENTICATION() != null) {
                 return AUTHENTICATION_POLICIES;
             }
-            return kind.PACKAGES() != null ? PACKAGES_POLICIES : PRIVACY_POLICIES;
+            return PACKAGES_POLICIES;
         }
         if (kind.FUNCTIONS() != null) {
             return kind.EXTERNAL() != null ? EXTERNAL_FUNCTIONS : DATA_METRIC_FUNCTIONS;
@@ -508,6 +514,9 @@ enum ShowListing {
         if (kind.SNAPSHOTS() != null) {
             return SNAPSHOTS;
         }
+        if (kind.DBT() != null) {
+            return DBT_PROJECTS;
+        }
         return kind.REPOSITORIES() != null ? GIT_REPOSITORIES : SEMANTIC_VIEWS;
     }
 
@@ -520,6 +529,12 @@ enum ShowListing {
         }
         if (ctx.AGGREGATION() != null) {
             return AGGREGATION_POLICIES;
+        }
+        if (ctx.PRIVACY() != null) {
+            return PRIVACY_POLICIES;
+        }
+        if (ctx.lifecycle != null) {
+            return STORAGE_LIFECYCLE_POLICIES;
         }
         return ctx.JOIN() != null ? JOIN_POLICIES : ROW_ACCESS_POLICIES;
     }

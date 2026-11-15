@@ -43,6 +43,7 @@ import dev.frostlake.metastore.model.JoinPolicy;
 import dev.frostlake.metastore.model.MaskingPolicy;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Pipe;
+import dev.frostlake.metastore.model.PrivacyPolicy;
 import dev.frostlake.metastore.model.Procedure;
 import dev.frostlake.metastore.model.ProjectionPolicy;
 import dev.frostlake.metastore.model.RefreshMode;
@@ -57,6 +58,7 @@ import dev.frostlake.metastore.model.SequenceDefault;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.StageType;
 import dev.frostlake.metastore.model.State;
+import dev.frostlake.metastore.model.StorageLifecyclePolicy;
 import dev.frostlake.metastore.model.Stream;
 import dev.frostlake.metastore.model.StreamRecord;
 import dev.frostlake.metastore.model.StreamSourceType;
@@ -101,6 +103,7 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -285,6 +288,7 @@ final class CatalogSnapshotReader {
                 userSnapshot.rsaPublicKeyLastSetTime);
             user.setRsaPublicKey2(userSnapshot.rsaPublicKey2, userSnapshot.rsaPublicKey2Fp,
                 userSnapshot.rsaPublicKey2LastSetTime);
+            user.restorePasswordHistory(userSnapshot.previousPasswords, userSnapshot.passwordSetAt);
             // Privileges granted directly to the user (object- and column-level). The referenced objects were
             // loaded above; grant* only records the entry, so this is order-independent for the grant itself.
             if (userSnapshot.privileges != null) {
@@ -548,6 +552,10 @@ final class CatalogSnapshotReader {
                 }
                 table.setAggregationPolicyName(tableSnapshot.aggregationPolicyName);
                 table.setJoinPolicyName(tableSnapshot.joinPolicyName);
+                table.setPrivacyPolicyName(tableSnapshot.privacyPolicyName);
+                table.setPrivacyEntityKey(tableSnapshot.privacyEntityKey);
+                table.setStorageLifecyclePolicyName(tableSnapshot.storageLifecyclePolicyName);
+                table.setStorageLifecycleColumns(tableSnapshot.storageLifecycleColumns);
                 if (tableSnapshot.searchOptimization != null) {
                     for (final SearchOptimizationSnapshot soSnapshot : tableSnapshot.searchOptimization) {
                         table.restoreSearchOptimization(new SearchOptimizationExpression(
@@ -658,6 +666,8 @@ final class CatalogSnapshotReader {
                     view.setAggregationPolicyName(viewSnapshot.aggregationPolicyName);
                     view.setAggregationEntityKey(viewSnapshot.aggregationEntityKey);
                     view.setJoinPolicyName(viewSnapshot.joinPolicyName);
+                    view.setPrivacyPolicyName(viewSnapshot.privacyPolicyName);
+                    view.setPrivacyEntityKey(viewSnapshot.privacyEntityKey);
                     if (viewSnapshot.contacts != null) {
                         for (final Map.Entry<String, String> attached : viewSnapshot.contacts.entrySet()) {
                             view.setContact(attached.getKey(), attached.getValue());
@@ -761,6 +771,7 @@ final class CatalogSnapshotReader {
                         stream.setOwner(streamSnapshot.owner);
                     }
                     stream.restoreCreatedTime(streamSnapshot.createdAt);
+                    stream.restoreLastConsumedAt(streamSnapshot.lastConsumedAt);
                     if (streamSnapshot.offsetSequence != null) {
                         stream.restoreOffsetSequence(streamSnapshot.offsetSequence.longValue());
                     }
@@ -880,6 +891,33 @@ final class CatalogSnapshotReader {
                 }
             }
 
+            // Load privacy and storage lifecycle policies (the tables' attachments are restored with them above)
+            if (schemaSnapshot.privacyPolicies != null) {
+                for (final ProjectionPolicySnapshot policySnapshot : schemaSnapshot.privacyPolicies) {
+                    final PrivacyPolicy policy = new PrivacyPolicy(policySnapshot.name, policySnapshot.body);
+                    policy.setComment(policySnapshot.comment);
+                    if (policySnapshot.owner != null) {
+                        policy.setOwner(policySnapshot.owner);
+                    }
+                    policy.restoreCreatedTime(policySnapshot.createdAt);
+                    schema.addPrivacyPolicy(policy);
+                }
+            }
+            if (schemaSnapshot.storageLifecyclePolicies != null) {
+                for (final StorageLifecyclePolicySnapshot policySnapshot : schemaSnapshot.storageLifecyclePolicies) {
+                    final StorageLifecyclePolicy policy = new StorageLifecyclePolicy(policySnapshot.name,
+                        restoreParameters(policySnapshot.parameters), policySnapshot.body);
+                    policy.setComment(policySnapshot.comment);
+                    policy.setArchiveForDays(policySnapshot.archiveForDays);
+                    policy.setArchiveTier(policySnapshot.archiveTier);
+                    if (policySnapshot.owner != null) {
+                        policy.setOwner(policySnapshot.owner);
+                    }
+                    policy.restoreCreatedTime(policySnapshot.createdAt);
+                    schema.addStorageLifecyclePolicy(policy);
+                }
+            }
+
             // Load aggregation policies (the table's attachment is restored with the table above)
             if (schemaSnapshot.aggregationPolicies != null) {
                 for (final ProjectionPolicySnapshot policySnapshot : schemaSnapshot.aggregationPolicies) {
@@ -915,6 +953,7 @@ final class CatalogSnapshotReader {
                     contact.setComment(contactSnapshot.comment);
                     contact.setUrl(contactSnapshot.url);
                     contact.setEmailDistributionList(contactSnapshot.emailDistributionList);
+                    contact.setUsers(contactSnapshot.users);
                     if (contactSnapshot.owner != null) {
                         contact.setOwner(contactSnapshot.owner);
                     }
@@ -951,6 +990,7 @@ final class CatalogSnapshotReader {
             if (schemaSnapshot.fileFormats != null) {
                 for (final FileFormatSnapshot ffSnapshot : schemaSnapshot.fileFormats) {
                     final FileFormat ff = new FileFormat(ffSnapshot.name, ffSnapshot.type);
+                    ff.setWrittenType(ffSnapshot.writtenType);
                     ff.setComment(ffSnapshot.comment);
                     if (ffSnapshot.options != null) {
                         for (final Map.Entry<String, String> opt : ffSnapshot.options.entrySet()) {
@@ -1102,6 +1142,12 @@ final class CatalogSnapshotReader {
                             dt.setInputPartitions(input.getKey(), input.getValue());
                         }
                     }
+                    if (dtSnapshot.inputCreatedTimes != null) {
+                        for (final Map.Entry<String, Instant> input : dtSnapshot.inputCreatedTimes.entrySet()) {
+                            dt.setInputCreatedTime(input.getKey(), input.getValue());
+                        }
+                    }
+                    dt.setReinitRequested(dtSnapshot.reinitRequested);
                     if (dtSnapshot.refreshSequences != null) {
                         final List<DynamicTableRefresh> kept = new ArrayList<>();
                         for (int r = 0; r < dtSnapshot.refreshSequences.size(); r++) {

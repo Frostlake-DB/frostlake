@@ -59,6 +59,8 @@ public class Stream implements Named, Taggable {
     private final boolean showInitialRows;
     private final List<StreamRecord> records;
     private LocalDateTime createdAt;
+    /** When a consuming statement last moved the offset, or null before any did (see stale_after). */
+    private LocalDateTime lastConsumedAt;
     private long currentOffset;
     private boolean stale;
     /** Whether the stream is a table stream cloned with its schema or database after its table went. */
@@ -390,6 +392,7 @@ public class Stream implements Named, Taggable {
     }
 
     public void consume() {
+        lastConsumedAt = StatementClock.hostLocal();
         // Consuming the initial rows leaves the offset at the starting point.
         if (initialRecords != null) {
             initialRecords = null;
@@ -458,6 +461,7 @@ public class Stream implements Named, Taggable {
      * @param sequence the snapshot number the transaction began at, where the offset now falls among the snapshots
      */
     public void consumeTo(final long cut, final long sequence) {
+        lastConsumedAt = StatementClock.hostLocal();
         if (initialRecords != null) {
             initialRecords = null;
             return;
@@ -571,7 +575,8 @@ public class Stream implements Named, Taggable {
     public void restartOn(final List<Table> tables) {
         bindBaseTables(tables);
         rebound = true;
-        shownTables = null;
+        // Listed as reading those tables under the names they have from then on, renamed too (live-verified).
+        shownTables = new ArrayList<>(tables);
         initialRecords = null;
         currentOffset = records.size();
         versions.clear();
@@ -645,6 +650,20 @@ public class Stream implements Named, Taggable {
         return createdAt;
     }
 
+    /** When a consuming statement last moved the stream's offset, or null before any did. */
+    public LocalDateTime getLastConsumedAt() {
+        return lastConsumedAt;
+    }
+
+    /**
+     * Put back when the stream was last consumed, as a snapshot recorded it; a null keeps none.
+     *
+     * @param consumed the recorded time, or null
+     */
+    public void restoreLastConsumedAt(final LocalDateTime consumed) {
+        lastConsumedAt = consumed;
+    }
+
     /**
      * Put back when this object was created, as a snapshot recorded it, so an engine clone or a restore reports the
      * original creation time. A null, from a snapshot that never recorded it, keeps the time it was rebuilt.
@@ -692,14 +711,23 @@ public class Stream implements Named, Taggable {
 
     /**
      * Whether SYSTEM$STREAM_HAS_DATA answers TRUE: the stream lists changes, or a table it reads took a version past
-     * its offset, a change the stream does not list among them - a DELETE under an APPEND_ONLY stream, a row a view
-     * does not show. The function diffs the tables' versions, not the stream's rows (documented; live-verified for an
-     * APPEND_ONLY view stream after a DELETE), so it may answer TRUE where a read lists nothing.
+     * its offset that counts as data (see StreamVersion#countsAsData), a change the stream may not list among them - a
+     * DELETE under an APPEND_ONLY stream that left rows, a row a view does not show. The function diffs the tables'
+     * versions, not the stream's rows (documented; live-verified), so it may answer TRUE where a read lists nothing.
      *
      * @return whether the stream has data
      */
     public boolean hasData() {
-        return getUnconsumedCount() > 0 || !getPendingVersions().isEmpty();
+        if (getUnconsumedCount() > 0) {
+            return true;
+        }
+        final boolean appendOnly = streamType != StreamType.STANDARD;
+        for (final StreamVersion version : getPendingVersions()) {
+            if (version.countsAsData(appendOnly)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The initial rows pending before the first consumption, or null when none are. */
@@ -792,6 +820,7 @@ public class Stream implements Named, Taggable {
         initialRecords = source.initialRecords == null ? null : new ArrayList<>(source.initialRecords);
         refreshImage = source.refreshImage == null ? null : new ArrayList<>(source.refreshImage);
         refreshImageIds = source.refreshImageIds == null ? null : new ArrayList<>(source.refreshImageIds);
+        lastConsumedAt = source.lastConsumedAt;
     }
 
     /** Object tags applied via ALTER ... SET TAG (canonical upper-cased tag name -&gt; value). */

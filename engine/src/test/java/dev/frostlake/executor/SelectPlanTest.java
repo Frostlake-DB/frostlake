@@ -36,11 +36,11 @@ import org.junit.jupiter.api.function.Executable;
  */
 public class SelectPlanTest extends BaseDatabaseTest {
 
-    private static final String EMBEDDED_ONLY = "the plan is the embedded engine's own";
+    private static final String EMBEDDED_ONLY = "the plan is the embedded session's own";
 
     @BeforeEach
     public void embeddedOnly() {
-        assumeFalse(isLiveSnowflake(), EMBEDDED_ONLY);
+        assumeFalse(sessionLivesElsewhere(), EMBEDDED_ONLY);
     }
 
     @Override

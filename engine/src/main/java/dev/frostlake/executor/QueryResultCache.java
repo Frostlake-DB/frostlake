@@ -93,6 +93,8 @@ public class QueryResultCache {
     private final Map<String, QueryIdHistory> historyBySession;
     private final Map<String, Boolean> failedQueryIds;
     private final ThreadLocal<String> boundSession = new ThreadLocal<>();
+    /** The query ID the next statement of this thread takes, one a client was told before (see #assignNextQueryId). */
+    private static final ThreadLocal<String> ASSIGNED_ID = new ThreadLocal<>();
 
     public QueryResultCache() {
         this(DEFAULT_MAX_CACHED_RESULTS);
@@ -235,7 +237,36 @@ public class QueryResultCache {
      * @return the reserved query ID
      */
     public String reserveQueryId() {
+        final String assigned = ASSIGNED_ID.get();
+        if (assigned != null) {
+            ASSIGNED_ID.remove();
+            return assigned;
+        }
         return generateQueryId();
+    }
+
+    /**
+     * Gives the next statement this thread runs a query ID its client was told before the statement ran - what an
+     * asynchronous execution answers at once, so the client can follow the statement by that ID while it runs.
+     *
+     * @param queryId the ID, or null to give none
+     */
+    public static void assignNextQueryId(final String queryId) {
+        if (queryId == null) {
+            ASSIGNED_ID.remove();
+        } else {
+            ASSIGNED_ID.set(queryId);
+        }
+    }
+
+    /**
+     * A query ID no statement has taken yet, for a client to be told before its statement runs (see
+     * {@link #assignNextQueryId}).
+     *
+     * @return the ID
+     */
+    public static String newQueryId() {
+        return UUID.randomUUID().toString();
     }
 
     /**
@@ -480,6 +511,6 @@ public class QueryResultCache {
      * Format similar to Snowflake: 01b1e2f3-0001-abcd-0000-000012345678
      */
     private String generateQueryId() {
-        return UUID.randomUUID().toString();
+        return newQueryId();
     }
 }

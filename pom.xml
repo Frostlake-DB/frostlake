@@ -35,9 +35,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:https://github.com/mlorek/frostlake.git</connection>
-        <developerConnection>scm:git:ssh://git@github.com/mlorek/frostlake.git</developerConnection>
-        <url>https://github.com/mlorek/frostlake</url>
+        <connection>scm:git:https://github.com/Frostlake-DB/frostlake.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/Frostlake-DB/frostlake.git</developerConnection>
+        <url>https://github.com/Frostlake-DB/frostlake</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -57,7 +57,7 @@
              inherits it via <parent><version>${revision}</version>; bump here (or pass -Drevision=X). The
              flatten-maven-plugin below rewrites ${revision} to a literal in the installed/deployed poms so
              consumers never see the placeholder. -->
-        <revision>0.4.1-SNAPSHOT</revision>
+        <revision>0.5.0-SNAPSHOT</revision>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

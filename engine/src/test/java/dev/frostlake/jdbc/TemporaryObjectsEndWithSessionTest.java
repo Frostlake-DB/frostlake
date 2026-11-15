@@ -17,7 +17,6 @@
 package dev.frostlake.jdbc;
 
 import dev.frostlake.BaseJdbcTest;
-import dev.frostlake.LiveSnowflake;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -43,8 +42,7 @@ public class TemporaryObjectsEndWithSessionTest extends BaseJdbcTest {
 
     /** Another session on the same account or engine as the test's own connection, in the test's schema. */
     private Connection another() throws SQLException {
-        final Connection opened = LiveSnowflake.enabled() ? LiveSnowflake.open()
-            : new DirectConnection(sharedEngine);
+        final Connection opened = newSession();
         try (Statement use = opened.createStatement()) {
             use.execute("USE SCHEMA test_db.public");
         }

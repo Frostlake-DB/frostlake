@@ -166,6 +166,7 @@ final class ExplainPlan {
      */
     static ResultSet answer(final QueryExecutor executor, final FrostlakeParser.ExplainStatementContext ctx) {
         final String format = formatOf(ctx);
+        UnsupportedSetOperatorAll.requireNone(ctx);
         final List<PlanOperator> operators = new ArrayList<>();
         // A plan is asked for and nothing is carried out: what a relation calls to learn its shape runs no
         // procedure while this compiles (see planning).
@@ -175,6 +176,8 @@ final class ExplainPlan {
             final PlanNode plan;
             if (ctx.explainedStatement() != null) {
                 plan = explained(executor, ctx.explainedStatement(), builder);
+            } else if (ctx.explainedCall() != null) {
+                plan = PlanBuilder.anonymousCall(calledText(ctx.explainedCall()));
             } else {
                 compile(executor, ctx);
                 plan = ctx.selectStatement() != null ? builder.query(ctx.selectStatement())
@@ -191,6 +194,20 @@ final class ExplainPlan {
             return content(json(operators));
         }
         return tabular(operators);
+    }
+
+    /**
+     * The CALL of a procedure the statement defines for itself as its plan names it: the procedure's name upper-cased
+     * as an unquoted name reads, {@code P()} (live-verified), and its arguments as written.
+     */
+    private static String calledText(final FrostlakeParser.ExplainedCallContext call) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(call.qualifiedName());
+        final StringBuilder name = new StringBuilder();
+        for (final String part : parts) {
+            name.append(name.length() > 0 ? "." : "").append(SqlIdentifiers.spellCanonical(part));
+        }
+        return name + "(" + (call.callArguments() == null ? "" : ParseTreeText.getOriginalText(call.callArguments()))
+            + ")";
     }
 
     /** The format USING names, upper-cased; TABULAR without one. Any word but the three is refused. */
@@ -446,13 +463,16 @@ final class ExplainPlan {
 
     /**
      * Whether reading a query's rows writes nothing, as a request that only reads is judged (see
-     * {@link ReadOnlyRequest}): no NEXTVAL, TO_QUERY or system function that acts on the server in its text or in a
-     * body its names stand for, and no stream, whose read inside a transaction holds it.
+     * {@link ReadOnlyRequest}): no TO_QUERY or system function that acts on the server in its text, no NEXTVAL or
+     * such call in a body its names stand for, and no stream, whose read inside a transaction holds it.
      */
     private static boolean readsOnly(final QueryExecutor executor, final String text) {
         final Catalog catalog = executor.getCatalog();
         final SessionSettings session = executor.boundSessionSettings();
-        return ReadOnlyRequest.tokenRefusal(text) == null && !ReadOnlyBodies.reachWrite(catalog, text, session)
+        // A NEXTVAL the query writes is looked at, not drawn, while a plan is asked for (see planning), so its
+        // rows are read all the same: a correlated subquery beside it is refused as a run refuses it
+        // (live-verified).
+        return ReadOnlyRequest.tokenRefusal(text, false) == null && !ReadOnlyBodies.reachWrite(catalog, text, session)
             && !ReadOnlyBodies.namesStream(catalog, text, session);
     }
 

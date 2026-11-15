@@ -161,10 +161,10 @@ public class StageArgumentSyntaxTest extends BaseDatabaseTest {
     }
 
     /**
-     * A routine's body is judged when it is created, in the frame it compiles in: a SQL UDF's expression, a table
-     * function's query and a policy's body inside parentheses of their own — the first line moved by one — each
-     * refusal opening "Compilation of SQL UDF failed: "; a scalar function's query or block and a procedure's block
-     * as statements of their own. Nothing is created.
+     * A routine's body is judged when it is created, in the frame it compiles in: a SQL UDF's expression and a
+     * policy's body inside parentheses of their own — the first line moved by one — each refusal opening "Compilation
+     * of SQL UDF failed: "; a function's query, a table function's too, a scalar function's block and a procedure's
+     * block as statements of their own. Nothing is created.
      */
     @Test
     public void aRoutineBodyIsJudgedWhenCreatedInItsOwnFrame() {
@@ -179,8 +179,13 @@ public class StageArgumentSyntaxTest extends BaseDatabaseTest {
             refusal("CREATE FUNCTION sa_f3(x VARCHAR) RETURNS VARCHAR AS 'IFF(x IS NULL, UPPER(@sa_body_st), x)'"));
         assertEquals("Compilation of SQL UDF failed: SQL compilation error:\nsyntax error line 1 at position 2"
             + " unexpected '@sa_body_st'.", refusal("CREATE FUNCTION sa_f4() RETURNS VARCHAR AS '(@sa_body_st)'"));
-        assertEquals(udf + "error line 1 at position 10\n" + upper,
+        // A table function's query is judged as a scalar function's is: as a statement of its own.
+        assertEquals("SQL compilation error: error line 1 at position 9\n" + upper,
             refusal("CREATE FUNCTION sa_f5() RETURNS TABLE (s VARCHAR) AS $$  SELECT UPPER(@sa_body_st) $$"));
+        assertEquals("SQL compilation error: error line 1 at position 7\n" + upper,
+            refusal("CREATE FUNCTION sa_f9() RETURNS TABLE (s VARCHAR) AS 'SELECT UPPER(@sa_body_st)'"));
+        assertEquals("SQL compilation error: error line 3 at position 1\n" + upper,
+            refusal("CREATE FUNCTION sa_f10() RETURNS TABLE (s VARCHAR) AS $$\nSELECT\n UPPER(@sa_body_st)$$"));
         assertEquals("SQL compilation error: error line 3 at position 1\n" + upper,
             refusal("CREATE FUNCTION sa_f6() RETURNS VARCHAR AS $$\nSELECT\n UPPER(@sa_body_st)$$"));
         assertEquals("SQL compilation error: error line 1 at position 15\n" + upper,

@@ -21,6 +21,7 @@ import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.types.DataType;
 import dev.frostlake.types.NumericType;
+import dev.frostlake.types.ObjectType;
 import dev.frostlake.types.StringType;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,8 +30,9 @@ import java.util.List;
  * The listings of the object kinds this engine models no object of (live-verified, column for column). Each
  * answers the columns the account declares for it and no rows: a client that reads a listing reads its shape even
  * when nothing is listed. A column is text unless its name is marked: {@code @} for a moment, TIMESTAMP_LTZ(3),
- * {@code #} for a count, NUMBER(9,0), and {@code ##} for a size or a sequencer, NUMBER(38,0). TERSE narrows three
- * of the listings to the five columns a terse listing of schema objects has, and leaves the others as they are.
+ * {@code #} for a count, NUMBER(9,0), {@code ##} for a size or a sequencer, NUMBER(38,0), and <code>{}</code> for an
+ * OBJECT. TERSE narrows three of the listings to the five columns a terse listing of schema objects has, and leaves
+ * the others as they are.
  */
 enum UnmodelledListing {
 
@@ -54,7 +56,6 @@ enum UnmodelledListing {
     SESSION_POLICIES("created_on@ name database_name schema_name kind owner comment owner_role_type options", false),
     AUTHENTICATION_POLICIES(SESSION_POLICIES.spec, false),
     PACKAGES_POLICIES(SESSION_POLICIES.spec, false),
-    PRIVACY_POLICIES(SESSION_POLICIES.spec, false),
     FUNCTIONS("""
         created_on@ name schema_name is_builtin is_aggregate is_ansi min_num_arguments# max_num_arguments# arguments
         description catalog_name is_table_function valid_for_clustering is_secure secrets external_access_integrations
@@ -100,8 +101,15 @@ enum UnmodelledListing {
         dropped_on@ type
         """, true),
     SEMANTIC_VIEWS("""
-        created_on@ name database_name schema_name comment owner owner_role_type extension max_staleness
-        """, true);
+        created_on@ name database_name schema_name comment owner owner_role_type extension max_staleness updated_on@
+        """, true),
+    /** TERSE lists every column too (live-verified). */
+    DBT_PROJECTS("""
+        external_access_integrations name database_name schema_name created_on@ updated_on@ owner comment dbt_version
+        default_version default_version_name default_version_alias default_version_location_uri
+        default_version_source_location_uri dbt_snowflake_version default_target default_environment default_writeback
+        auto_compile last_deployed_from{}
+        """, false);
 
     /** What TERSE lists for the listings it narrows. */
     private static final String TERSE = "created_on@ name kind database_name schema_name";
@@ -145,7 +153,10 @@ enum UnmodelledListing {
         for (final String marked : (terse && terseNarrows ? TERSE : spec).trim().split("\\s+")) {
             final DataType type;
             final String name;
-            if (marked.endsWith("##")) {
+            if (marked.endsWith("{}")) {
+                name = marked.substring(0, marked.length() - 2);
+                type = new ObjectType();
+            } else if (marked.endsWith("##")) {
                 name = marked.substring(0, marked.length() - 2);
                 type = WIDE_NUMBER;
             } else if (marked.endsWith("#")) {

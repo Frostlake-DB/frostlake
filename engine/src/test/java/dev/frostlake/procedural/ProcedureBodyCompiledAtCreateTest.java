@@ -18,6 +18,7 @@ package dev.frostlake.procedural;
 
 import dev.frostlake.BaseDatabaseTest;
 import dev.frostlake.FrostlakeJdbc;
+import dev.frostlake.SnowflakeJdbcFl;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -235,8 +236,8 @@ public class ProcedureBodyCompiledAtCreateTest extends BaseDatabaseTest {
         // the account creates it and CALL answers 1 — the block's RETURN, the trailing SELECT never running
         // (live-verified). Under the count of 1 the body's two statements are refused (see
         // ProcedureBodyFaultsAtCreateTest).
-        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled(),
-            "the live and FL-over-JDBC harnesses declare each request's own MULTI_STATEMENT_COUNT");
+        assumeFalse(isLiveSnowflake() || FrostlakeJdbc.enabled() || SnowflakeJdbcFl.enabled(),
+            "the driver harnesses declare each request's own MULTI_STATEMENT_COUNT");
         engine.execute("ALTER SESSION SET MULTI_STATEMENT_COUNT = 0");
         engine.execute("CREATE OR REPLACE PROCEDURE pt1() RETURNS VARCHAR LANGUAGE SQL AS $$\nBEGIN\n"
             + "  RETURN 1;\nEND;\nSELECT 1;\n$$");

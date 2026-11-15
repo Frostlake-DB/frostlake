@@ -209,6 +209,7 @@ public class DatabaseEngine {
                     return results;
                 } finally {
                     RunningEngine.leave(displaced);
+                    scheduledStatementEnded();
                 }
             }
 
@@ -232,6 +233,7 @@ public class DatabaseEngine {
                         return results;
                     } finally {
                         RunningEngine.leave(displaced);
+                        scheduledStatementEnded();
                     }
                 }
             }
@@ -243,13 +245,14 @@ public class DatabaseEngine {
 
             @Override
             public void runInOwnSession(final Runnable run, final Map<String, String> parameters) {
+                runAsOwner(run, parameters, null);
+            }
+
+            @Override
+            public void runAsOwner(final Runnable run, final Map<String, String> parameters, final String owner) {
                 ownSessionDepth.set(Integer.valueOf(ownSessionDepth.get().intValue() + 1));
                 try {
-                    if (parameters == null) {
-                        queryExecutor.runInOwnSession(run);
-                    } else {
-                        queryExecutor.runInOwnSession(run, parameters);
-                    }
+                    queryExecutor.runInOwnSession(run, parameters, owner);
                 } finally {
                     ownSessionDepth.set(Integer.valueOf(ownSessionDepth.get().intValue() - 1));
                     if (ownSessionDepth.get().intValue() == 0) {
@@ -790,6 +793,17 @@ public class DatabaseEngine {
      * thread; one a statement started — EXECUTE TASK, EXECUTE ALERT — when that statement ends, so a recovery
      * starts after the run and does not run its body a second time.
      */
+    /**
+     * A statement of a task's or an alert's run ends as an outermost statement does for the language runtimes: what a
+     * handler left in a runtime's thread state is put back, so the scheduler thread's next statement starts clean. A
+     * run inside a statement — EXECUTE TASK — leaves that to the statement's own end.
+     */
+    private void scheduledStatementEnded() {
+        if (statementDepth.get().intValue() == 0) {
+            UdfRuntimes.statementEnded();
+        }
+    }
+
     private void runCompleted() {
         if (wal == null || replaying) {
             return;
@@ -1254,8 +1268,8 @@ public class DatabaseEngine {
         } catch (final RuntimeException e) {
             catalog.createUser(defaultUser);
         }
-        catalog.grantRoleToUser("ORGADMIN", defaultUser);
-        catalog.grantRoleToUser("ACCOUNTADMIN", defaultUser);
+        catalog.grantRoleToUserBySystem("ORGADMIN", defaultUser);
+        catalog.grantRoleToUserBySystem("ACCOUNTADMIN", defaultUser);
         sessionContext.setDisplayUser(defaultUser);
     }
 
@@ -1745,7 +1759,14 @@ public class DatabaseEngine {
         final Object indent = securityManager != null
             ? securityManager.getSessionContext().getSessionParameter("JSON_INDENT") : null;
         if (indent == null) {
-            VariantJsonFormat.clearSessionScope();
+            // A session that sets none lays its values out at its front end's default width, else the engine's own.
+            final Integer fallback = securityManager != null
+                ? securityManager.getSessionContext().getDefaultJsonIndent() : null;
+            if (fallback != null) {
+                VariantJsonFormat.beginSessionScope(fallback.intValue());
+            } else {
+                VariantJsonFormat.clearSessionScope();
+            }
             return;
         }
         try {
@@ -1768,6 +1789,15 @@ public class DatabaseEngine {
     /** The query-result cache backing RESULT_SCAN and LAST_QUERY_ID. */
     public QueryResultCache getQueryResultCache() {
         return queryExecutor.getResultCache();
+    }
+
+    /**
+     * The ID of the statement this engine's session ran last, a failed one included: what LAST_QUERY_ID() answers.
+     *
+     * @return the ID, or null before any statement
+     */
+    public String lastQueryId() {
+        return queryExecutor.getResultCache().getLastQueryId();
     }
 
     public Catalog getCatalog() {
@@ -1854,6 +1884,17 @@ public class DatabaseEngine {
         if (user == null) {
             return;
         }
+        dropRolesTheUserMayNotUse();
+        catalog.useSecondaryRoles(user.getDefaultSecondaryRoles().contains("\"ALL\"")
+            ? null : Collections.singletonList("NONE"));
+    }
+
+    /**
+     * Puts down every role in force that the session's user may not use, the primary role included, which gives way to
+     * PUBLIC: what a switch of user does to the roles of the session in force - the engine's own, or a JDBC
+     * connection's while its statement runs (see {@link #setCurrentUser}).
+     */
+    public void dropRolesTheUserMayNotUse() {
         final String former = sessionContext.getCurrentRole();
         for (final String role : new ArrayList<>(sessionContext.getActiveRoles())) {
             if (!catalog.mayActivate(role)) {
@@ -1863,8 +1904,6 @@ public class DatabaseEngine {
         if (former != null && !catalog.mayActivate(former)) {
             sessionContext.setCurrentRole("PUBLIC");
         }
-        catalog.useSecondaryRoles(user.getDefaultSecondaryRoles().contains("\"ALL\"")
-            ? null : Collections.singletonList("NONE"));
     }
 
     /**

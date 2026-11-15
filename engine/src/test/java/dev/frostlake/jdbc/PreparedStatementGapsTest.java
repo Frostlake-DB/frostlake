@@ -59,7 +59,7 @@ public class PreparedStatementGapsTest extends BaseJdbcTest {
 
     @Test
     public void getMetaDataNullForDml() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "asserts the FROSTLAKE driver's own contract — Snowflake's JDBC driver returns a non-null "
             + "SnowflakeResultSetMetaDataV1 from PreparedStatement.getMetaData() even for an INSERT");
         statement.execute("CREATE TABLE dm (id INTEGER)");
@@ -70,7 +70,7 @@ public class PreparedStatementGapsTest extends BaseJdbcTest {
 
     @Test
     public void setCharacterStreamBindsText() throws SQLException {
-        Assumptions.assumeFalse(isLiveSnowflake(),
+        Assumptions.assumeFalse(isSnowflakeDriver(),
             "binds through PreparedStatement.setCharacterStream(int, Reader); Snowflake's own driver "
             + "throws SnowflakeLoggedFeatureNotSupportedException for that overload — it is a "
             + "Frostlake driver capability, not an account feature");

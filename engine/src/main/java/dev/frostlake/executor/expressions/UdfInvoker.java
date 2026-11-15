@@ -855,6 +855,10 @@ final class UdfInvoker {
                 }
             }
             final Object returned = queryExecutor.executeScriptingFunctionBody(function, bound);
+            if (function.getReturnType() instanceof VectorType) {
+                // A body that compiled answers no VECTOR, whatever it returns (live-verified).
+                throw new RuntimeException("Unsupported return type for Snowscript UDF: vector");
+            }
             // Snowflake casts the RETURNed value to the DECLARED return type: `RETURNS INT` over
             // `RETURN '7'` is 7, `RETURNS VARCHAR` over `RETURN 42` is the string '42', and
             // `RETURNS INT` over `RETURN 'abc'` fails "Numeric value 'abc' is not recognized".
@@ -969,16 +973,12 @@ final class UdfInvoker {
     }
 
     /**
-     * A scripting-block UDF may not RETURN a DECFLOAT, which is told on the call, in lower case; a function so
-     * declared is created without complaint (live-verified). A semi-structured return is refused at CREATE, and a
-     * restored function of that shape on its call. A DECFLOAT or a semi-structured PARAMETER is fine; only the
-     * return type is refused.
+     * A scripting-block UDF may not RETURN a semi-structured value: one is refused at CREATE, and a restored function
+     * of that shape on its call. A semi-structured PARAMETER is fine; only the return type is refused. A DECFLOAT
+     * return is answered as any other (live-verified).
      */
     private void rejectUnsupportedScriptingReturnType(final Function function) {
         final DataType returnType = function.getReturnType();
-        if (NumericType.isDecfloat(returnType)) {
-            throw new RuntimeException("Unsupported return type for Snowscript UDF: decfloat");
-        }
         if (returnType != null && returnType.getCategory() == TypeCategory.SEMI_STRUCTURED) {
             throw new RuntimeException("Unsupported return type for Snowscript UDF: "
                 + returnType.getName().toUpperCase(Locale.ROOT));

@@ -5,7 +5,8 @@
 driver's `jdbc:frostlake://host:port/db` transport. Nothing is authenticated — see [scope.md](scope.md).
 
 The same server also answers Snowflake's REST APIs for resource management under `/api/v2` — see
-[rest-api.md](rest-api.md).
+[rest-api.md](rest-api.md) — and the endpoints the Snowflake JDBC driver itself talks to, so that driver
+connects unchanged — see [The Snowflake JDBC driver](#the-snowflake-jdbc-driver).
 
 ## `POST /api/execute`
 
@@ -347,6 +348,135 @@ can ignore the field.
 ## `GET /api/health`
 
 200 with `"status": "healthy"` while the server is up.
+
+## The Snowflake JDBC driver
+
+The Snowflake JDBC driver (`net.snowflake:snowflake-jdbc`) connects to this server as it is, by the server's
+address:
+
+```
+jdbc:snowflake://127.0.0.1:18082/?account=frostlake&ssl=off
+```
+
+`ssl=off` (or writing the scheme, `jdbc:snowflake://http://127.0.0.1:18082/?account=frostlake`) keeps the driver
+on plain HTTP. The account is any name: the driver requires one, and with no `account` it takes the host's first
+part. Any user and password log in, as nothing here is authenticated. `db`, `schema`, `role` and `warehouse` are
+set as a USE sets them, and the session parameters the connection carries (`TIMEZONE`, the output formats, …) as
+ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its cloud-metadata lookups at connect.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /session/v1/login-request` | Opens a session; its token is the session's id. Answers the session parameters the driver renders values by: the output formats and the zone - the session's own, else the account's (UTC here) - the account's flags for reading dates and timestamps in that zone, and its result size limits (128 MB), which `getMaxCharLiteralLength` and `getMaxFieldSize` answer. |
+| `POST /queries/v1/query-request` | Runs a statement in the session the token names, its bindings written in, and answers its result: each column's type, and the rows as an Arrow stream (a query's) or as JSON cells in the driver's internal form. A refusal carries its SQLSTATE and vendor code. |
+| `GET /queries/{id}/result` | One statement's result of a text of several (the driver asks for those with `MULTI_STATEMENT_COUNT`). |
+| `GET /monitoring/queries/{id}` | A query's status, read from the query history: RUNNING, SUCCESS, or FAILED_WITH_ERROR with its error (the driver's `getQueryStatus`, and what an asynchronous statement and a statement of several are followed by). |
+| `POST /queries/v1/abort-request` | Cancels the session's running statement (`Statement.cancel()`). |
+| `POST /session?delete=true` | Ends the session. |
+| `POST /session/heartbeat`, `POST /session/token-request` | Keep the session and renew its token. |
+| `POST /telemetry/send` | Accepted and dropped. |
+
+A query's rows come as Arrow (`rowsetBase64`), the account's default, unless the session sets
+`JDBC_QUERY_RESULT_FORMAT = 'JSON'`; then as JSON. Every other answer comes as a JSON `rowset`, as the account sends
+it: a status, a DML statement's counts, a SHOW, a DESCRIBE, an EXPLAIN, a CALL's or a block's answer, and each
+result of a text of several. A DML answer that changed rows carries them in `stats` (`numRowsInserted`,
+`numRowsDeleted`, `numRowsUpdated`, `numDmlDuplicates`); Snowflake's Python connector reads a DML statement's
+`rowcount` from that JSON rowset. Each Arrow column is the vector the driver's reader takes for its
+type - a whole or fixed-point number as 64-bit integers, or 128-bit decimals for a batch holding a number past them
+(so every whole number of that batch reads as a `BigDecimal`, as on the account), a TIMESTAMP as seconds and
+nanoseconds, a DECFLOAT as its significand and exponent - so the driver's getters answer as against the account: a
+FLOAT's `getString` is Java's text of the double on Arrow, its SQL text (`0.3`) on JSON. A result holding a GEOGRAPHY
+or a GEOMETRY comes as JSON. Reading Arrow, the driver needs `--add-opens=java.base/java.nio=ALL-UNNAMED` on JDK 16
+and later, as it does against the account; a client without it connects with `JDBC_QUERY_RESULT_FORMAT=JSON` among its
+properties, or sets it with ALTER SESSION.
+
+A describe-only request (what the driver sends for a prepared statement's
+`getMetaData()` before it runs, or for a batch) answers the statement's columns without running it: a query, a SHOW
+or a DESCRIBE is compiled over no rows, each placeholder read as a one-character text (so `SELECT ? AS p` is a
+VARCHAR(1) and `?::DATE` a DATE); an INSERT, UPDATE, DELETE or MERGE answers the counts it reports; ALTER SESSION
+answers no column and other statements a `status` text. Every placeholder is described as a text, and a statement
+that does not compile is refused at the describe, as on the account.
+
+A batch of an `INSERT … VALUES` is bound as arrays and runs as one statement: all of its rows go in or none do, a
+value no column takes refused as the INSERT refuses it (`DML operation to table T failed on column X with error: …`),
+and a bind that is not a whole value of the first VALUES row - `(? + 1)`, or a bind in a later row - is refused where
+it stands, `Bind variable ? not set.`. The batch of any other statement runs row by row, as against the account.
+
+PUT and GET are carried out by the driver itself: the server answers the statement with the transfer - the files, and
+the stage's own directory on this machine as the driver's local-filesystem stage type - so the driver writes a PUT's
+files into the directory the engine stages them in, compressed as it compresses them, copies a GET's files out of it,
+and builds the result rows itself, as it does against the account, the account's `encryption` column among them. The
+client and the server have to share one file system. The files move unencrypted, so the driver leaves `encryption`
+empty where the account's reads `ENCRYPTED` (PUT) or `DECRYPTED` (GET); and as against a local stage, the driver skips
+a GET whose local copy already matches, and names a stage file that other names continue (`dir` beside `dir/g`) by its
+place in the stage's directory.
+
+Each answer carries the statement type the driver tells a result set from an update count by, so `execute()` answers
+as against the account: rows for a query, SHOW, DESCRIBE, CALL, LIST, GET, PUT and REMOVE, an update count for DML,
+COPY and every other statement. An EXECUTE IMMEDIATE answers as the statement its text ran, and one of several
+statements, in a request that allows several, hands back each statement's answer; a `->>` chain answers as its last
+statement. `setMaxRows` bounds the rows a statement hands back, as the driver asks for them with each statement.
+
+`executeAsyncQuery` is answered at once with the query ID the statement runs under (code 333334); the statement runs
+on the server, and the driver follows it by its ID - `getQueryStatus`, and reading the result set, which waits for the
+statement and reads its rows with RESULT_SCAN. `createResultSet(queryId)` reads an earlier query's rows the same way.
+The session's other requests wait for an asynchronous statement, as each request of a session waits for the one
+before.
+
+A VECTOR column is described with its dimension and its element type, and comes as its elements: on Arrow a list of
+32-bit floats or integers, which `getString` reads as `[1.5,2.0]` and `getArray` as a FLOAT or INTEGER array; on JSON
+as its text, `[1.500000,2.000000]`. An interval column is described with its fields (the scale) and the digits of its
+leading field and fraction (the precision), and comes as its months or nanoseconds, on Arrow in the width its type is
+stored in: an interval stored in 64 bits or fewer reads as a `java.time.Period` or `Duration`, a wider day-time one
+(`INTERVAL DAY TO SECOND`) as its nanoseconds, as on the account. A structured ARRAY, OBJECT or MAP is described and
+read as the semi-structured value it holds - a MAP as an OBJECT - as the account answers a driver. A semi-structured
+value is laid out at the session's JSON_INDENT, the account's 2 while the session sets none (Frostlake's own
+transports lay values out compact by default).
+
+### A server in a test JVM
+
+Port 0 - `http.port=0`, or `new DatabaseHttpServer(0)` - takes a free port, which `getPort()` reports, so servers in
+parallel test forks never collide. A server can also serve the engine `jdbc:frostlake:direct:<name>` connections
+share, so the Snowflake driver's connections and the direct ones read and write one database:
+
+```java
+EngineConfig config = new EngineConfig();
+config.setProperty(EngineConfig.PROP_HTTP_PORT, "0");
+DatabaseHttpServer server = new DatabaseHttpServer(config, DatabaseDriver.directEngine("mydb"));
+server.start();
+String url = "jdbc:snowflake://127.0.0.1:" + server.getPort() + "/?account=frostlake&ssl=off";
+```
+
+Each session stays its own - its role, database and schema, and its transaction, which the other connections do not
+read before COMMIT. Every request then runs alone on the engine, as a direct connection's statement does, and a
+statement waiting for another session's table lock lets the other transport's statements run meanwhile. `stop()` rolls
+back what the server's sessions left open and leaves the engine to its direct connections.
+
+`dev.frostlake.http.SnowflakeEndpoint` does all of that in one call - a free port of 127.0.0.1, plain HTTP, and the
+URL:
+
+```java
+try (SnowflakeEndpoint endpoint = SnowflakeEndpoint.start("mydb")) {   // the engine of jdbc:frostlake:direct:mydb
+    Connection connection = DriverManager.getConnection(endpoint.jdbcUrl(), "any", "any");
+    ...
+}
+```
+
+`jdbcUrl()` is `jdbc:snowflake://127.0.0.1:<port>/?account=frostlake&ssl=off&disablePlatformDetection=true`.
+`start(EngineConfig)` runs an engine of its own on that configuration's settings instead, and `start(DatabaseEngine)`
+serves any engine already running in the JVM. `close()` stops the server; a direct name's engine stays with its name.
+
+### HTTPS
+
+`http.tls.port` opens an HTTPS listener beside the plain one, serving every endpoint the plain one serves, with the
+key and the certificate of the keystore `http.tls.keystore` names (`http.tls.keystorePassword`,
+`http.tls.keystoreType`, PKCS12 by default). The Snowflake driver then connects without `ssl=off`:
+
+```
+jdbc:snowflake://127.0.0.1:18443/?account=frostlake&disableOCSPChecks=true
+```
+
+The driver checks the certificate against the JVM's trust store (`-Djavax.net.ssl.trustStore=…`), and
+`disableOCSPChecks=true` spares it the revocation check a self-made certificate cannot answer.
 
 ## Staged files
 

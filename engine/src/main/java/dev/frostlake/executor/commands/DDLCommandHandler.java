@@ -34,6 +34,7 @@ import dev.frostlake.executor.StatementClock;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.CreationGrants;
 import dev.frostlake.metastore.DroppedObject;
+import dev.frostlake.metastore.DroppedSessionTable;
 import dev.frostlake.metastore.FutureGrants;
 import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.MaterializedViewValidity;
@@ -41,6 +42,7 @@ import dev.frostlake.metastore.NameTakenException;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SqlObject;
+import dev.frostlake.metastore.StatementSession;
 import dev.frostlake.metastore.StreamSources;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.model.ContainerType;
@@ -217,8 +219,13 @@ public class DDLCommandHandler implements CommandHandler {
             // Live-verified Snowflake rejection, for every object type.
             throw new RuntimeException("options IF NOT EXISTS and OR REPLACE are incompatible.");
         }
-        // A table's properties are judged first of all: before its name, and before an Iceberg table's column types.
-        if (ctx.TABLE() != null && ctx.DYNAMIC() == null && ctx.EVENT() == null && ctx.STREAM() == null) {
+        // A template's query must read a table function, which is judged ahead of the properties (live-verified).
+        if (ctx.TABLE() != null && ctx.TEMPLATE() != null) {
+            CreateTableHandler.requireTemplateTableFunction(ctx);
+        }
+        // A table's properties are judged first of all: before its name, and before an Iceberg table's column types;
+        // an event table's too.
+        if (ctx.TABLE() != null && ctx.DYNAMIC() == null && ctx.STREAM() == null) {
             CreatedObjectProperties.requireTableProperties(ctx);
         }
         // An Iceberg table's column types are judged before anything else the statement names (live-verified).
@@ -230,6 +237,9 @@ public class DDLCommandHandler implements CommandHandler {
         try {
             if (ctx.ALERT() != null) {
                 return new AlertCommandHandler(queryExecutor).create(ctx, ifNotExists);
+            }
+            if (ctx.DBT() != null) {
+                return new DbtProjects(catalog, queryExecutor).create(ctx);
             }
             if (ctx.DATABASE() != null) {
                 return namespaceHandler.handleCreateDatabase(ctx, ifNotExists);
@@ -248,6 +258,9 @@ public class DDLCommandHandler implements CommandHandler {
                 return relationalHandler.handleCreateView(ctx, ifNotExists);
             } else if (ctx.VIEW() != null && ctx.MATERIALIZED() != null) {
                 return relationalHandler.handleCreateMaterializedView(ctx, ifNotExists);
+            } else if (ctx.CLONE() != null && (ctx.TASK() != null || ctx.STAGE() != null
+                    || ctx.FILE() != null && ctx.FORMAT() != null)) {
+                return infraHandler.handleCloneSchemaObject(ctx, ifNotExists);
             } else if (ctx.TASK() != null) {
                 return infraHandler.handleCreateTask(ctx, ifNotExists);
             } else if (ctx.PIPE() != null) {
@@ -278,6 +291,10 @@ public class DDLCommandHandler implements CommandHandler {
                 return securityHandler.handleCreateAggregationPolicy(ctx, ifNotExists);
             } else if (ctx.JOIN() != null && ctx.POLICY() != null) {
                 return securityHandler.handleCreateJoinPolicy(ctx, ifNotExists);
+            } else if (ctx.PRIVACY() != null && ctx.POLICY() != null) {
+                return securityHandler.handleCreatePrivacyPolicy(ctx, ifNotExists);
+            } else if (ctx.lifecycle != null && ctx.POLICY() != null) {
+                return securityHandler.handleCreateStorageLifecyclePolicy(ctx, ifNotExists);
             } else if (ctx.FUNCTION() != null && ctx.EXTERNAL() != null) {
                 return routineHandler.handleCreateExternalFunction(ctx);
             } else if (ctx.FUNCTION() != null) {
@@ -373,6 +390,26 @@ public class DDLCommandHandler implements CommandHandler {
      * CREATE STREAM … CLONE: a new stream with the source stream's definition — its source object, its mode
      * and its comment — that inherits the source's current offset, so it holds the same pending changes.
      */
+    /**
+     * The source of a stream clone: one the session does not see is refused as a stream that is not there, and the
+     * clone needs OWNERSHIP of it (documented: "Alerts, Pipes, Streams, Tasks: OWNERSHIP").
+     *
+     * @param source  the stream cloned
+     * @param written its name as the statement wrote it
+     */
+    private void requireOwnedStreamSource(final Stream source, final String written) {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        final Schema home = StreamSources.homeOf(catalog, source);
+        if (security == null || home == null) {
+            return;
+        }
+        final String recorded = home.qualifiedName(source.getName());
+        if (!security.sees("STREAM", recorded, source.getOwner())) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Stream", written));
+        }
+        queryExecutor.requireOwnership("STREAM", QualifiedName.parse(recorded).parts(), null);
+    }
+
     private Object handleCloneStream(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         final String streamQualifiedName = getText(ctx.qualifiedName(0));
         // The name as the parse tree canonicalises it: unquoted folds to upper case, a quoted name keeps its own.
@@ -382,6 +419,7 @@ public class DDLCommandHandler implements CommandHandler {
         if (source == null) {
             throw new RuntimeException(SqlCompilationError.doesNotExist("Stream", sourceQualifiedName));
         }
+        requireOwnedStreamSource(source, sourceQualifiedName);
         try {
             final Schema schema = resolveSchemaFromQualifiedName(streamQualifiedName);
             schema.rejectNameHeldByOtherKind(streamName, RelationKind.STREAM, false);
@@ -1033,8 +1071,8 @@ public class DDLCommandHandler implements CommandHandler {
                 mv.setComment(AlteredViewProperties.commentOf(action.viewSetItem()));
                 logger.trace("Set comment on materialized view: {}", qualifiedName);
             }
-        } else if (!action.optionKey().isEmpty()) {
-            if (AlteredViewProperties.judgeUnset(action.optionKey(),
+        } else if (!action.propertyName().isEmpty()) {
+            if (AlteredViewProperties.judgeUnset(action.propertyName(),
                     action.COMMA().isEmpty() ? null : action.COMMA(0).getSymbol(), true, mv.getName(),
                     getOriginalText(ctx))) {
                 mv.setComment(null);
@@ -1205,7 +1243,7 @@ public class DDLCommandHandler implements CommandHandler {
     /** Whether an ALTER TABLE … SET names a parameter among its properties. */
     private static boolean setsTableParameter(final FrostlakeParser.TableActionContext action) {
         for (final FrostlakeParser.TableSetPropertyContext property : action.tableSetProperty()) {
-            if (ParameterRegistry.isTableParameter(ParameterRegistry.canonical(property.optionKey().getText()))) {
+            if (ParameterRegistry.isTableParameter(ParameterRegistry.canonical(property.propertyName().getText()))) {
                 return true;
             }
         }
@@ -1243,7 +1281,7 @@ public class DDLCommandHandler implements CommandHandler {
 
     /** Whether an UNSET names the COMMENT alone. */
     private static boolean unsetsCommentAlone(final FrostlakeParser.TableUnsetPropertiesContext unset) {
-        for (final FrostlakeParser.OptionKeyContext key : unset.optionKey()) {
+        for (final FrostlakeParser.PropertyNameContext key : unset.propertyName()) {
             if (!"COMMENT".equalsIgnoreCase(key.getText())) {
                 return false;
             }
@@ -1418,6 +1456,8 @@ public class DDLCommandHandler implements CommandHandler {
     private Object handleAlterSequence(final FrostlakeParser.AlterStatementContext ctx) {
         final String qualifiedName = getText(ctx.qualifiedName());
         final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+        // The names it sets or unsets are judged before the sequence is looked up (live-verified).
+        CreatedObjectProperties.judgeSequenceAlterNames(ctx.sequenceAction());
 
         final Schema schema;
         final Sequence sequence;
@@ -1436,11 +1476,14 @@ public class DDLCommandHandler implements CommandHandler {
             queryExecutor.requirePrivilege(Privilege.MODIFY, "SEQUENCE",
                 new String[] {schema.getDatabaseName(), schema.getName(), sequence.getName()}, null);
         }
+        if (CreatedObjectProperties.namesSequenceParameter(action)) {
+            throw new RuntimeException(SqlAccessControlError.insufficientPrivileges("sequence", sequence.getName()));
+        }
 
         if (action.RENAME() != null) {
             renameSequence(schema, sequence, qualifiedNameParts(action.qualifiedName()));
         } else if (action.UNSET() != null) {
-            if (action.COMMENT().size() > 1) {
+            if (action.propertyName().size() > 1) {
                 throw new RuntimeException(SqlCompilationError.of("duplicate property 'COMMENT';"));
             }
             sequence.setComment(null);
@@ -1470,11 +1513,13 @@ public class DDLCommandHandler implements CommandHandler {
             if (option.INCREMENT() != null && steps) {
                 throw new RuntimeException(SqlCompilationError.of("duplicate property 'SEQUENCE_INCREMENT';"));
             }
-            if (option.COMMENT() != null && comments) {
+            // A comment given as a word reads as a property named COMMENT, still the comment.
+            final boolean comment = option.COMMENT() != null || option.propertyName() != null;
+            if (comment && comments) {
                 throw new RuntimeException(SqlCompilationError.of("duplicate property 'COMMENT';"));
             }
             steps = steps || option.INCREMENT() != null;
-            comments = comments || option.COMMENT() != null;
+            comments = comments || comment;
         }
         for (final FrostlakeParser.SequenceAlterOptionContext option : options) {
             if (option.START() != null) {
@@ -1494,6 +1539,8 @@ public class DDLCommandHandler implements CommandHandler {
                 sequence.setIncrement(option.MINUS() != null ? -value : value);
             } else if (option.NOORDER() != null) {
                 sequence.setOrder(false);
+            } else if (option.propertyName() != null) {
+                sequence.setComment(option.copyOptionValue() != null ? option.copyOptionValue().getText() : null);
             } else if (option.COMMENT() != null) {
                 if (option.NULL() != null) {
                     sequence.setComment(null);
@@ -1692,6 +1739,13 @@ public class DDLCommandHandler implements CommandHandler {
                 throw new RuntimeException("Table " + tableName + " did not exist or was purged.");
             }
             final Table table = (Table) dropped.getObject();
+            if (table.isSessionTemporary() && schema.tableExact(tableName) != null) {
+                // A session's temporary table comes back only to a name no table holds, a permanent one it hid
+                // included, as any table does (live-verified): the dropped version stays for a later UNDROP.
+                catalog.recordDropped("TABLE:" + fqName, dropped);
+                throw new RuntimeException(SqlCompilationError.of(
+                    "Object '" + SqlIdentifiers.spellCanonical(tableName) + "' already exists."));
+            }
             try {
                 schema.addTable(table);
             } catch (final RuntimeException taken) {
@@ -1831,9 +1885,11 @@ public class DDLCommandHandler implements CommandHandler {
                 if (storage.hasTable(fqn)) {
                     continue;
                 }
-                // Each table's storage that waited with the version comes back, its time-travel history with it.
+                // Each table's storage that waited with the version comes back, its time-travel history with it, and so
+                // do the changes of a transaction still open that wrote it.
                 final String kept = dropped.keptStorageOf(fqn);
                 if (kept != null && storage.restoreRetired(kept, fqn)) {
+                    queryExecutor.getTransactionManager().tablesMoved(Collections.singletonMap(kept, fqn));
                     continue;
                 }
                 storage.createTable(fqn, table);
@@ -1849,6 +1905,29 @@ public class DDLCommandHandler implements CommandHandler {
                 refill(storage.getShadowedTableStorage(fqn), hidden,
                     dropped.getHiddenTableRows() == null ? null : dropped.getHiddenTableRows().get(fqn));
             }
+            restoreOwnSessionTables(databaseName, schema, dropped);
+        }
+    }
+
+    /**
+     * Bring the session's own temporary tables that waited with an UNDROPped schema or database back into it, rows and
+     * all, where the session that dropped them restores it: no other session reaches them (live-verified: a session's
+     * temporary table is back after DROP SCHEMA and UNDROP SCHEMA).
+     */
+    private void restoreOwnSessionTables(final String databaseName, final Schema schema,
+                                         final DroppedObject dropped) {
+        final Long session = StatementSession.current();
+        if (session == null) {
+            return;
+        }
+        for (final DroppedSessionTable aside : dropped.getSessionTables()) {
+            if (!aside.getSchemaName().equals(schema.getName())
+                    || !session.equals(aside.getTable().getCreatedInSession())) {
+                continue;
+            }
+            schema.addTable(aside.getTable());
+            queryExecutor.getStorageEngine().restoreOwnSessionTable(
+                QualifiedName.key(databaseName, schema.getName(), aside.getTable().getName()), aside.getStorage());
         }
     }
 
@@ -2057,11 +2136,67 @@ public class DDLCommandHandler implements CommandHandler {
             if (source == null) {
                 continue;
             }
-            final List<Row> rows = version == null ? source.scan() : version.getRows();
-            for (final Row row : rows) {
-                storage.getTableStorage(tgtKey).insert(new Row(new ArrayList<>(row.getValues())));
+            final List<Long> ids = new ArrayList<>();
+            final List<Row> rows = version == null ? source.scanWithIds(ids) : version.getRows();
+            // Each row keeps its source identity (see TableStorage#insertCloned).
+            storage.getTableStorage(tgtKey).insertCloned(rows, version == null ? ids : version.getRowIds());
+        }
+        if (point != null) {
+            cloneDroppedTables(sourceDb, sourceSchema, tgt, targetDb, targetSchema, point);
+        }
+    }
+
+    /**
+     * The tables that stood in a schema at a clone's point but were dropped or replaced since, cloned as they stood
+     * then: each from the newest of its dropped versions that stood at the point, its rows read at the point from the
+     * history that version keeps, else the rows it held when dropped. A table of the name the clone already holds - one
+     * that stood at the point and stands still - is not displaced.
+     */
+    private void cloneDroppedTables(final String sourceDb, final String sourceSchema, final Schema tgt,
+                                    final String targetDb, final String targetSchema, final ClonePoint point) {
+        final StorageEngine storage = queryExecutor.getStorageEngine();
+        for (final Map.Entry<String, List<DroppedObject>> entry : catalog.droppedVersions().entrySet()) {
+            if (!entry.getKey().startsWith("TABLE:")) {
+                continue;
+            }
+            final String fqn = entry.getKey().substring("TABLE:".length());
+            final String[] parts = QualifiedName.parse(fqn).parts();
+            if (parts.length != 3 || !parts[0].equals(sourceDb) || !parts[1].equals(sourceSchema)) {
+                continue;
+            }
+            for (int i = entry.getValue().size() - 1; i >= 0; i--) {
+                final DroppedObject version = entry.getValue().get(i);
+                if (!(version.getObject() instanceof Table)) {
+                    continue;
+                }
+                final Table dropped = (Table) version.getObject();
+                if (dropped.isTemporary() || createdAfter(dropped, point) || !droppedAfter(version, point)
+                        || tgt.hasTable(dropped.getName())) {
+                    continue;
+                }
+                final Table copy = dropped.copyAs(dropped.getName(), false, dropped.isTransient());
+                copy.setOwner(dropped.getOwner());
+                tgt.addTable(copy);
+                final String tgtKey = QualifiedName.key(targetDb, targetSchema, copy.getName());
+                storage.createTable(tgtKey, copy);
+                final String kept = version.getStorageSetAside() != null ? version.getStorageSetAside()
+                    : version.keptStorageOf(fqn);
+                final TableStorage history = kept == null ? null : storage.retiredStorage(kept);
+                final TableVersion atPoint = history != null
+                    ? queryExecutor.versionAtClonePoint(dropped, history, point) : null;
+                final List<Row> rows = atPoint != null ? atPoint.getRows() : version.getRows();
+                if (rows != null) {
+                    storage.getTableStorage(tgtKey).insertCloned(rows, atPoint != null ? atPoint.getRowIds() : null);
+                }
+                break;
             }
         }
+    }
+
+    /** Whether a dropped version still stood at a clone's point: it was dropped only after the point. */
+    private static boolean droppedAfter(final DroppedObject version, final ClonePoint point) {
+        final long dropped = version.getDroppedOn().toEpochMilli();
+        return point.isBefore() ? dropped >= point.millis() : dropped > point.millis();
     }
 
     /**

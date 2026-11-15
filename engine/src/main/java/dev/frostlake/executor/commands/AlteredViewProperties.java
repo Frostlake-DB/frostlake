@@ -47,6 +47,8 @@ import java.util.Set;
  *   SET COMMENT = 5              invalid value [5] for parameter 'COMMENT'
  *   SET CHANGE_TRACKING = NULL   invalid value 'null' for property 'CHANGE_TRACKING'
  *   SET TIMEZONE = 'UTC'         Insufficient privileges to operate on view 'V0'.  any parameter, set or unset
+ *   SET COMMENT = 'k' TIMEZONE = 'UTC'   cannot set parameter 'TIMEZONE' at 'TABLE': beside the comment alone a
+ *                                parameter is judged as a table's, one of a table's level taken and passed over
  * </pre>
  *
  * A value that is a reserved word ({@code SET COMMENT = ON}) is a syntax error at the list's first name, as an item
@@ -75,13 +77,13 @@ final class AlteredViewProperties {
         for (final FrostlakeParser.ViewSetItemContext item : items) {
             if (item.copyOptionValue() == null && item.NULL() == null) {
                 final boolean secureFirst = !hasValue(items.get(0)) && items.size() > 1
-                    && "SECURE".equalsIgnoreCase(items.get(0).optionKey().getText());
+                    && "SECURE".equalsIgnoreCase(items.get(0).propertyName().getText());
                 throw syntaxError(items.get(secureFirst ? 1 : 0).getStart(), sql);
             }
         }
         final List<String> names = new ArrayList<String>();
         for (final FrostlakeParser.ViewSetItemContext item : items) {
-            names.add(item.optionKey().getText());
+            names.add(item.propertyName().getText());
         }
         if (!materialized) {
             rejectDuplicates(names);
@@ -155,8 +157,8 @@ final class AlteredViewProperties {
      * @param keys the names, judged
      * @return whether one of them is CHANGE_TRACKING
      */
-    static boolean unsetsChangeTracking(final List<FrostlakeParser.OptionKeyContext> keys) {
-        for (final FrostlakeParser.OptionKeyContext key : keys) {
+    static boolean unsetsChangeTracking(final List<FrostlakeParser.PropertyNameContext> keys) {
+        for (final FrostlakeParser.PropertyNameContext key : keys) {
             if (CHANGE_TRACKING.equals(ParameterRegistry.canonical(key.getText()))) {
                 return true;
             }
@@ -168,7 +170,7 @@ final class AlteredViewProperties {
                                                                final String key) {
         FrostlakeParser.ViewSetItemContext last = null;
         for (final FrostlakeParser.ViewSetItemContext item : items) {
-            if (key.equals(ParameterRegistry.canonical(item.optionKey().getText()))) {
+            if (key.equals(ParameterRegistry.canonical(item.propertyName().getText()))) {
                 last = item;
             }
         }
@@ -190,10 +192,10 @@ final class AlteredViewProperties {
      * @param sql          the statement, for a syntax error
      * @return whether the comment is unset
      */
-    static boolean judgeUnset(final List<FrostlakeParser.OptionKeyContext> keys, final Token firstComma,
+    static boolean judgeUnset(final List<FrostlakeParser.PropertyNameContext> keys, final Token firstComma,
                               final boolean materialized, final String name, final String sql) {
         final List<String> names = new ArrayList<String>();
-        for (final FrostlakeParser.OptionKeyContext key : keys) {
+        for (final FrostlakeParser.PropertyNameContext key : keys) {
             names.add(key.getText());
         }
         if (firstComma != null && "SECURE".equalsIgnoreCase(names.get(0)) && !names.get(0).startsWith("\"")) {
@@ -233,16 +235,42 @@ final class AlteredViewProperties {
         }
     }
 
-    /** A parameter is no view's to set: the statement is refused as one the role may not run on it. */
+    /**
+     * A parameter is no view's to set: the statement is refused as one the role may not run on it. Beside the comment
+     * alone a parameter is judged as a table's instead: one of a table's level is taken and passed over, any other is
+     * refused in CREATE's words at 'TABLE' (live-verified).
+     */
     private static void rejectParameters(final List<String> names, final List<Integer> order,
                                          final boolean materialized, final String name) {
+        final boolean commentChange = isCommentChange(names, materialized);
         for (final Integer i : order) {
             final String key = ParameterRegistry.canonical(names.get(i));
-            if (!isProperty(key, materialized)) {
-                throw new RuntimeException(SqlAccessControlError.insufficientPrivileges(
-                    materialized ? "materialized_view" : "view", name));
+            if (isProperty(key, materialized)) {
+                continue;
+            }
+            if (commentChange) {
+                if (ParameterRegistry.isTableParameter(key)) {
+                    continue;
+                }
+                throw new RuntimeException(SqlCompilationError.of("cannot set parameter '" + key + "' at 'TABLE'"));
+            }
+            throw new RuntimeException(SqlAccessControlError.insufficientPrivileges(
+                materialized ? "materialized_view" : "view", name));
+        }
+    }
+
+    /** Whether the names set or unset the comment beside nothing but parameters. */
+    private static boolean isCommentChange(final List<String> names, final boolean materialized) {
+        boolean comment = false;
+        for (final String written : names) {
+            final String key = ParameterRegistry.canonical(written);
+            if (COMMENT.equals(key)) {
+                comment = true;
+            } else if (isProperty(key, materialized)) {
+                return false;
             }
         }
+        return comment;
     }
 
     private static boolean isProperty(final String key, final boolean materialized) {
@@ -268,8 +296,8 @@ final class AlteredViewProperties {
      * @param keys the names, judged
      * @return whether one of them is DATA_METRIC_SCHEDULE
      */
-    static boolean unsetsDataMetricSchedule(final List<FrostlakeParser.OptionKeyContext> keys) {
-        for (final FrostlakeParser.OptionKeyContext key : keys) {
+    static boolean unsetsDataMetricSchedule(final List<FrostlakeParser.PropertyNameContext> keys) {
+        for (final FrostlakeParser.PropertyNameContext key : keys) {
             if (DATA_METRIC_SCHEDULE.equals(ParameterRegistry.canonical(key.getText()))) {
                 return true;
             }

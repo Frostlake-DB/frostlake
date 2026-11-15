@@ -22,6 +22,7 @@ import dev.frostlake.executor.commands.AccessControlHandler;
 import dev.frostlake.executor.commands.AlertCommandHandler;
 import dev.frostlake.executor.commands.AlterCommandHandler;
 import dev.frostlake.executor.commands.AppObjectCommandHandler;
+import dev.frostlake.executor.commands.ApplyPrivileges;
 import dev.frostlake.executor.commands.BeginEndBlockHandler;
 import dev.frostlake.executor.commands.BoundPropertyVariable;
 import dev.frostlake.executor.commands.ColumnDefinitionParser;
@@ -31,11 +32,13 @@ import dev.frostlake.executor.commands.CreateNamespaceHandler;
 import dev.frostlake.executor.commands.DDLCommandHandler;
 import dev.frostlake.executor.commands.DMLCommandHandler;
 import dev.frostlake.executor.commands.DataTypeParser;
+import dev.frostlake.executor.commands.DbtProjects;
 import dev.frostlake.executor.commands.DynamicTableProperties;
 import dev.frostlake.executor.commands.ExternalVolumeCommandHandler;
 import dev.frostlake.executor.commands.GrantRevokeHandler;
 import dev.frostlake.executor.commands.IntegrationCommandHandler;
 import dev.frostlake.executor.commands.LoopControlPlacement;
+import dev.frostlake.executor.commands.ManualRunPrivileges;
 import dev.frostlake.executor.commands.PropertyVariables;
 import dev.frostlake.executor.commands.QueryCommandHandler;
 import dev.frostlake.executor.commands.SecurityObjectCommandHandler;
@@ -74,6 +77,7 @@ import dev.frostlake.functions.SystemFunctionArity;
 import dev.frostlake.functions.window.WindowFunctionNames;
 import dev.frostlake.jdbc.JdbcMarshaling;
 import dev.frostlake.metastore.Catalog;
+import dev.frostlake.metastore.HiddenDatabases;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.QueryHistory;
@@ -98,6 +102,7 @@ import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.IntoListLookahead;
 import dev.frostlake.parser.LimitValueSyntax;
+import dev.frostlake.parser.OverlayPlacingLines;
 import dev.frostlake.parser.PositionNeedleSyntax;
 import dev.frostlake.parser.PostParseRefusals;
 import dev.frostlake.parser.RoutineArgumentOrder;
@@ -259,6 +264,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         // Every statement is named for the refusal a session with no current database gets.
         final String enclosingKind = NoCurrentDatabaseRefusal.enter(StatementKindText.of(ctx));
         try {
+            DoubledSigns.rejectAheadOfCaret(ctx);
             CaretOperator.rejectInStatement(ctx);
             DoubledSigns.rejectInStatement(ctx);
             FromClauseProcedureJobs.require(ctx, procedureDepth > 0);
@@ -275,7 +281,18 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 SideEffectFunctions.rejectInCreate(ctx);
                 rejectWhileTransactionAborted(ctx);
                 CompiledTransactionAborts.carryOut(ctx, queryExecutor);
-                return visitChildren(ctx);
+                // A database the statement names but does not see is missing to it (see WrittenDatabases); a
+                // statement it runs in turn keeps its outermost statement's.
+                final boolean names = !HiddenDatabases.installed();
+                final Set<String> displaced = names
+                    ? HiddenDatabases.begin(WrittenDatabases.hiddenIn(ctx, queryExecutor)) : null;
+                try {
+                    return visitChildren(ctx);
+                } finally {
+                    if (names) {
+                        HiddenDatabases.end(displaced);
+                    }
+                }
             } finally {
                 PropertyVariables.unbind(boundVariables);
             }
@@ -467,9 +484,34 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * <p>Checked once per statement over the whole parse tree rather than in each DDL handler, because
      * {@code tagList} hangs off five different rules (table tail options, column constraints, views and
      * materialized views). A value outside the tag's ALLOWED_VALUES is refused here too, before anything
-     * is created (live-verified).
+     * is created (live-verified), and so is a tag the session may not apply.
      */
     private void rejectUnknownTagReferences(final ParseTree node) {
+        // A policy attached as the object is made asks APPLY on it, as the ALTER forms do: a masking or a projection
+        // policy in a column definition, a view column's clause or ADD COLUMN, WITH ROW ACCESS POLICY, and an
+        // aggregation or a join policy (see ApplyPrivileges).
+        if (node instanceof FrostlakeParser.ColumnConstraintContext
+                && ((FrostlakeParser.ColumnConstraintContext) node).qualifiedName() != null) {
+            final FrostlakeParser.ColumnConstraintContext constraint = (FrostlakeParser.ColumnConstraintContext) node;
+            if (constraint.MASKING() != null) {
+                requireApplyAttachedPolicy("MASKING_POLICY", constraint.qualifiedName());
+            } else if (constraint.PROJECTION() != null) {
+                requireApplyAttachedPolicy("PROJECTION_POLICY", constraint.qualifiedName());
+            }
+        } else if (node instanceof FrostlakeParser.ViewColumnClauseContext
+                && ((FrostlakeParser.ViewColumnClauseContext) node).qualifiedName() != null) {
+            final FrostlakeParser.ViewColumnClauseContext clause = (FrostlakeParser.ViewColumnClauseContext) node;
+            requireApplyAttachedPolicy(clause.MASKING() != null ? "MASKING_POLICY" : "PROJECTION_POLICY",
+                clause.qualifiedName());
+        } else if (node instanceof FrostlakeParser.RowAccessPolicyClauseContext) {
+            requireApplyAttachedPolicy("ROW_ACCESS_POLICY",
+                ((FrostlakeParser.RowAccessPolicyClauseContext) node).qualifiedName());
+        } else if (node instanceof FrostlakeParser.AggregationPolicyClauseContext) {
+            requireApplyAttachedPolicy("AGGREGATION_POLICY",
+                ((FrostlakeParser.AggregationPolicyClauseContext) node).qualifiedName());
+        } else if (node instanceof FrostlakeParser.JoinPolicyClauseContext) {
+            requireApplyAttachedPolicy("JOIN_POLICY", ((FrostlakeParser.JoinPolicyClauseContext) node).qualifiedName());
+        }
         if (node instanceof FrostlakeParser.TagListContext) {
             final FrostlakeParser.TagListContext tags = (FrostlakeParser.TagListContext) node;
             for (final FrostlakeParser.TagAssignmentContext assignment : tags.tagAssignment()) {
@@ -478,6 +520,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     throw new RuntimeException(SqlCompilationError.doesNotExistAsSpelled("Tag", tagName.toUpperCase(Locale.ROOT)));
                 }
                 if (catalog != null) {
+                    // Setting a tag as the object is created asks APPLY on it as SET TAG does (see ApplyPrivileges).
+                    ApplyPrivileges.require(queryExecutor, Privilege.APPLY_TAG, "TAG",
+                        catalog.qualifiedExactName(tagName), catalog.getTagExact(tagName).getOwner());
                     // ALLOWED_VALUES is judged before the object is created, as live does.
                     TagValues.requireAllowed(catalog.getTagExact(tagName),
                         TagValues.text(assignment.qualifiedName(), assignment.tagValue(), queryExecutor));
@@ -486,6 +531,62 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             rejectUnknownTagReferences(node.getChild(i));
+        }
+    }
+
+    /**
+     * Refuses a policy an object being made attaches when the session may not apply it: the account's APPLY privilege
+     * for the policy's kind, or APPLY on the policy. A policy that is not there is left to the statement, which refuses
+     * it.
+     *
+     * @param kind the policy's kind: MASKING_POLICY, ROW_ACCESS_POLICY, PROJECTION_POLICY, AGGREGATION_POLICY or
+     *             JOIN_POLICY
+     * @param name the policy's name as written
+     */
+    private void requireApplyAttachedPolicy(final String kind, final FrostlakeParser.QualifiedNameContext name) {
+        if (catalog == null || name == null) {
+            return;
+        }
+        final String fullName;
+        final String owner;
+        try {
+            fullName = catalog.qualifiedExactName(getText(name));
+            owner = attachedPolicyOwner(kind, fullName);
+        } catch (final RuntimeException missing) {
+            return;
+        }
+        ApplyPrivileges.require(queryExecutor, applyOnAccount(kind), kind, fullName, owner);
+    }
+
+    /** The owner of a policy of a kind, by its name in full; a policy that is not there fails the lookup. */
+    private String attachedPolicyOwner(final String kind, final String fullName) {
+        switch (kind) {
+            case "MASKING_POLICY":
+                return catalog.findMaskingPolicyExact(fullName).getOwner();
+            case "ROW_ACCESS_POLICY":
+                return catalog.findRowAccessPolicyExact(fullName).getOwner();
+            case "PROJECTION_POLICY":
+                return catalog.findProjectionPolicyExact(fullName).getOwner();
+            case "AGGREGATION_POLICY":
+                return catalog.findAggregationPolicyExact(fullName).getOwner();
+            default:
+                return catalog.findJoinPolicy(fullName).getOwner();
+        }
+    }
+
+    /** The account privilege that applies every policy of a kind. */
+    private static Privilege applyOnAccount(final String kind) {
+        switch (kind) {
+            case "MASKING_POLICY":
+                return Privilege.APPLY_MASKING_POLICY;
+            case "ROW_ACCESS_POLICY":
+                return Privilege.APPLY_ROW_ACCESS_POLICY;
+            case "PROJECTION_POLICY":
+                return Privilege.APPLY_PROJECTION_POLICY;
+            case "AGGREGATION_POLICY":
+                return Privilege.APPLY_AGGREGATION_POLICY;
+            default:
+                return Privilege.APPLY_JOIN_POLICY;
         }
     }
 
@@ -501,7 +602,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 try {
                     return ddlHandler.handleCreateStatement(ctx);
                 } catch (final TableLockWait held) {
-                    waitingSince = waitingSince == 0L ? System.nanoTime() : waitingSince;
+                    // Each lock the statement meets is waited for LOCK_TIMEOUT on its own.
+                    waitingSince = System.nanoTime();
                     queryExecutor.awaitTableLock(held, waitingSince);
                 }
             }
@@ -643,7 +745,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     queryExecutor.executeTruncate(tableName, ifExists);
                     return null;
                 } catch (final TableLockWait held) {
-                    waitingSince = waitingSince == 0L ? System.nanoTime() : waitingSince;
+                    // Each lock the statement meets is waited for LOCK_TIMEOUT on its own.
+                    waitingSince = System.nanoTime();
                     queryExecutor.awaitTableLock(held, waitingSince);
                 }
             }
@@ -719,9 +822,17 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         if (ctx.ALERT() != null) {
             return new AlertCommandHandler(queryExecutor).execute(ctx.qualifiedName());
         }
+        if (ctx.DBT() != null) {
+            try {
+                return new DbtProjects(catalog, queryExecutor).execute(ctx.qualifiedName());
+            } catch (final RuntimeException refused) {
+                throw StatementErrors.propagate(refused);
+            }
+        }
         try {
             // EXECUTE TASK task_name
             final String taskName = getText(ctx.qualifiedName());
+            ManualRunPrivileges.requireTask(queryExecutor, ParseTreeText.qualifiedNameParts(ctx.qualifiedName()));
 
             if (taskScheduler == null) {
                 throw new RuntimeException("Task scheduler not initialized");
@@ -818,12 +929,22 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         // A statement refused for the names it writes is refused before the transaction is touched, and before
         // the scope is judged: its handler raises that refusal (see NamesJudgedFirst).
         final boolean namesFirst = ends && NamesJudgedFirst.refuses(ctx, queryExecutor);
-        if (ends && !namesFirst) {
+        final boolean windowKept = ends && !namesFirst;
+        if (windowKept) {
             // A block or a procedure may not end the transaction its caller began this way either.
             transactions.requireOwnScope();
+            // A CTAS reads its streams up to where the transaction began (see beginEndedTransactionWindow).
+            queryExecutor.beginEndedTransactionWindow(transactions.getCurrentTransaction().getStartSequence());
             transactions.commit();
         }
-        final Object answer = visitChildren(ctx);
+        final Object answer;
+        try {
+            answer = visitChildren(ctx);
+        } finally {
+            if (windowKept) {
+                queryExecutor.endEndedTransactionWindow();
+            }
+        }
         if (namesFirst && transactions.hasActiveTransaction()) {
             // The statement ran after all: it ends the transaction as any statement of its kind does.
             transactions.requireOwnScope();
@@ -941,7 +1062,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 } finally {
                     savepoint.end(completed);
                 }
-                waitingSince = waitingSince == 0L ? System.nanoTime() : waitingSince;
+                // Each lock the statement meets is waited for LOCK_TIMEOUT on its own.
+                waitingSince = System.nanoTime();
                 queryExecutor.awaitTableLock(held, waitingSince);
             }
         } finally {
@@ -998,7 +1120,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             try {
                 return queryHandler.handleQueryStatement(ctx);
             } catch (final TableLockWait held) {
-                waitingSince = waitingSince == 0L ? System.nanoTime() : waitingSince;
+                // Each lock the statement meets is waited for LOCK_TIMEOUT on its own.
+                waitingSince = System.nanoTime();
                 queryExecutor.awaitTableLock(held, waitingSince);
             }
         }
@@ -1180,10 +1303,19 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     proceduralExecutor.judgeBlockExpression(ctx.booleanExpr(),
                         parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()));
                 }
-                defaultValue = ctx.dataTypeName() != null
-                    ? declaredInitialValue(ctx.booleanExpr(), parseDeclaredType(ctx.dataTypeName(),
-                        ctx.typeParameters()))
-                    : evaluateExpression(ctx.booleanExpr());
+                // A value that calls a user-defined function or reads a query is a query of its own, which takes a
+                // query ID (see ProceduralExecutor#beginExpressionQuery).
+                final QueryHistory asQuery = proceduralExecutor.beginExpressionQuery(ctx.booleanExpr());
+                try {
+                    defaultValue = ctx.dataTypeName() != null
+                        ? declaredInitialValue(ctx.booleanExpr(), parseDeclaredType(ctx.dataTypeName(),
+                            ctx.typeParameters()))
+                        : evaluateExpression(ctx.booleanExpr());
+                } catch (final RuntimeException failed) {
+                    proceduralExecutor.failExpressionQuery(asQuery, ctx.booleanExpr(), failed);
+                    throw failed;
+                }
+                proceduralExecutor.endExpressionQuery(asQuery, ctx.booleanExpr(), defaultValue);
             }
 
             final DeclareStatement stmt = new DeclareStatement(varName, defaultValue,
@@ -1257,13 +1389,15 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
 
     /**
      * Note where a RESULTSET initialiser's query begins, which a failure running it is reported at: a query chained to
-     * further stages is placed at its first flow arrow (live-verified: {@code LET r RESULTSET := (SELECT 1 AS a ->>
-     * SELECT b FROM $1)} fails at the arrow's position, 40).
+     * further stages is placed at its last flow arrow (live-verified: {@code LET r RESULTSET := (SELECT 1 AS a ->>
+     * SELECT b FROM $1)} fails at the arrow's position, 40, and a chain of three stages at its second arrow, whichever
+     * stage fails).
      */
     private static void noteInitialiserQuery(final DeclareResultSetStatement stmt,
                                              final FrostlakeParser.ResultSetSourceContext query) {
         if (query != null) {
-            final Token placed = query.FLOW_ARROW().isEmpty() ? query.getStart() : query.FLOW_ARROW(0).getSymbol();
+            final Token placed = query.FLOW_ARROW().isEmpty() ? query.getStart()
+                : query.FLOW_ARROW(query.FLOW_ARROW().size() - 1).getSymbol();
             stmt.setQueryAt(placed.getLine(), placed.getCharPositionInLine());
         }
     }
@@ -1425,6 +1559,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         }
         // The source folds to a constant, or is refused as one that does not (see SessionAssignmentSource).
         if (SessionAssignmentSource.isWholeSubquery(ctx)) {
+            if (SessionAssignmentSource.limitsSemiStructured(ctx, queryExecutor)) {
+                throw new RuntimeException(SessionAssignmentSource.NON_CONSTANT);
+            }
             return SessionAssignmentSource.assignable(evaluateSqlExpression(ctx), ctx, queryExecutor);
         }
         final Object folded;
@@ -1514,7 +1651,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             // A type and no value declares the variable NULL of its type, as a DECLARE section's item does
             // (live-verified).
             proceduralExecutor.executeStatement(new DeclareStatement(varName, null,
-                parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters())));
+                parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters())).writtenByLet());
             logger.trace("Let variable: {}", varName);
             return null;
         }
@@ -1525,12 +1662,22 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             proceduralExecutor.judgeBlockExpression(ctx.booleanExpr(),
                 parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()));
         }
-        final Object defaultValue = ctx.dataTypeName() != null
-            ? declaredInitialValue(ctx.booleanExpr(), parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()))
-            : evaluateExpression(ctx.booleanExpr());
+        // A value that calls a user-defined function or reads a query is a query of its own, which takes a query ID
+        // (see ProceduralExecutor#beginExpressionQuery).
+        final QueryHistory asQuery = proceduralExecutor.beginExpressionQuery(ctx.booleanExpr());
+        final Object defaultValue;
+        try {
+            defaultValue = ctx.dataTypeName() != null
+                ? declaredInitialValue(ctx.booleanExpr(), parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()))
+                : evaluateExpression(ctx.booleanExpr());
+        } catch (final RuntimeException failed) {
+            proceduralExecutor.failExpressionQuery(asQuery, ctx.booleanExpr(), failed);
+            throw failed;
+        }
+        proceduralExecutor.endExpressionQuery(asQuery, ctx.booleanExpr(), defaultValue);
         final DeclareStatement stmt = new DeclareStatement(varName, defaultValue,
             ctx.dataTypeName() != null ? parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters())
-                : inferredDeclarationType(ctx.booleanExpr()));
+                : inferredDeclarationType(ctx.booleanExpr())).writtenByLet();
         if (ctx.dataTypeName() == null) {
             stmt.setInitialiserType(initialiserOwnType(ctx.booleanExpr()));
         }
@@ -1624,11 +1771,15 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         }
 
         // Handle: rs := (SELECT … ->> …) — a RESULTSET holds the chain's last answer, as the same chain where the
-        // RESULTSET is declared gives it (live-verified); the chain is placed at its first arrow, as a declared one is.
+        // RESULTSET is declared gives it (live-verified); the chain is placed at its last arrow, as a declared one is.
+        // Any other target refuses it as the block the account reads it as (live-verified).
         if (ctx.resultSetChain() != null) {
             final FrostlakeParser.ResultSetChainContext chain = ctx.resultSetChain();
+            if (!proceduralExecutor.holdsResultSet(varName)) {
+                throw AssignedStatement.invalidValue(AssignedStatement.BLOCK);
+            }
             final StatementValueExpression value = new StatementValueExpression(getOriginalText(chain));
-            final Token arrow = chain.FLOW_ARROW(0).getSymbol();
+            final Token arrow = chain.FLOW_ARROW(chain.FLOW_ARROW().size() - 1).getSymbol();
             value.setSourcePosition(arrow.getLine(), arrow.getCharPositionInLine());
             proceduralExecutor.executeStatement(new SetStatement(varName, value));
             logger.trace("Assigned resultset {} from a flow chain", varName);
@@ -1697,7 +1848,10 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         final String selectSql = binds.isEmpty() ? declared
             : JdbcMarshaling.bindUsing(declared, binds, new HashSet<Integer>());
         // Execute the SELECT query to populate the cursor; one written with FOR UPDATE is refused as the query
-        // statement is, when the cursor opens (live-verified).
+        // statement is, when the cursor opens (live-verified). The query runs as a child statement of the session's,
+        // with a QUERY_HISTORY row of its own listed under the query as the cursor declares it (live-verified:
+        // SELECT|SUCCESS|SELECT 943011 for LET c CURSOR FOR SELECT 943011; OPEN c;).
+        final QueryHistory row = queryExecutor.beginChildStatement(declared, queryExecutor.firstStatementOf(declared));
         final ResultSet resultSet;
         try {
             final FrostlakeParser.QueryStatementContext query = parseCursorQuery(selectSql);
@@ -1707,8 +1861,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             resultSet = queryExecutor.executeSelectFromContext(query.selectStatement());
         } catch (final RuntimeException refused) {
             // A bound value echoed as a predicate is named by its placeholder (see UsingBindEcho).
-            throw binds.isEmpty() ? refused : UsingBindEcho.named(refused, declared, binds, new HashSet<Integer>());
+            final RuntimeException thrown = binds.isEmpty() ? refused
+                : UsingBindEcho.named(refused, declared, binds, new HashSet<Integer>());
+            queryExecutor.failChildStatement(row, declared, thrown);
+            throw thrown;
         }
+        queryExecutor.completeChildStatement(row, declared, resultSet);
         cursor.open(resultSet);
 
         logger.trace("Opened cursor: {}", cursorName);
@@ -2426,8 +2584,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * and compiles them, though no schema keeps it.
      */
     private Procedure anonymousProcedure(final FrostlakeParser.AnonymousProcedureContext definition) {
+        // The definition ends where the common table expressions after it begin.
+        final int end = definition.cteDefinition().isEmpty() ? definition.getStop().getStopIndex()
+            : definition.COMMA(0).getSymbol().getStartIndex() - 1;
         final String rest = definition.getStart().getInputStream().getText(Interval.of(
-            definition.LPAREN().getSymbol().getStartIndex(), definition.getStop().getStopIndex()));
+            definition.LPAREN().getSymbol().getStartIndex(), end));
         final FrostlakeParser.SqlScriptContext created = QueryExecutor.parsedScript(
             "CREATE PROCEDURE " + getOriginalText(definition.identifier()) + " " + rest);
         return ddlHandler.anonymousProcedure(created.flowChain(0).statement(0).ddlStatement().createStatement());
@@ -2553,6 +2714,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         final Procedure anonymous = ctx.anonymousProcedure() == null ? null
             : anonymousProcedure(ctx.anonymousProcedure());
         final boolean callsAnonymous = anonymous != null && parts.length == 1 && anonymous.getName().equals(procName);
+        if (anonymous != null && parts.length > 1 && anonymous.getName().equals(procName)) {
+            // The CALL's own procedure hides its name from a schema's: written under a schema, it names no routine
+            // at all, whatever the schema holds (live-verified).
+            throw new RuntimeException(SqlCompilationError.of("Unknown user-defined function "
+                + String.join(".", parts).toUpperCase(Locale.ROOT) + "."));
+        }
 
         final Schema schema = callsAnonymous ? null : calledSchema(parts, procName);
 
@@ -2623,8 +2790,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 sawNamed |= CallArgumentTypes.isNamed(argCtx);
             }
             // The names that fit no signature are refused under the procedure's name as the CALL writes it,
-            // test_schema.p as TEST_SCHEMA.P (live-verified).
-            final String namedName = parts.length > 1 ? spelledRoutineName(parts) : procName;
+            // test_schema.p as TEST_SCHEMA.P, and a procedure's SYSTEM$REFERENCE token as the token itself
+            // (live-verified).
+            final String token = ctx.callReference() == null ? null
+                : queryExecutor.identifierArgumentText(ctx.callReference().identifierArgument());
+            final String namedName = token != null && ProcedureTokenCalls.namesProcedure(token) ? token
+                : parts.length > 1 ? spelledRoutineName(parts) : procName;
             CallArgumentTypes.refuseNamedShape(procName, params, ctx.callArguments().callArgument());
             CallArgumentTypes.refuseRows(namedName, params, ctx.callArguments().callArgument());
             CallArgumentTypes.refuseMisnamed(namedName, params, ctx.callArguments().callArgument());
@@ -3140,6 +3311,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 PostParseRefusals.requireBefore(coldTokens, read, coldListener);
                 RoutineArgumentOrder.requireBefore(coldTokens, coldListener);
                 SignatureTailLine.requireBefore(coldScript, read, coldListener);
+                // An OVERLAY's PLACING is refused with the lines its brackets decide, as in a statement of its own
+                // (live-verified).
+                OverlayPlacingLines.requireBefore(read, coldTokens, coldListener);
                 AssignedTableNameLines.requireBefore(read, coldListener);
                 coldListener.throwIfErrors();
             }
@@ -3168,6 +3342,10 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             // after the count, and in a text of several statements when that statement runs (see the loop below).
             final boolean severalStatements = ctx.FROM() == null && sqlScriptCtx.flowChain().size() > 1;
             if (ctx.FROM() == null) {
+                // Run by a script, the EXECUTE IMMEDIATE is listed as its text, under the kind of the one statement
+                // the text holds (see QueryExecutor#listChildAs).
+                final List<FrostlakeParser.StatementContext> held = flattenedStatements(sqlScriptCtx);
+                queryExecutor.listChildAs(sqlString, held.size() == 1 ? held.get(0) : null);
                 DynamicStatementCount.require(sqlScriptCtx.flowChain().size(), queryExecutor.getSecurityManager(),
                     proceduralExecutor.isExecutingBlock());
             }
@@ -3236,9 +3414,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     // A statement of the text is a child statement of the session's, with a query ID and a QUERY_HISTORY
                     // row of its own (see QueryExecutor#beginChildStatement). A block's answer is not a statement of
                     // its own: it is this EXECUTE IMMEDIATE's answer, which the statement records once, as a block run
-                    // directly records it; the block's statements record themselves.
+                    // directly records it; the block's statements record themselves. A text of one other statement
+                    // runs as the EXECUTE IMMEDIATE itself, under its row and ID (see QueryExecutor#listChildAs).
                     final String statementText = getOriginalText(stmtCtx);
-                    final QueryHistory child = AnonymousBlockResult.isBlock(stmtCtx) ? null
+                    final boolean runsAsItself = ctx.FROM() == null && dynamicStatements.size() == 1;
+                    final QueryHistory child = AnonymousBlockResult.isBlock(stmtCtx) || runsAsItself ? null
                         : queryExecutor.beginChildStatement(statementText, stmtCtx);
                     try {
                         if (severalStatements) {
@@ -3897,6 +4077,14 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         // stands in the function's text, whatever statement called the function (live-verified).
         final SourcePosition callersOrigin = LeadingCommentOffset.begin(null);
         proceduralExecutor.enterFunctionBody();
+        // The body's own block judges its direct RETURNs against the declared return type, as a procedure's does
+        // (see DeclaredReturnJudge): RETURNS TIME over RETURN 1 is refused when the call compiles (live-verified).
+        final Set<String> parameterNames = new HashSet<>();
+        for (final Parameter param : function.getParameters()) {
+            parameterNames.add(param.getName());
+        }
+        final DeclaredReturnFrame outerReturn = proceduralExecutor.pushDeclaredReturn(function.getReturnType(), false,
+            parameterNames);
         try {
             final List<Parameter> params = function.getParameters();
             for (int i = 0; i < params.size() && i < args.size(); i++) {
@@ -3959,6 +4147,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             }
             throw failed;
         } finally {
+            proceduralExecutor.restoreDeclaredReturn(outerReturn);
             proceduralExecutor.exitFunctionBody();
             LeadingCommentOffset.end(callersOrigin);
             queryExecutor.getTransactionManager().endAtomicSection();

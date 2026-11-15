@@ -19,10 +19,12 @@ import dev.frostlake.query.MeasuredCellsTestSupport;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 /**
- * SHOW ORGANIZATION ACCOUNTS is answered by the organization account alone, which this account is not: the listing is
- * refused as an operation on the account's own system, by the organization's MANAGE ACCOUNTS on the current account,
- * with a LIKE as without one (live-verified).
+ * SHOW ORGANIZATION ACCOUNTS is the organization's administrator's: any other role is refused as an operation on the
+ * account's own system, naming no privilege, with a LIKE as without one; the administrator reads SHOW ACCOUNTS's
+ * columns and no row, as only the organization account lists any and this account is not it (live-verified).
  */
 public class OrganizationAccountsRefusalTest extends MeasuredCellsTestSupport {
 
@@ -32,11 +34,17 @@ public class OrganizationAccountsRefusalTest extends MeasuredCellsTestSupport {
         engine.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE");
         assertCells(new String[][] {
             {"SHOW ORGANIZATION ACCOUNTS",
-                "REFUSED SQL access control error: | Insufficient privileges to operate on  'SYSTEM'. Your primary "
-                + "role <ROLE> must have MANAGE ACCOUNTS granted on ACCOUNT <ACCOUNT>."},
+                "REFUSED SQL access control error: | Insufficient privileges to operate on  'SYSTEM'."},
             {"SHOW ORGANIZATION ACCOUNTS LIKE 'X%'",
-                "REFUSED SQL access control error: | Insufficient privileges to operate on  'SYSTEM'. Your primary "
-                + "role <ROLE> must have MANAGE ACCOUNTS granted on ACCOUNT <ACCOUNT>."},
+                "REFUSED SQL access control error: | Insufficient privileges to operate on  'SYSTEM'."},
         });
+    }
+
+    /** To the organization's administrator, the listing answers the accounts' columns and no row. */
+    @Test
+    public void theOrganizationsAdministratorReadsNoAccountHere() {
+        engine.execute("USE ROLE ORGADMIN");
+        assertEquals(shape("SHOW ACCOUNTS"), shape("SHOW ORGANIZATION ACCOUNTS"));
+        assertAnswer("", "SHOW ORGANIZATION ACCOUNTS");
     }
 }

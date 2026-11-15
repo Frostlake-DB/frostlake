@@ -55,7 +55,7 @@ public class ExecuteImmediateRequestCountTest extends BaseJdbcTest {
 
     /** The per-statement parameter, through each transport's own unwrap surface. */
     private static void setStatementCount(final Statement target, final int n) throws SQLException {
-        if (isLiveSnowflake()) {
+        if (isSnowflakeDriver()) {
             target.unwrap(SnowflakeStatement.class).setParameter("MULTI_STATEMENT_COUNT", n);
         } else {
             target.unwrap(DirectStatement.class).setParameter("MULTI_STATEMENT_COUNT", n);

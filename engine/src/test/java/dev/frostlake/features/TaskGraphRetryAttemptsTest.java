@@ -86,10 +86,15 @@ public class TaskGraphRetryAttemptsTest extends BaseDatabaseTest {
         TaskRunWait.untilRows(engine, "SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(TASK_NAME => '"
             + grandchild + "')) WHERE state = 'SUCCEEDED'", 1);
 
-        assertEquals("1|FAILED|EXECUTE TASK|C|false ;; 2|FAILED|MANUAL RETRY|C|true ;; "
+        assertEquals("1|FAILED|EXECUTE TASK|C|false ;; 2|FAILED|MANUAL RETRY|C|false ;; "
             + "3|SUCCEEDED|MANUAL RETRY|null|false", cells(engine.executeQuery("SELECT attempt_number, state,"
             + " scheduled_from, REPLACE(first_error_task_name, '" + child + "', 'C'), query_start_time IS NULL"
             + " FROM " + graphs(root) + " ORDER BY attempt_number")));
+        // A retry that does not run the root starts when its first run does, though that run fails.
+        assertEquals("2|true ;; 3|true", cells(engine.executeQuery("SELECT g.attempt_number,"
+            + " g.query_start_time = h.query_start_time FROM " + graphs(root) + " g JOIN TABLE("
+            + "INFORMATION_SCHEMA.TASK_HISTORY(TASK_NAME => '" + child + "')) h ON h.attempt_number = g.attempt_number"
+            + " WHERE g.attempt_number > 1 AND h.state <> 'SCHEDULED' ORDER BY 1")));
         assertEquals("1|1|3|3", cells(engine.executeQuery("SELECT COUNT(DISTINCT run_id),"
             + " COUNT(DISTINCT graph_run_group_id), COUNT(DISTINCT scheduled_time), COUNT(*) FROM " + graphs(root))));
         assertEquals("C:1 ;; R:1 ;; C:2 ;; C:3 ;; G:3", cells(engine.executeQuery("SELECT REPLACE(REPLACE(REPLACE("

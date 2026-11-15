@@ -32,7 +32,8 @@ public class FromPartsOutOfRangeTest extends MeasuredCellsTestSupport {
 
     @Test
     public void aDayPastTheRangeIsRefusedAndOneWithinItIsCountedExactly() {
-        assumeFalse(isLiveSnowflake());
+        // A date past the 32-bit day count Snowflake's driver reads a DATE by cannot reach it.
+        assumeFalse(readsThroughSnowflakeDriver());
         assertAnswer("REFUSED Date 784351576412 is out of range", "SELECT DATE_FROM_PARTS(2147483647, 1, 1)");
         assertAnswer("REFUSED Date -784353015833 is out of range", "SELECT DATE_FROM_PARTS(-2147483648, 1, 1)");
         assertAnswer("REFUSED Date 365241780472 is out of range", "SELECT DATE_FROM_PARTS(1000000000, 1, 1)");

@@ -73,7 +73,8 @@ public class ShowSchemaObjectListingsTest extends MeasuredCellsTestSupport {
     private static final String SEMANTIC_VIEWS_COLUMNS =
         "created_on:TIMESTAMP_LTZ, name:VARCHAR(16777216), database_name:VARCHAR(16777216), "
             + "schema_name:VARCHAR(16777216), comment:VARCHAR(16777216), owner:VARCHAR(16777216), "
-            + "owner_role_type:VARCHAR(16777216), extension:VARCHAR(16777216), max_staleness:VARCHAR(16777216)";
+            + "owner_role_type:VARCHAR(16777216), extension:VARCHAR(16777216), max_staleness:VARCHAR(16777216), "
+            + "updated_on:TIMESTAMP_LTZ";
 
     private static final String SESSION_POLICIES_COLUMNS =
         "created_on:TIMESTAMP_LTZ, name:VARCHAR(16777216), database_name:VARCHAR(16777216), "

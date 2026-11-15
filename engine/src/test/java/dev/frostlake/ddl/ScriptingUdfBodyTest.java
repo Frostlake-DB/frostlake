@@ -289,18 +289,13 @@ public class ScriptingUdfBodyTest extends BaseDatabaseTest {
         engine.execute("CREATE PROCEDURE p_sv() RETURNS VARIANT LANGUAGE SQL AS $$ BEGIN RETURN 1; END $$");
     }
 
-    /** Live: a DECFLOAT is refused on the call, in lower case, and only a block's: a query body is compiled as ever. */
+    /** Live: a block's DECFLOAT return is answered as any other, the value it returns read as a DECFLOAT. */
     @Test
-    public void aDecfloatReturnIsRefusedOnTheCall() {
+    public void aDecfloatReturnIsAnswered() {
         engine.execute("CREATE FUNCTION f_df() RETURNS DECFLOAT AS $$ BEGIN RETURN 1.5::DECFLOAT; END $$");
-        final RuntimeException failure = assertThrows(RuntimeException.class, new Executable() {
-            @Override
-            public void execute() {
-                engine.executeQuery("SELECT f_df()");
-            }
-        });
-        assertTrue(failure.getMessage().contains("Unsupported return type for Snowscript UDF: decfloat"),
-            failure.getMessage());
+        assertEquals("1.5", textResult("SELECT f_df()"));
+        engine.execute("CREATE FUNCTION f_df2() RETURNS DECFLOAT AS $$ BEGIN RETURN 1.5; END $$");
+        assertEquals("1.5", textResult("SELECT f_df2()"));
         engine.execute("CREATE FUNCTION f_df(x DECFLOAT) RETURNS INT AS $$ BEGIN RETURN 1; END $$");
         assertEquals(1, intResult("SELECT f_df(1::DECFLOAT)"));
     }
@@ -893,6 +888,10 @@ public class ScriptingUdfBodyTest extends BaseDatabaseTest {
             }
         });
         assertTrue(failure.getMessage().contains(expected), failure.getMessage());
+    }
+
+    private String textResult(final String sql) {
+        return String.valueOf(engine.executeQuery(sql).getRows().get(0).getValue(0));
     }
 
     private int intResult(final String sql) {

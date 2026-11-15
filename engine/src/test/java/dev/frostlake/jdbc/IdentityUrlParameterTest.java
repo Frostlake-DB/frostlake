@@ -97,8 +97,10 @@ public class IdentityUrlParameterTest {
     public void showAccountsFollowsTheUrl() throws Exception {
         try (Connection connection = DriverManager.getConnection(
                  "jdbc:frostlake:direct:id_show?organization=SHOWORG&accountName=SHOWACC");
-             Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("SHOW ACCOUNTS")) {
+             Statement statement = connection.createStatement()) {
+            // The organization's administrator reads every column of the listing.
+            statement.execute("USE ROLE ORGADMIN");
+            final ResultSet rs = statement.executeQuery("SHOW ACCOUNTS");
             rs.next();
             assertEquals("SHOWORG", rs.getString("organization_name"));
             assertEquals("SHOWACC", rs.getString("account_name"));

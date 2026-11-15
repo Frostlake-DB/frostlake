@@ -21,6 +21,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.commands.DropCommandHandler;
 import dev.frostlake.functions.TableFunction;
+import dev.frostlake.functions.scalar.context.DefinitionOwnership;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SqlObject;
@@ -102,7 +103,7 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The domains {@link #rows} reads beside {@link #DOMAINS}: the objects of a schema it finds by kind. */
     private static final Set<String> SCHEMA_OBJECT_DOMAINS = new HashSet<String>(Arrays.asList("PASSWORD POLICY",
-        "SESSION POLICY"));
+        "SESSION POLICY", "STORAGE LIFECYCLE POLICY"));
 
     /** The domains that name one kind of table-like object, refused in favour of TABLE. */
     private static final Set<String> TABLE_LIKE_DOMAINS = new HashSet<String>(Arrays.asList("VIEW", "MATERIALIZED VIEW"));
@@ -117,7 +118,7 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The schema objects a miss names by the full path, however the name was written. */
     private static final Set<String> FULL_PATH_DOMAINS = new HashSet<String>(Arrays.asList("STAGE", "PIPE",
-        "PASSWORD POLICY", "SESSION POLICY", "SERVICE", "IMAGE REPOSITORY"));
+        "PASSWORD POLICY", "SESSION POLICY", "STORAGE LIFECYCLE POLICY", "SERVICE", "IMAGE REPOSITORY"));
 
     /** The schema objects of the container services, whose rows spell the domain with an underscore (live-verified). */
     private static final Set<String> CONTAINER_DOMAINS = new HashSet<String>(Arrays.asList("SERVICE",
@@ -140,7 +141,8 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The objects of a schema this function looks up by kind. */
     private static final Set<String> LOOKED_UP_SCHEMA_OBJECTS = new HashSet<String>(Arrays.asList("ALERT", "STAGE",
-        "STREAM", "TASK", "PIPE", "PASSWORD POLICY", "SESSION POLICY", "SERVICE", "IMAGE REPOSITORY"));
+        "STREAM", "TASK", "PIPE", "PASSWORD POLICY", "SESSION POLICY", "STORAGE LIFECYCLE POLICY", "SERVICE",
+        "IMAGE REPOSITORY"));
 
     /** How many parts a role's name may have before the name itself is refused. */
     private static final int ROLE_QUALIFIER_LIMIT = 4;
@@ -150,9 +152,58 @@ public class TagReferencesFunction extends TableFunction {
 
     private final Catalog catalog;
 
+    /** What the session sees, which an object it is asked about has to be among; null asks nothing. */
+    private final DefinitionOwnership ownership;
+
     public TagReferencesFunction(final Catalog catalog) {
+        this(catalog, null);
+    }
+
+    /**
+     * A lookup that answers only for the objects the session sees: SYSTEM$GET_TAG needs "the privileges to run a
+     * DESCRIBE {@code <object>} operation on the specified object name", and TAG_REFERENCES returns results "only for
+     * a role that has access to the specified object" (documented). An object the session does not see is refused as
+     * one that is not there, as DESCRIBE refuses it.
+     *
+     * @param catalog   the catalog
+     * @param ownership what the session sees, or null to ask nothing
+     */
+    public TagReferencesFunction(final Catalog catalog, final DefinitionOwnership ownership) {
         super("TAG_REFERENCES");
         this.catalog = catalog;
+        this.ownership = ownership;
+    }
+
+    /**
+     * Refuses an object the session does not see as one that is not there.
+     *
+     * @param grantKind the object's kind as privileges record it
+     * @param fullName  its full name as privileges record it
+     * @param owner     the role that owns it
+     * @param kind      the kind a refusal names
+     * @param spelled   the name a refusal names
+     */
+    private void requireSeen(final String grantKind, final String fullName, final String owner, final String kind,
+                             final String spelled) {
+        if (ownership != null && !ownership.sees(grantKind, fullName, owner)) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist(kind, spelled));
+        }
+    }
+
+    /** The kind a table-like object's privileges are recorded under. */
+    private static String grantKindOf(final Taggable relation) {
+        if (relation instanceof View) {
+            return "VIEW";
+        }
+        if (relation instanceof MaterializedView) {
+            return "MATERIALIZED_VIEW";
+        }
+        return relation instanceof DynamicTable ? "DYNAMIC_TABLE" : "TABLE";
+    }
+
+    /** The role that owns a table-like object, or null where it records none. */
+    private static String ownerOf(final Taggable relation) {
+        return relation instanceof SqlObject ? ((SqlObject) relation).getOwner() : null;
     }
 
     @Override
@@ -263,6 +314,19 @@ public class TagReferencesFunction extends TableFunction {
      * @return the tag's value on the object, or null when the tag does not reach it
      */
     public static String systemGetTag(final Catalog catalog, final List<Object> args) {
+        return systemGetTag(catalog, args, null);
+    }
+
+    /**
+     * {@link #systemGetTag(Catalog, List)} answered only for an object the session sees.
+     *
+     * @param catalog   the catalog
+     * @param args      the call's arguments
+     * @param ownership what the session sees, or null to ask nothing
+     * @return the tag's value on the object, or null when the tag does not reach it
+     */
+    public static String systemGetTag(final Catalog catalog, final List<Object> args,
+                                      final DefinitionOwnership ownership) {
         for (int i = 0; i < args.size() && i < 3; i++) {
             if (args.get(i) == null) {
                 throw new RuntimeException(SqlCompilationError.of("argument " + i
@@ -296,7 +360,7 @@ public class TagReferencesFunction extends TableFunction {
                     > ("COLUMN".equals(kind) ? SCHEMA_OBJECT_PARTS + 1 : SCHEMA_OBJECT_PARTS)) {
             throw new RuntimeException(SqlCompilationError.of("Object does not exist, or operation cannot be performed."));
         }
-        return new TagReferencesFunction(catalog).valueOf(tag, object, domain);
+        return new TagReferencesFunction(catalog, ownership).valueOf(tag, object, domain);
     }
 
     /**
@@ -516,6 +580,8 @@ public class TagReferencesFunction extends TableFunction {
         if (table == null) {
             throw new RuntimeException(SqlCompilationError.doesNotExist(kind, schema.qualifiedName(name[2])));
         }
+        requireSeen(grantKindOf(table), schema.qualifiedName(name[2]), ownerOf(table), kind,
+            schema.qualifiedName(name[2]));
         addLineage(rows, new Taggable[] {table, schema, catalog.getDatabase(name[0])},
             new String[] {"TABLE", "SCHEMA", "DATABASE"}, name[0], name[1], name[2], "TABLE", null);
     }
@@ -555,10 +621,11 @@ public class TagReferencesFunction extends TableFunction {
     Taggable requireTableLike(final Schema schema, final String name, final String[] written,
                               final String objectName) {
         final Taggable table = tableLike(schema, name);
+        final String spelled = written.length == 1 ? objectName : schema.qualifiedName(name);
         if (table == null) {
-            throw new RuntimeException(SqlCompilationError.doesNotExist("Table", written.length == 1 ? objectName
-                : schema.qualifiedName(name)));
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Table", spelled));
         }
+        requireSeen(grantKindOf(table), schema.qualifiedName(name), ownerOf(table), "Table", spelled);
         return table;
     }
 
@@ -566,6 +633,8 @@ public class TagReferencesFunction extends TableFunction {
     private void addSchemaTags(final String[] written, final String objectName, final List<Row> rows) {
         final String[] name = qualify(written, 2, "Schema", objectName);
         final Schema schema = resolveSchema(name[0], name[1], "Schema", objectName);
+        requireSeen("SCHEMA", QualifiedName.join(schema.getDatabaseName(), schema.getName()), schema.getOwner(),
+            "Schema", QualifiedName.join(schema.getDatabaseName(), schema.getName()));
         addLineage(rows, new Taggable[] {schema, catalog.getDatabase(name[0])}, new String[] {"SCHEMA", "DATABASE"},
             name[0], null, name[1], "SCHEMA", null);
     }
@@ -577,6 +646,7 @@ public class TagReferencesFunction extends TableFunction {
         if (written.length != 1 || database == null) {
             throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint("Database", objectName));
         }
+        requireSeen("DATABASE", database.getName(), database.getOwner(), "Database", database.getName());
         addLineage(rows, new Taggable[] {database}, new String[] {"DATABASE"}, null, null, simpleName, "DATABASE",
             null);
     }
@@ -598,6 +668,8 @@ public class TagReferencesFunction extends TableFunction {
         }
         // A view's column is tagged as a table's is, the view in the table's place (live-verified).
         final Taggable relation = table != null ? table : view;
+        requireSeen(grantKindOf(relation), schema.qualifiedName(name[2]), ownerOf(relation), "Table",
+            schema.qualifiedName(name[2]));
         for (final TableColumn column : table != null ? table.getColumns() : view.getResolvedColumns()) {
             // The column is matched as an identifier is, too: fz."id" names no column ID.
             if (name[3].equals(column.getName())) {
@@ -810,6 +882,9 @@ public class TagReferencesFunction extends TableFunction {
             }
             if ("SESSION POLICY".equals(domain)) {
                 return schema.getSecurityObjects().get(SecurityObjectKind.SESSION_POLICY, name);
+            }
+            if ("STORAGE LIFECYCLE POLICY".equals(domain)) {
+                return schema.hasStorageLifecyclePolicy(name) ? schema.getStorageLifecyclePolicy(name) : null;
             }
             if ("SERVICE".equals(domain)) {
                 return schema.getContainerObjects().getService(name);

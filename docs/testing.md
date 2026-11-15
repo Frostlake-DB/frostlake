@@ -24,6 +24,20 @@ FL_JDBC=1 mvn -pl engine test
 engine, so the whole suite exercises the driver: statement execution, result-set getters and value marshaling.
 Tests that read engine internals still see the same engine.
 
+## Through Snowflake's JDBC driver (`SF_JDBC_FL=1`)
+
+```bash
+SF_JDBC_FL=1 mvn -pl engine test
+```
+
+`BaseDatabaseTest` and `BaseJdbcTest` send their SQL through Snowflake's own JDBC driver, logged in to a
+`SnowflakeEndpoint` serving the test's engine in-process, so the suite checks the endpoint and how the account's
+driver reads what it answers: the protocol, result metadata, values and refusals. A refusal must reach the client in
+the engine's own words, and a value the driver reads back as the engine's comes back as the engine's own cell; anything
+else reaches the assertion as the driver read it. Tests that read engine internals still see the same engine.
+Results arrive in JSON, as the live harness asks for them; `SF_JDBC_FL_RESULTS=ARROW` asks for the driver's default
+Arrow results instead. `SF_LIVE` takes precedence over this switch, and this switch over `FL_JDBC`.
+
 ## Against a live Snowflake account (`SF_LIVE=1`)
 
 ```bash
@@ -36,6 +50,7 @@ SF_LIVE=1 SF_USER=… SF_PASS=… SF_URL=… mvn -pl engine test -Dtest=ClassNam
 | `SF_USER`, `SF_PASS` | the login |
 | `SF_URL` | the account host, e.g. `myorg-myaccount.snowflakecomputing.com` |
 | `SF_WAREHOUSE` | optional: the warehouse to use; without it, the user's default warehouse |
+| `SF_LIVE_ACCOUNT_STATEMENTS` | optional: `1` sends the statements that change the account's roles, users and grants, which a live run otherwise holds back (below) |
 
 The same suite then checks that Frostlake and Snowflake answer alike. A live run is stateful: every test
 recreates `test_db` on the account. The test bases' teardown drops the account-level objects — databases, roles,
@@ -45,6 +60,13 @@ an object. The corpus runner on `snowflake` does the same for its cases: it read
 case, and before each case — and once more at the end — drops the account-level objects the cases before created,
 from the role and the warehouse the session opened with. Tests that read engine internals (the catalog,
 the managers) still exercise the embedded engine.
+
+A `BaseDatabaseTest` test never sends the account a statement that would change its roles, users or grants:
+GRANT, REVOKE, USE ROLE, USE SECONDARY ROLES, and CREATE, ALTER or DROP of a role, a database role or a user,
+wherever one begins in the text — inside a block, or in the text an `EXECUTE IMMEDIATE` runs or a routine's body
+holds. The test is skipped instead, before the statement is sent, its reason naming the statement; one that caught
+the skip as a refusal is skipped all the same when it ends, and a teardown's such statement is passed over. Set
+`SF_LIVE_ACCOUNT_STATEMENTS=1` to send them, against an account whose role takes them.
 
 ### One live run per account
 
@@ -96,8 +118,10 @@ replay the same files with runners of their own.
 mvn -pl engine test -Dtest=JsonSuiteTest -Dtestkit.backend=http -Dtestkit.suites=dml,ddl-alter
 ```
 
-`-Dtestkit.backend=engine|jdbc|http|snowflake` picks the transport (`FL_JDBC=1` means `jdbc` and `SF_LIVE=1`
-means `snowflake`); `-Dtestkit.suites=a,b` runs only the suites whose name contains a listed word — a live replay
+`-Dtestkit.backend=engine|jdbc|http|sfjdbc|snowflake` picks the transport (`FL_JDBC=1` means `jdbc`, `SF_JDBC_FL=1`
+means `sfjdbc` and `SF_LIVE=1` means `snowflake`; a case skipped on `http`, or on both `jdbc` and `snowflake`, is
+skipped on `sfjdbc` too);
+`-Dtestkit.suites=a,b` runs only the suites whose name contains a listed word — a live replay
 of the whole corpus takes hours.
 
 Every expectation that a live account can run records what the account answers; a case the account cannot run
