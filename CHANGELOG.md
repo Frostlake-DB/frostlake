@@ -8,6 +8,84 @@ fix, not a regression**: SQL that Snowflake rejects and Frostlake accepted was a
 closing it can break code that relied on the leniency. Those changes are listed first in every release
 for exactly that reason.
 
+## 0.5.1 — unreleased
+
+### Now refused (SQL that earlier versions accepted)
+
+- **A JAR handler reads Snowpark only where its routine's PACKAGES name Snowpark** (live-verified): a function or
+  table function that IMPORTS a jar whose handler reads a Snowpark class, with no `com.snowflake:snowpark` package,
+  is created and then fails when called, with the account's report of a `java.lang.NoClassDefFoundError` caused by
+  `java.lang.ClassNotFoundException: com.snowflake.snowpark_java.Session`. It used to run.
+- **An inline Java body at RUNTIME_VERSION 11 cannot read a jar class compiled for a later Java** (live-verified): a
+  body that uses a class of an imported jar built for Java 17 is refused when the routine is created, `cannot access
+  Helper` with `class file has wrong version 61.0, should be 55.0`, at the body's first use of the class.
+
+### Fixed
+
+- **A GENERATOR past 2147483647 rows answers two more reads** (live-verified): a derived table of literals passes the
+  rows on to the select counting them, `SELECT COUNT(*) FROM (SELECT 1 AS x FROM TABLE(GENERATOR(ROWCOUNT =>
+  3000000000)))` being 3000000000, and a SEQ ordered by itself under a LIMIT answers the wrapped sequence's first
+  values, `SELECT SEQ4() AS s … ORDER BY s LIMIT 2` being 0 and 0 and under DESC 2147483647 and 2147483646; both were
+  refused as more rows than the GENERATOR could produce.
+- **EXPLAIN brackets the operands the account converts** (live-verified): a whole-number column beside a whole-number
+  literal in a sum, a difference or a product is in parentheses where the literal, or the result over the column's
+  stored values, needs more bytes than the values do, `((T.ID) + 119) % 3` over 5, 7 and 9 but `(T.ID + 118) % 3`; a
+  view's or a derived table's column standing for an operation is in parentheses as an operand, `(T.ID * 2) % 3`,
+  where it was spliced in bare and read as another expression; and AVG over such a column of whole numbers is
+  `SCALED_ROUND_INT_DIVIDE(…)`.
+- **A table function's bracketed-query argument in a query opening with WITH** is refused at the WITH and the AS after
+  its first name, where the select item's value holds that query (live-verified).
+- **SHOW … HISTORY lists every version of a name purged with 0 days' retention** (live-verified): a table, schema or
+  database replaced or dropped again and again lists each version, its dropped_on set, where only the latest was
+  listed; UNDROP still refuses them all.
+- **A schema or database replaced by CREATE OR REPLACE is kept as a dropped version** (live-verified): SHOW SCHEMAS
+  HISTORY and SHOW DATABASES HISTORY list it, and UNDROP restores it once the current one is renamed, as a replaced
+  table is, where it was discarded.
+- **A Java handler's `String[]` element keeps a scaled NUMBER's scale** (live-verified): an element of
+  `ARRAY_CONSTRUCT(12.50::NUMBER(10,2), 7::NUMBER(10,2))`, of a stored ARRAY column or of ARRAY_AGG reaches the
+  handler as `12.50` and `7.00`, where it was `12.5` and `7`; a literal, a parsed JSON number and an object's member
+  keep none, and every other surface still reads the descaled number.
+- **The echo of a MATCH_RECOGNIZE in a refused Snowscript UDF body is the account's rewrite** (live-verified): the
+  clause over `SELECT *` of its source, with every default spelled out, under the queries that select its partition
+  keys and measures, where the query was echoed as written.
+- **A row pattern quantifier's question mark is no bind**: `PATTERN (x? y*?)` in a view or a SQL function is created,
+  where it was refused with `Bind variables not allowed in view and UDF definitions.` (live-verified).
+- **A session output format's bare FF prints the scale of the value's type** (live-verified): under
+  `TIMESTAMP_NTZ_OUTPUT_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF'`, a TIMESTAMP_NTZ(3) reads `.006` through TO_VARCHAR, a
+  cast to text and an OBJECT built from it, and a JavaScript Date in a VARIANT answer reads three digits too, where
+  FF printed nine digits.
+- **SYSTEM$WAIT no longer holds up other sessions**: while it waits, another session lists the statement RUNNING in
+  QUERY_HISTORY and cancels it with SYSTEM$CANCEL_QUERY (`query [<id>] terminated.`), and the waiting statement ends
+  with `SQL execution canceled` (live-verified), where the other session waited for the wait to end.
+- **An inline Java body is worded as its routine's Java level words it** (live-verified): a body that opens with no
+  type is `class, interface, or enum expected` at RUNTIME_VERSION 11, the default, and `class, interface, enum, or
+  record expected` at 17 and 21, where every level said `'module' or 'open' expected`.
+- **An inline Java body reaches a class of a jar it imports that its package keeps to itself**: the call answers,
+  where it failed with an IllegalAccessError; a class the jar and the body both define is still the jar's
+  (live-verified).
+- **A window frame offset in a nested query reports the account's further lines** (live-verified): a derived table's
+  closing parenthesis or its query's FROM, an EXISTS's token after the AND, and in a query used as a value the
+  reading of where it stands - a call's argument, a WHERE comparison, an IN's list, an item opening with an operator.
+- **GEOGRAPHY_OUTPUT_FORMAT and GEOMETRY_OUTPUT_FORMAT are followed** (live-verified): a query's GEOGRAPHY reaches the
+  client as `POINT(1 2)` under WKT, `SRID=4326;POINT(1 2)` under EWKT, and as its WKB or EWKB bytes under WKB and
+  EWKB, and a GEOMETRY under its own parameter alike, where both stayed GeoJSON; a JavaScript procedure's result set
+  reads such a column as text (TEXT) or as a Uint8Array (BINARY). Under the default GeoJSON a GEOMETRY reaches the
+  client with each number a DOUBLE, `{"coordinates":[1.000000000000000e+00,2.000000000000000e+00],"type":"Point"}`, as
+  the account writes it.
+- **A table function written bare in a subquery's FROM reports the account's lines** (live-verified): compared in a
+  WHERE, the subquery's SELECT, the first token of its first item's call and the token after it, then the bare
+  call's first token; as an IN's list, its SELECT and the bare call's `)`, in a statement and in a SQL function's
+  body; SPLIT_TO_TABLE reads as FLATTEN does.
+- **BEGIN WORK NAME and a BEGIN WORK in an IF or a WHILE in a block report the account's further lines**
+  (live-verified): the name and the text's last END, or the end of the text.
+- **A word that opens what must follow is refused where the account refuses it** (live-verified): a lone LEFT,
+  RIGHT, FULL or NATURAL after a relation names the token after it (`SELECT * FROM fz LEFT` at the end of the input),
+  a dangling IS or IS NOT names the IS, and a word after AS no alias may be names the token after it as well.
+- **A task's run times are instants**: TASK_HISTORY and COMPLETE_TASK_GRAPHS report a run in the repeated hour of a
+  host's fall-back night at its own offset, with its run id, after the runs of the hour's first pass, where it read an
+  hour early and a graph run before it could go unlisted; a task's created_on is an instant too, and a snapshot keeps
+  both forms, reading an older one as before.
+
 ## 0.5.0 — 2026-11-15
 
 ### Now refused (SQL that earlier versions accepted)

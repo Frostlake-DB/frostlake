@@ -18,6 +18,7 @@ package dev.frostlake.executor.udf;
 
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.FractionScale;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.TypedScalarNode;
@@ -56,6 +57,9 @@ public final class HandlerJson {
 
     /** Leads the text written for a DOUBLE; the number follows as its language prints it. */
     public static final String DOUBLE = "\u0002F:";
+
+    /** The scale of the TIMESTAMP_LTZ an instant is: a JavaScript Date's milliseconds. */
+    private static final int DATE_SCALE = 3;
 
     /** Leads the text written for an instant; its milliseconds since the epoch follow. */
     public static final String INSTANT = "\u0002D:";
@@ -136,12 +140,19 @@ public final class HandlerJson {
         }
         if (text.startsWith(INSTANT)) {
             final Instant instant = Instant.ofEpochMilli(Long.parseLong(text.substring(INSTANT.length())));
-            if (typed) {
-                return ArrayFunctionHelper.toNode(ArrayFunctionHelper.MAPPER,
-                    OffsetDateTime.ofInstant(instant, SessionZone.current()));
+            // A JavaScript Date is a TIMESTAMP_LTZ(3): a bare FF in the session's format prints three digits
+            // (live-verified).
+            final int displaced = FractionScale.enter(DATE_SCALE);
+            try {
+                if (typed) {
+                    return ArrayFunctionHelper.toNode(ArrayFunctionHelper.MAPPER,
+                        OffsetDateTime.ofInstant(instant, SessionZone.current()));
+                }
+                return StringNode.valueOf(SharedFunctionHelpers.textOf(OffsetDateTime.ofInstant(instant,
+                    SessionZone.current())));
+            } finally {
+                FractionScale.exit(displaced);
             }
-            return StringNode.valueOf(SharedFunctionHelpers.textOf(OffsetDateTime.ofInstant(instant,
-                SessionZone.current())));
         }
         if (text.startsWith(TEXT)) {
             return StringNode.valueOf(text.substring(TEXT.length()));

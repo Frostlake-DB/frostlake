@@ -2310,6 +2310,13 @@ public class SyntaxErrorListener extends BaseErrorListener {
             if (objectKey != null) {
                 return objectKey;
             }
+            // ★ A WORD THAT OPENS WHAT MUST FOLLOW - a lone LEFT, a dangling IS, a word after AS - is told as the
+            // account reads it — see DanglingWordLines.
+            final List<String> dangling = offendingIndexes.isEmpty() || firstOnly ? null
+                : DanglingWordLines.lines(opening, offendingIndexes.get(0).intValue());
+            if (dangling != null) {
+                return dangling;
+            }
             // A BEGIN before a literal opens no block: see RunInStatementLines.
             final List<String> begun = opening.isEmpty() || opening.get(0).getType() != FrostlakeLexer.BEGIN ? null
                 : RunInStatementLines.lines(sql, opening, -1);

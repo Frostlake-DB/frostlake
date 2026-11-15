@@ -41,6 +41,8 @@ class TableData {
     long countedRows = -1L;
     /** The rows a GENERATOR holding none of them streams (see GeneratorRowReads), or -1. */
     long streamedRows = -1L;
+    /** The rows of a GENERATOR a select orders by its SEQ under a LIMIT, worked out from their count, or -1. */
+    long orderedRows = -1L;
     /** The rows as a stage reads them: produced once, when first asked. */
     final MemoizedRows source;
     private String description;

@@ -182,6 +182,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.temporal.Temporal;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -218,6 +219,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         new IdentityHashMap<BinaryOperationExpression, Boolean>();
     /** Whether each cast read so far turns a DECFLOAT into text (see isDecfloatText). */
     private final Map<CastExpression, Boolean> decfloatTextCasts = new IdentityHashMap<CastExpression, Boolean>();
+    /** The fraction scale of each time or timestamp expression read so far (see FractionScale), -1 for none. */
+    private final Map<Expression, Integer> fractionScales = new IdentityHashMap<Expression, Integer>();
     /**
      * The relation a reference's DECLARED type is read from when this evaluator's own table cannot
      * say — a window stage over grouped rows evaluates against the projected shape, whose slots
@@ -4369,6 +4372,11 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             // A TO_NUMBER of a column that can be NULL prints its type {nullable} in a range refusal (see ToNumber).
             final BuiltInFunction called = func instanceof ToNumber && !argValues.isEmpty()
                 && isNullableArgument(expr.getArguments().get(0)) ? ((ToNumber) func).overNullableSource() : func;
+            // A temporal the call renders as text - TO_VARCHAR's, a VARIANT's member - prints a bare FF of the
+            // session's output format at the scale of its own type (see FractionScale).
+            final IdentityHashMap<Object, Integer> scales = temporalArgumentScales(expr, argValues);
+            final IdentityHashMap<Object, Integer> outerScales = scales == null ? null
+                : FractionScale.enterValues(scales);
             try {
                 // DECODE and NVL2 are conditionals that do NOT short-circuit, so their branch cast
                 // belongs here rather than at the short-circuit exit — the rule is the conditional's,
@@ -4402,6 +4410,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     throw VariantTemporalCasts.failure(argValues.get(0), variantTarget);
                 }
                 throw orderingFailure(funcName, failed);
+            } finally {
+                if (scales != null) {
+                    FractionScale.exitValues(outerScales);
+                }
             }
         }
 
@@ -6100,6 +6112,24 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      * @return the converted value
      */
     private Object castEvaluated(final CastExpression expr, final Object carried) {
+        if (carried instanceof Temporal && !(carried instanceof LocalDate)) {
+            // A time or a timestamp cast to text prints a bare FF of the session's output format at its own type's
+            // scale (see FractionScale).
+            final int scale = cachedFractionScale(expr.getExpression());
+            if (scale >= 0) {
+                final int displaced = FractionScale.enter(scale);
+                try {
+                    return castConverted(expr, carried);
+                } finally {
+                    FractionScale.exit(displaced);
+                }
+            }
+        }
+        return castConverted(expr, carried);
+    }
+
+    /** {@link #castEvaluated}, the fraction scale settled. */
+    private Object castConverted(final CastExpression expr, final Object carried) {
         if (isVariantJsonNullCast(expr, carried)) {
             return null;
         }
@@ -6772,6 +6802,38 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     }
 
     /** The fraction digits of a time or a timestamp's static type, or -1 for any other expression. */
+    /**
+     * The scales of a call's arguments that are times or timestamps, each value by its identity, or null where it has
+     * none (see FractionScale).
+     */
+    private IdentityHashMap<Object, Integer> temporalArgumentScales(final FunctionCallExpression expr,
+                                                                    final List<Object> argValues) {
+        IdentityHashMap<Object, Integer> scales = null;
+        for (int i = 0; i < argValues.size() && i < expr.getArguments().size(); i++) {
+            final Object value = argValues.get(i);
+            if (value instanceof Temporal && !(value instanceof LocalDate)) {
+                final int scale = cachedFractionScale(expr.getArguments().get(i));
+                if (scale >= 0) {
+                    if (scales == null) {
+                        scales = new IdentityHashMap<Object, Integer>();
+                    }
+                    scales.put(value, Integer.valueOf(scale));
+                }
+            }
+        }
+        return scales;
+    }
+
+    /** {@link #temporalFractionScale}, read once for each expression. */
+    private int cachedFractionScale(final Expression argument) {
+        Integer scale = fractionScales.get(argument);
+        if (scale == null) {
+            scale = Integer.valueOf(temporalFractionScale(argument));
+            fractionScales.put(argument, scale);
+        }
+        return scale.intValue();
+    }
+
     private int temporalFractionScale(final Expression argument) {
         final DataType type;
         try {

@@ -257,7 +257,16 @@ final class ShowRelationalExecutor {
             }
         }
         if (history) {
-            for (final DroppedObject dropped : catalog.droppedOfKind("DATABASE")) {
+            // A database purged with a retention of 0 is listed too, every version of its name (see
+            // Catalog#listedOnlyVersions). Read first, as reading the versions purges again.
+            final List<DroppedObject> versions = new ArrayList<>();
+            for (final Map.Entry<String, List<DroppedObject>> entry : catalog.listedOnlyVersions().entrySet()) {
+                if (entry.getKey().startsWith("DATABASE:")) {
+                    versions.addAll(entry.getValue());
+                }
+            }
+            versions.addAll(catalog.droppedOfKind("DATABASE"));
+            for (final DroppedObject dropped : versions) {
                 if (dropped.getObject() instanceof Database && seenDatabase((Database) dropped.getObject())) {
                     rows.add(databaseRow((Database) dropped.getObject(), false, true, dropped.getDroppedOn()));
                 }
@@ -353,12 +362,12 @@ final class ShowRelationalExecutor {
             }
         }
         if (history) {
-            // A schema purged with a retention of 0 is listed too, the newest of its name: dropping the name again
-            // forgets it (see Catalog#listedOnlyVersions). Read first, as reading the versions purges again.
+            // A schema purged with a retention of 0 is listed too, every version of its name (see
+            // Catalog#listedOnlyVersions). Read first, as reading the versions purges again.
             final List<DroppedObject> dropped = new ArrayList<>();
-            for (final Map.Entry<String, DroppedObject> entry : catalog.listedOnlyVersions().entrySet()) {
+            for (final Map.Entry<String, List<DroppedObject>> entry : catalog.listedOnlyVersions().entrySet()) {
                 if (entry.getKey().startsWith("SCHEMA:")) {
-                    dropped.add(entry.getValue());
+                    dropped.addAll(entry.getValue());
                 }
             }
             dropped.addAll(catalog.droppedOfKind("SCHEMA"));
@@ -734,18 +743,20 @@ final class ShowRelationalExecutor {
      */
     private List<DroppedObject> droppedTablesOf(final String dbName, final String scName) {
         final String prefix = "TABLE:" + QualifiedName.key(dbName, scName, "");
-        // A version purged with a retention of 0 is listed too, the newest of its name: dropping the name again
-        // forgets it (see Catalog#listedOnlyVersions). Read first, as reading the versions purges again.
-        final Map<String, DroppedObject> listedOnly = catalog.listedOnlyVersions();
+        // A version purged with a retention of 0 is listed too, every version of its name (see
+        // Catalog#listedOnlyVersions). Read first, as reading the versions purges again.
+        final Map<String, List<DroppedObject>> listedOnly = catalog.listedOnlyVersions();
         final List<DroppedObject> out = new ArrayList<>();
         for (final Map.Entry<String, List<DroppedObject>> entry : catalog.droppedVersions().entrySet()) {
             final String key = entry.getKey();
             if (!isSchemaTableKey(key, prefix)) {
                 continue;
             }
-            final DroppedObject listed = listedOnly.remove(key);
+            final List<DroppedObject> listed = listedOnly.remove(key);
             if (listed != null) {
-                out.add(listed);
+                for (int i = listed.size() - 1; i >= 0; i--) {
+                    out.add(listed.get(i));
+                }
             }
             for (int i = entry.getValue().size() - 1; i >= 0; i--) {
                 if (entry.getValue().get(i).getObject() instanceof Table) {
@@ -753,9 +764,11 @@ final class ShowRelationalExecutor {
                 }
             }
         }
-        for (final Map.Entry<String, DroppedObject> entry : listedOnly.entrySet()) {
+        for (final Map.Entry<String, List<DroppedObject>> entry : listedOnly.entrySet()) {
             if (isSchemaTableKey(entry.getKey(), prefix)) {
-                out.add(entry.getValue());
+                for (int i = entry.getValue().size() - 1; i >= 0; i--) {
+                    out.add(entry.getValue().get(i));
+                }
             }
         }
         return out;

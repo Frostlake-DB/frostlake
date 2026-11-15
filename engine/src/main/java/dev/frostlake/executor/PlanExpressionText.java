@@ -279,7 +279,8 @@ final class PlanExpressionText extends AstPrinterVisitor {
             case MULTIPLY: {
                 final boolean converted = !isLiteral(left) && !isLiteral(right) && positive(scaleOf(left))
                     && positive(scaleOf(right));
-                return operand(left, converted) + " * " + operand(right, converted);
+                return operand(left, converted || widened(left, right, '*', false)) + " * "
+                    + operand(right, converted || widened(right, left, '*', true));
             }
             case ADD:
             case SUBTRACT:
@@ -757,8 +758,73 @@ final class PlanExpressionText extends AstPrinterVisitor {
         final Integer leftScale = scaleOf(left);
         final Integer rightScale = scaleOf(right);
         final boolean known = leftScale != null && rightScale != null;
-        return operand(left, known && leftScale.intValue() < rightScale.intValue()) + " " + symbol + " "
-            + operand(right, known && rightScale.intValue() < leftScale.intValue());
+        final boolean arithmetic = "+".equals(symbol) || "-".equals(symbol);
+        return operand(left, known && leftScale.intValue() < rightScale.intValue()
+                || arithmetic && widened(left, right, symbol.charAt(0), false)) + " " + symbol + " "
+            + operand(right, known && rightScale.intValue() < leftScale.intValue()
+                || arithmetic && widened(right, left, symbol.charAt(0), true));
+    }
+
+    /**
+     * Whether a whole-number column beside a whole-number literal in a sum, a difference or a product is converted to
+     * a wider integer, and so stands in parentheses: the account stores a column of whole numbers in the fewest bytes
+     * its values need - one for -128 to 127, then two, four, eight and sixteen - and converts it where the literal,
+     * or the operation's result over the values, needs more. Over 5, 7 and 9, {@code (FZ.ID) + 119} and
+     * {@code (FZ.ID) - 133} but {@code FZ.ID + 118}, and {@code (FZ.ID) * 15} but {@code FZ.ID * 14}
+     * (live-verified).
+     *
+     * @param column       the operand that may be the column
+     * @param literal      the other operand, which may be the literal
+     * @param operator     '+', '-' or '*'
+     * @param literalFirst whether the literal is written first
+     * @return true where the column is converted
+     */
+    private boolean widened(final Expression column, final Expression literal, final char operator,
+                            final boolean literalFirst) {
+        if (constants == null || !(column instanceof ColumnReferenceExpression) || !isWholeLiteral(literal)) {
+            return false;
+        }
+        final PlanColumn resolved = scope == null ? null : scope.resolve((ColumnReferenceExpression) column);
+        final Integer scale = resolved == null ? null : scaleOf(resolved.getType());
+        final BigInteger[] range = scale == null || scale.intValue() != 0 ? null : constants.storedRange(resolved);
+        if (range == null) {
+            return false;
+        }
+        final BigInteger value = new BigDecimal(((LiteralExpression) literal).getValue().toString()).toBigInteger();
+        final BigInteger least;
+        final BigInteger greatest;
+        if (operator == '*') {
+            least = range[0].multiply(value).min(range[1].multiply(value));
+            greatest = range[0].multiply(value).max(range[1].multiply(value));
+        } else if (operator == '+') {
+            least = range[0].add(value);
+            greatest = range[1].add(value);
+        } else if (literalFirst) {
+            least = value.subtract(range[1]);
+            greatest = value.subtract(range[0]);
+        } else {
+            least = range[0].subtract(value);
+            greatest = range[1].subtract(value);
+        }
+        final int stored = Math.max(storageBytes(range[0]), storageBytes(range[1]));
+        return Math.max(storageBytes(value), Math.max(storageBytes(least), storageBytes(greatest))) > stored;
+    }
+
+    /** Whether an expression is a literal whole number written with no point, a long's or a wider one. */
+    private static boolean isWholeLiteral(final Expression expression) {
+        if (!(expression instanceof LiteralExpression)) {
+            return false;
+        }
+        final LiteralExpression literal = (LiteralExpression) expression;
+        return literal.getType() == LiteralType.INTEGER && literal.getValue() instanceof Number
+            || literal.getType() == LiteralType.DECIMAL && literal.getValue() instanceof BigDecimal
+                && ((BigDecimal) literal.getValue()).scale() == 0;
+    }
+
+    /** The bytes a whole number is stored in: 1 for -128 to 127, then 2, 4, 8 and 16. */
+    private static int storageBytes(final BigInteger value) {
+        final int bits = value.bitLength() + 1;
+        return bits <= 8 ? 1 : bits <= 16 ? 2 : bits <= 32 ? 4 : bits <= 64 ? 8 : 16;
     }
 
     /** An operand of an infix operator, in parentheses where it is an operation, a scalar call or converted. */
@@ -770,13 +836,22 @@ final class PlanExpressionText extends AstPrinterVisitor {
         return converted || isCompound(operand) ? "(" + text + ")" : text;
     }
 
-    /** Whether an expression is an operation or a computed call, which stands in parentheses as an operand. */
-    private boolean isCompound(final Expression expression) {
+    /**
+     * Whether an expression is an operation or a computed call, which stands in parentheses as an operand: a column
+     * that stands for one, a view's or a derived table's, too.
+     *
+     * @param expression the expression
+     * @return true where it is
+     */
+    boolean isCompound(final Expression expression) {
         if (sequenceReads.contains(expression)) {
             return true;
         }
-        if (expression instanceof ColumnReferenceExpression || expression instanceof WindowFunctionExpression
-                || expression instanceof SubqueryExpression) {
+        if (expression instanceof ColumnReferenceExpression) {
+            final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
+            return column != null && column.isCompound();
+        }
+        if (expression instanceof WindowFunctionExpression || expression instanceof SubqueryExpression) {
             return false;
         }
         if (expression instanceof FunctionCallExpression) {
@@ -844,6 +919,16 @@ final class PlanExpressionText extends AstPrinterVisitor {
 
     private static boolean positive(final Integer scale) {
         return scale != null && scale.intValue() > 0;
+    }
+
+    /**
+     * The decimals of the exact number an expression answers, where the plan can tell them.
+     *
+     * @param expression the expression
+     * @return the decimals, or null for any other value or where they are not known
+     */
+    Integer decimalsOf(final Expression expression) {
+        return scaleOf(expression);
     }
 
     /** The decimals of an exact number an expression answers; null for any other value or where it is not known. */

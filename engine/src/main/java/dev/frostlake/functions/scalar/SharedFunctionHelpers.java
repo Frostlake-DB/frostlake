@@ -427,6 +427,17 @@ public final class SharedFunctionHelpers {
         if (value instanceof BinaryValue) {
             return SessionOutputFormats.binaryBase64() ? ((BinaryValue) value).toBase64() : null;
         }
+        // A bare FF prints the scale of this value's type where the call rendering it knows it (see FractionScale).
+        final int displaced = FractionScale.enter(FractionScale.of(value));
+        try {
+            return temporalSessionFormatted(value);
+        } finally {
+            FractionScale.exit(displaced);
+        }
+    }
+
+    /** A temporal in the session's output format for its type, or null (see {@link #sessionFormatted}). */
+    private static String temporalSessionFormatted(final Object value) {
         if (value instanceof LocalDate) {
             return formattedOrNull(value, SessionOutputFormats.date());
         }

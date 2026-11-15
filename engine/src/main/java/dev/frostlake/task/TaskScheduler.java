@@ -16,7 +16,6 @@
 
 package dev.frostlake.task;
 
-import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.executor.StatementClock;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
@@ -41,8 +40,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -612,7 +609,8 @@ public class TaskScheduler {
                     && graphRunFailed(schema, root, began); retry++) {
                 retryGraphRun(rootKey, root, schema, began, null, TaskTrigger.AUTOMATIC_RETRY, config);
             }
-            final int attempt = schema == null ? 1 : TaskGraphs.lastAttempt(schema, root, began.getStartTime(), null);
+            final int attempt = schema == null ? 1
+                : TaskGraphs.lastAttempt(schema, root, began.getStartInstant(), null);
             if (attempt > 1) {
                 CURRENT_ATTEMPT.set(Integer.valueOf(attempt));
             }
@@ -643,7 +641,7 @@ public class TaskScheduler {
         tasks.add(root);
         tasks.addAll(TaskGraphs.descendants(schema, root, true));
         for (final Task task : tasks) {
-            final TaskExecution last = TaskGraphs.lastRunWithin(task, began.getStartTime(), null, 0);
+            final TaskExecution last = TaskGraphs.lastRunWithin(task, began.getStartInstant(), null, 0);
             if (last != null && TaskExecutionState.FAILED.name().equals(last.getState())) {
                 return true;
             }
@@ -749,12 +747,9 @@ public class TaskScheduler {
         }
     }
 
-    /**
-     * A run's stamp: an instant at the account's millisecond resolution, kept on the host-local wall clock the run
-     * models hold and read back by {@link ShowResultHelpers#createdOn(LocalDateTime)}.
-     */
-    private static LocalDateTime stamp(final Instant instant) {
-        return LocalDateTime.ofInstant(instant.truncatedTo(ChronoUnit.MILLIS), ZoneId.systemDefault());
+    /** A run's stamp: an instant at the account's millisecond resolution. */
+    private static Instant stamp(final Instant instant) {
+        return instant.truncatedTo(ChronoUnit.MILLIS);
     }
 
     /**
@@ -775,7 +770,7 @@ public class TaskScheduler {
      * (documented); its error is the condition's, 0040003 "Conditional expression for task evaluated to false.". It
      * counts neither as a success nor as a failure.
      */
-    private TaskExecution skipped(final LocalDateTime scheduledTime, final TaskTrigger trigger) {
+    private TaskExecution skipped(final Instant scheduledTime, final TaskTrigger trigger) {
         final Integer retried = CURRENT_ATTEMPT.get();
         return new TaskExecution(scheduledTime, scheduledTime, stamp(Instant.now()), TaskExecutionState.SKIPPED,
             "Conditional expression for task evaluated to false.", 0, trigger,
@@ -785,7 +780,7 @@ public class TaskScheduler {
     private void runTaskOnceInScope(final String qualifiedTaskName, final Task task, final GraphRun run,
                                     final TaskTrigger trigger) {
         // Read the way SQL reads the time, so what the run does next reads a later instant.
-        final LocalDateTime scheduledTime = stamp(StatementClock.observed());
+        final Instant scheduledTime = stamp(StatementClock.observed());
         logger.info("Executing task: {}", qualifiedTaskName);
         // (Predecessor gating is implemented by the cascade itself: a child runs only via
         // runDependentTasks once every predecessor has succeeded in this graph run (see GraphRun).
@@ -827,7 +822,7 @@ public class TaskScheduler {
             // body's CURRENT_TIMESTAMP is the start recorded here. On the scheduler's thread the body pins a later
             // instant than this reading.
             StatementClock.advance();
-            final LocalDateTime startTime = stamp(StatementClock.observed());
+            final Instant startTime = stamp(StatementClock.observed());
             // Until it ends the run is listed EXECUTING, while it waits for a held table too (live-verified).
             final TaskExecution running = new TaskExecution(scheduledTime, startTime, null,
                 TaskExecutionState.EXECUTING, null, 0, trigger, graphAttempt).ranAs(null, null, SCHEDULED_BY.get());
@@ -995,8 +990,8 @@ public class TaskScheduler {
         final List<TaskExecution> graphRuns = TaskGraphs.graphRuns(root);
         for (int i = graphRuns.size() - 1; i >= 0; i--) {
             final TaskExecution run = graphRuns.get(i);
-            if (group.equals(TaskGraphs.graphRunGroupId(root, TaskGraphs.runId(run.getScheduledTime())))) {
-                final LocalDateTime until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartTime() : null;
+            if (group.equals(TaskGraphs.graphRunGroupId(root, TaskGraphs.runId(run.getScheduledInstant())))) {
+                final Instant until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartInstant() : null;
                 retryGraphRun(rootKey, root, schema, run, until, TaskTrigger.MANUAL_RETRY, root.getConfig());
                 return;
             }
@@ -1030,9 +1025,9 @@ public class TaskScheduler {
      * @param config   the configuration the retry's runs read
      */
     private void retryGraphRun(final String rootKey, final Task root, final Schema schema,
-                               final TaskExecution graphRun, final LocalDateTime until, final TaskTrigger trigger,
+                               final TaskExecution graphRun, final Instant until, final TaskTrigger trigger,
                                final String config) {
-        final LocalDateTime graphStart = graphRun.getStartTime();
+        final Instant graphStart = graphRun.getStartInstant();
         final int lastAttempt = TaskGraphs.lastAttempt(schema, root, graphStart, until);
         final String prior = CURRENT_GRAPH_CONFIG.get();
         CURRENT_GRAPH_CONFIG.set(config);
@@ -1084,8 +1079,7 @@ public class TaskScheduler {
      * graph functions do.
      */
     private static String noFailures(final Task root, final TaskExecution graphRun, final int lastAttempt) {
-        final Long runId = graphRun.getScheduledTime() == null ? null
-            : Long.valueOf(ShowResultHelpers.createdOn(graphRun.getScheduledTime()).toInstant().toEpochMilli());
+        final Long runId = TaskGraphs.runId(graphRun.getScheduledInstant());
         return "Cannot perform retry: run (GRAPH_RUN_GROUP_ID = " + GraphRunGroup.id(root.getId(), runId)
             + ", attempt = " + lastAttempt + ") of graph with root task " + root.getName() + " had no failures.";
     }

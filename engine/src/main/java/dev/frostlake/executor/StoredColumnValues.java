@@ -29,6 +29,7 @@ import dev.frostlake.types.StringType;
 import dev.frostlake.values.DayTimeInterval;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +50,8 @@ public final class StoredColumnValues {
     private final Map<String, Boolean> nulls = new HashMap<>();
     private final Map<String, Boolean> onlyNulls = new HashMap<>();
     private final Map<String, Object> firstValues = new HashMap<>();
+    /** Each whole-number column's least and greatest value, an empty array where it holds none or another value. */
+    private final Map<String, BigInteger[]> wholeRanges = new HashMap<>();
 
     /**
      * @param executor the executor whose storage the rows are read from
@@ -101,6 +104,56 @@ public final class StoredColumnValues {
     String[] textRange(final Table owner, final String column) {
         final String key = read(owner, column);
         return key == null ? null : textRanges.get(key);
+    }
+
+    /**
+     * The least and the greatest value a column of whole numbers holds, NULLs left out.
+     *
+     * @param owner  the table
+     * @param column the column
+     * @return the two values, or null where the rows cannot be read, hold no value or hold one that is no whole number
+     */
+    BigInteger[] wholeRange(final Table owner, final String column) {
+        final String key = read(owner, column);
+        if (key == null) {
+            return null;
+        }
+        BigInteger[] range = wholeRanges.get(key);
+        if (range == null) {
+            range = new BigInteger[0];
+            final Table stored = owner.residentSource();
+            final int index = stored.getColumnIndex(stored.getColumn(column).getName());
+            for (final Row row : executor.statisticsRowsFor(stored.getQualifiedName())) {
+                final Object value = index < row.size() ? row.getValue(index) : null;
+                if (value == null) {
+                    continue;
+                }
+                final BigInteger whole = wholeOf(value);
+                if (whole == null) {
+                    range = new BigInteger[0];
+                    break;
+                }
+                range = range.length == 0 ? new BigInteger[] {whole, whole}
+                    : new BigInteger[] {range[0].min(whole), range[1].max(whole)};
+            }
+            wholeRanges.put(key, range);
+        }
+        return range.length == 0 ? null : range;
+    }
+
+    /** A value as the whole number it is, or null for any other value. */
+    private static BigInteger wholeOf(final Object value) {
+        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+            return BigInteger.valueOf(((Number) value).longValue());
+        }
+        if (value instanceof BigInteger) {
+            return (BigInteger) value;
+        }
+        if (value instanceof BigDecimal) {
+            final BigDecimal number = ((BigDecimal) value).stripTrailingZeros();
+            return number.scale() <= 0 ? number.toBigIntegerExact() : null;
+        }
+        return null;
     }
 
     /**

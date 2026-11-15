@@ -194,10 +194,14 @@ public class JavaFunctionCompiler {
         if (!classes.containsKey(className) && jars.isEmpty()) {
             throw new RuntimeException("No class bytes generated for: " + className);
         }
-        final ClassLoader beside = jars.isEmpty() ? parent : JarHandlerLoader.jarLoader(jars,
-            parent != null ? parent : Thread.currentThread().getContextClassLoader());
-        final InMemoryClassLoader classLoader = beside == null ? new InMemoryClassLoader(classes)
-            : new InMemoryClassLoader(classes, beside);
+        // The jars' classes load beside the source's, in its loader (see InMemoryClassLoader).
+        final InMemoryClassLoader classLoader;
+        if (!jars.isEmpty()) {
+            classLoader = new InMemoryClassLoader(classes, JarHandlerLoader.urlsOf(jars),
+                parent != null ? parent : Thread.currentThread().getContextClassLoader());
+        } else {
+            classLoader = parent == null ? new InMemoryClassLoader(classes) : new InMemoryClassLoader(classes, parent);
+        }
         try {
             return classLoader.loadClass(className);
         } catch (final ClassNotFoundException | LinkageError e) {
@@ -296,7 +300,7 @@ public class JavaFunctionCompiler {
         final JavaCompiler.CompilationTask task = compiler.getTask(report, fileManager, null, options, null,
             Arrays.asList(new InMemoryJavaFile(sourceCode)));
         if (!task.call()) {
-            String printed = report.toString();
+            String printed = JavaRuntimeLevel.reworded(report.toString(), release);
             for (int i = 0; i < jars.size(); i++) {
                 printed = printed.replace(jars.get(i).getAbsolutePath(),
                     "/home/udf/" + i + "/" + jars.get(i).getName());
@@ -305,6 +309,12 @@ public class JavaFunctionCompiler {
                 + (printed.endsWith("\n") || where.isEmpty() ? "" : "\n") + where);
         }
         final Map<String, byte[]> classes = Collections.unmodifiableMap(fileManager.getAllClassBytes());
+        // A class of a jar compiled for a later Java than the routine's is one its compiler cannot read.
+        final String unreadable = release > 0 && !jars.isEmpty()
+            ? JarClassLevels.refusal(compiler, sourceCode, classes, jars, release) : null;
+        if (unreadable != null) {
+            throw new RuntimeException("Error while compiling source: " + unreadable + where);
+        }
         JavaCompiledSources.put(key, classes);
         return classes;
     }

@@ -416,6 +416,9 @@ public class QueryExecutor implements ImportLocalizer {
      */
     private final Map<ParserRuleContext, String> prunedBodies =
         Collections.synchronizedMap(new WeakHashMap<ParserRuleContext, String>());
+    /** The derived tables' bodies planned for a select counting their rows (see GeneratorRowReads#countsThrough). */
+    private final Set<FrostlakeParser.SelectStatementContext> countedThroughBodies =
+        Collections.newSetFromMap(new IdentityHashMap<FrostlakeParser.SelectStatementContext, Boolean>());
     /** The relation bodies planned for a reader that cannot tell duplicate rows apart (see DuplicateBlindReading). */
     private final Set<FrostlakeParser.SelectStatementContext> duplicateBlindBodies =
         Collections.newSetFromMap(new IdentityHashMap<FrostlakeParser.SelectStatementContext, Boolean>());
@@ -459,6 +462,10 @@ public class QueryExecutor implements ImportLocalizer {
 
     /** The cap of a GENERATOR whose rows the select reading it streams (see GeneratorRowReads). */
     private static final long STREAMED_GENERATOR = -3L;
+    /** The cap of a GENERATOR whose SEQ a select orders under a LIMIT: the rows are worked out from their count. */
+    private static final long ORDERED_GENERATOR = -4L;
+    /** The most values of an ordered SEQ worked out from the row count (see GeneratorRowReads#orderedSequence). */
+    private static final long MOST_ORDERED_SEQUENCE_ROWS = 100000L;
     private StreamManager streamManager;
     /** Set while a dynamic table refreshes on this thread; see {@link #beginDynamicTableRefresh}. */
     private final ThreadLocal<Boolean> refreshingDynamicTable = new ThreadLocal<>();
@@ -1128,7 +1135,7 @@ public class QueryExecutor implements ImportLocalizer {
             if (apart != null) {
                 apart.complete();
             }
-            return outermost ? ltzInSessionZone(results) : results;
+            return outermost ? geoInOutputFormats(ltzInSessionZone(results)) : results;
         } finally {
             reentryDepth[0]--;
             if (apart != null) {
@@ -1247,6 +1254,53 @@ public class QueryExecutor implements ImportLocalizer {
             }
         }
         return results;
+    }
+
+    /**
+     * The statement's results with every geospatial cell in the output format the session set for its kind, while the
+     * formats are still pinned (see GeoOutput): WKT or EWKT text, WKB or EWKB bytes. A row is copied before a cell
+     * changes, so a stored row is never rewritten under its table.
+     *
+     * @param results the statement's result sets
+     * @return the same result sets
+     */
+    private static List<ResultSet> geoInOutputFormats(final List<ResultSet> results) {
+        for (final ResultSet rs : results) {
+            if (rs == null || !holdsGeoColumn(rs)) {
+                continue;
+            }
+            final List<Row> rows = rs.getRows();
+            for (int r = 0; r < rows.size(); r++) {
+                final Row row = rows.get(r);
+                Row rendered = row;
+                for (int c = 0; c < row.size(); c++) {
+                    final Object value = row.getValue(c);
+                    if (value instanceof GeoValue) {
+                        final Object given = GeoOutput.rendered((GeoValue) value);
+                        if (given != value) {
+                            if (rendered == row) {
+                                rendered = row.copy();
+                            }
+                            rendered.setValue(c, given);
+                        }
+                    }
+                }
+                if (rendered != row) {
+                    rows.set(r, rendered);
+                }
+            }
+        }
+        return results;
+    }
+
+    /** Whether a result has a GEOGRAPHY or a GEOMETRY column. */
+    private static boolean holdsGeoColumn(final ResultSet rs) {
+        for (final ResultSetColumn column : rs.getColumns()) {
+            if (column.getDataType() instanceof GeographyType || column.getDataType() instanceof GeometryType) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -6594,7 +6648,9 @@ public class QueryExecutor implements ImportLocalizer {
                     plan.add(countedRowsStage(ctx, tableData.countedRows));
                 }
             }
-            if (tableData.countedRows >= 0 && (hasGroupBy || !hasAggregates)) {
+            // A derived table of literals passes its counted rows on (see GeneratorRowReads#countsThrough).
+            if (tableData.countedRows >= 0 && (hasGroupBy || !hasAggregates)
+                    && (hasGroupBy || !GeneratorRowReads.projectsLiterals(this, ctx))) {
                 throw Generator.pastList(tableData.countedRows);
             }
 
@@ -6853,6 +6909,9 @@ public class QueryExecutor implements ImportLocalizer {
                     plan.add(projectionStage(planProjection(table, ctx, aliasToTable, allTables, lateralContext,
                         projectedAliasValues), preProjectionRows, aheadOfNoRows(ctx, table, aliasToTable, allTables,
                         lateralContext, !hasGroupBy && !hasAggregates)));
+                    if (tableData.orderedRows >= 0) {
+                        plan.add(orderedSequenceStage(stmtCtx, ctx, tableData.orderedRows));
+                    }
                     if (sortProjectedOutput) {
                         if (comparesBeforeSort) {
                             plan.add(distinctReadStage());
@@ -7129,6 +7188,9 @@ public class QueryExecutor implements ImportLocalizer {
             // when the plan is asked for its rows.
             recordPlan(plan);
             final ResultSet shape = new ResultSet(columns, new ArrayList<Row>());
+            if (tableData.countedRows >= 0 && !hasGroupBy && !hasAggregates) {
+                shape.markCountedRows(tableData.countedRows);
+            }
             if (!hasPivotSource && keepsSourceStatistics(stmtCtx, ctx, firstTableRef, clauseSource,
                     allTableRefs.size() > 1 || !allJoins.isEmpty())
                     && (lateralContext == null || readsNoLateralName(stmtCtx, lateralContext))) {
@@ -12444,8 +12506,7 @@ public class QueryExecutor implements ImportLocalizer {
                     return null;
                 }
                 return new GrantedObject("TASK", schema.qualifiedName(task.getName()), task.getOwner(),
-                    task.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant(),
-                    memberSpellings(schema, task.getName()));
+                    task.getCreatedAt(), memberSpellings(schema, task.getName()));
             }
             case "ALERT": {
                 final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
@@ -20824,11 +20885,19 @@ public class QueryExecutor implements ImportLocalizer {
             final FrostlakeParser.SelectClauseContext passing = blindReader
                 ? DuplicateBlindReading.passingBlock(planned, functionRegistry) : null;
             markBlindReading(grouped, passing, true);
+            // A select counting the rows reads them through a body of literals (see GeneratorRowReads#countsThrough).
+            final boolean countedThrough = lateralContext == null && GeneratorRowReads.counts(this, ctx);
+            if (countedThrough) {
+                countedThroughBodies.add(planned);
+            }
             // The body's items wait for the reading statement (see RelationBody).
             final boolean outerBody = RelationBody.begin();
             try {
                 body = planSelectFromContext(planned, lateralContext, null);
             } finally {
+                if (countedThrough) {
+                    countedThroughBodies.remove(planned);
+                }
                 RelationBody.end(outerBody);
                 if (blind) {
                     duplicateBlindBodies.remove(source.selectStatement());
@@ -20848,8 +20917,11 @@ public class QueryExecutor implements ImportLocalizer {
                 virtualTable = applyColumnAliases(virtualTable, columnAliases);
             }
 
-            return new TableData(virtualTable, relationBodyRows(body), alias,
+            final TableData derived = new TableData(virtualTable, relationBodyRows(body), alias,
                 "SUBQUERY[" + name + "]{" + body.description + "}");
+            // A body of literals over a GENERATOR's counted rows stands for all of them (see GeneratorRowReads).
+            derived.countedRows = body.shape.getCountedRows();
+            return derived;
         }
 
         // $n — a prior flow-chain stage's result (n statements back from the current stage).
@@ -21489,6 +21561,7 @@ public class QueryExecutor implements ImportLocalizer {
         }, alias, "TABLE[" + call.callText + "]");
         planned.countedRows = call.countedRows;
         planned.streamedRows = call.streamedRows;
+        planned.orderedRows = call.orderedRows;
         return resolvedByRunning ? planned.readWhilePlanning() : planned;
     }
 
@@ -27375,6 +27448,8 @@ public class QueryExecutor implements ImportLocalizer {
                     namedArgs, rowCap == COUNTED_GENERATOR ? 1L : 0L);
                 if (rowCap == COUNTED_GENERATOR) {
                     call.countedRows = pastList.longValue();
+                } else if (rowCap == ORDERED_GENERATOR) {
+                    call.orderedRows = pastList.longValue();
                 } else {
                     call.streamedRows = pastList.longValue();
                 }
@@ -28409,6 +28484,29 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
+     * The projected rows of a select ordering a GENERATOR's SEQ under its LIMIT, worked out from the rows' count (see
+     * GeneratorRowReads#orderedSequence): the first values the LIMIT and its OFFSET read, in the order asked for.
+     */
+    private Operator orderedSequenceStage(final FrostlakeParser.SelectStatementContext statement,
+                                          final FrostlakeParser.SelectClauseContext select, final long rows) {
+        final int bytes = GeneratorRowReads.sequenceBytes(select);
+        final boolean descending = GeneratorRowReads.orderedDescending(statement);
+        final long read = rowsRead(statement, 0);
+        return new StageOperator("ORDERED_SEQUENCE[" + rows + "]") {
+            @Override
+            protected List<Row> apply(final List<Row> input) {
+                final List<Row> out = new ArrayList<Row>();
+                for (final Long value : GeneratorRowReads.orderedSequence(bytes, rows, descending, read)) {
+                    final List<Object> values = new ArrayList<Object>();
+                    values.add(value);
+                    out.add(new Row(values));
+                }
+                return out;
+            }
+        };
+    }
+
+    /**
      * The COUNTs of a select counting a GENERATOR's rows over the one of them it holds (see GeneratorRowReads), each
      * scaled to the rows the call stands for.
      */
@@ -28469,6 +28567,17 @@ public class QueryExecutor implements ImportLocalizer {
      * rows are counted or streamed past what a list holds holds one row or none (see GeneratorRowReads).
      */
     private long generatorRowCap(final FrostlakeParser.TableReferenceContext reference) {
+        // A derived table of literals passes the rows to the select counting them, before it is read as projecting.
+        if (GeneratorRowReads.countsThrough(this, reference)) {
+            return COUNTED_GENERATOR;
+        }
+        final FrostlakeParser.SelectStatementContext ordered = GeneratorRowReads.orderedSequenceStatement(reference);
+        if (ordered != null) {
+            final long read = rowsRead(ordered, 0);
+            if (read >= 0 && read <= MOST_ORDERED_SEQUENCE_ROWS) {
+                return ORDERED_GENERATOR;
+            }
+        }
         final FrostlakeParser.SelectStatementContext statement = projectingStatement(reference);
         if (statement != null) {
             return rowsRead(statement, 0);
@@ -28573,6 +28682,16 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /** Whether a WHERE keeps every row whatever it holds: a condition of literals alone that is TRUE. */
+    /**
+     * Whether a statement is a derived table's body planned for a select counting its rows.
+     *
+     * @param statement the statement
+     * @return true where it is
+     */
+    boolean isCountedThroughBody(final FrostlakeParser.SelectStatementContext statement) {
+        return countedThroughBodies.contains(statement);
+    }
+
     boolean keepsEveryRow(final FrostlakeParser.WhereClauseContext where) {
         if (!UnreadColumnPruning.builtFromLiterals(where.booleanExpr())) {
             return false;

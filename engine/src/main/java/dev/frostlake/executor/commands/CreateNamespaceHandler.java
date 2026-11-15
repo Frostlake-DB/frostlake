@@ -24,6 +24,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.TransientRetentionLimit;
 import dev.frostlake.metastore.Catalog;
+import dev.frostlake.metastore.DroppedObject;
 import dev.frostlake.metastore.FutureGrants;
 import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
@@ -139,12 +140,13 @@ public class CreateNamespaceHandler implements CommandHandler {
             queryExecutor.requireOwnership("DATABASE", new String[] {dbName}, null);
             try {
                 final Database replaced = catalog.databaseExact(dbName);
-                if (replaced != null) {
-                    for (final Schema replacedSchema : replaced.getAllSchemas()) {
-                        releaseSchemaStorage(dbName, replacedSchema);
-                    }
-                }
+                // The database replaced is a dropped version of its name, as a dropped one is (live-verified: SHOW
+                // DATABASES HISTORY lists it).
+                final DroppedObject version = replaced == null ? null : ddl.keepReplacedDatabase(replaced);
                 catalog.dropDatabase(dbName, true);
+                if (version != null) {
+                    queryExecutor.setAsideStages("DATABASE:" + replaced.getName(), version);
+                }
                 if (ddl.getStreamManager() != null) {
                     ddl.getStreamManager().onDatabaseDropped(dbName);
                 }
@@ -398,8 +400,12 @@ public class CreateNamespaceHandler implements CommandHandler {
                 final String scN = parts.length == 2 ? parts[1] : parts[0];
                 if (dbN != null) {
                     final Schema replacedSchema = catalog.databaseExact(dbN).schemaExact(scN);
-                    releaseSchemaStorage(dbN, replacedSchema);
+                    // The schema replaced is a dropped version of its name, as a dropped one is (live-verified: SHOW
+                    // SCHEMAS HISTORY lists it).
+                    final DroppedObject version = ddl.keepReplacedSchema(dbN, replacedSchema);
                     catalog.databaseExact(dbN).dropSchema(replacedSchema.getName(), true);
+                    queryExecutor.setAsideStages("SCHEMA:" + QualifiedName.key(dbN, replacedSchema.getName()),
+                        version);
                     if (ddl.getStreamManager() != null) {
                         ddl.getStreamManager().onSchemaDropped(dbN, scN);
                     }

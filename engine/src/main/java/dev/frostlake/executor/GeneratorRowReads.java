@@ -43,7 +43,12 @@ import java.util.Set;
  *       LIMIT, until the LIMIT is met: {@code SELECT 1 AS x FROM … WHERE UNIFORM(1, 2, RANDOM()) = 1 LIMIT 4} is four
  *       rows;</li>
  *   <li>a WHERE over a derived table's literal columns is decided before any row is read, so the LIMIT of the select
- *       reading it bounds the rows: {@code SELECT x FROM (SELECT 1 AS x FROM …) WHERE x = 1 LIMIT 2} is 1 and 1.</li>
+ *       reading it bounds the rows: {@code SELECT x FROM (SELECT 1 AS x FROM …) WHERE x = 1 LIMIT 2} is 1 and 1;</li>
+ *   <li>a derived table projecting literals alone passes the rows on to a select counting them: {@code SELECT
+ *       COUNT(*) FROM (SELECT 1 AS x FROM …)} is 3000000000;</li>
+ *   <li>a SEQ ordered under a LIMIT is the wrapped sequence's first values in that order: {@code SELECT SEQ4() AS s
+ *       FROM … ORDER BY s LIMIT 2} is 0 and 0, SEQ4 wrapping past 2147483647, and under DESC 2147483647 and
+ *       2147483646.</li>
  * </ul>
  */
 final class GeneratorRowReads {
@@ -356,6 +361,161 @@ final class GeneratorRowReads {
             }
         }
         return true;
+    }
+
+    /**
+     * Whether the select reading a FROM item alone projects literals alone, and is a derived table that a select
+     * counting its rows reads alone (see {@link #counts}): the rows are counted through it.
+     *
+     * @param executor  the executor that judges the selects' WHERE clauses
+     * @param reference the FROM item
+     * @return true where the rows are counted through a derived table
+     */
+    static boolean countsThrough(final QueryExecutor executor, final FrostlakeParser.TableReferenceContext reference) {
+        final FrostlakeParser.SelectClauseContext select = soleReader(reference);
+        if (select == null || !projectsLiterals(executor, select)) {
+            return false;
+        }
+        // The body may be planned from its own text, its unread items blanked, apart from the select reading it.
+        if (executor.isCountedThroughBody(statementOf(select))) {
+            return true;
+        }
+        final ParseTree body = statementOf(select).getParent();
+        return body instanceof FrostlakeParser.TableSourceContext
+            && body.getParent() instanceof FrostlakeParser.TableReferenceContext
+            && counts(executor, (FrostlakeParser.TableReferenceContext) body.getParent());
+    }
+
+    /**
+     * Whether a select projects literals alone, one row out for each row in: no WHERE but one keeping every row, no
+     * grouping, ordering or row limit, every item built from literals.
+     *
+     * @param executor the executor that judges the WHERE
+     * @param select   the select, the one of its statement
+     * @return true where it does
+     */
+    static boolean projectsLiterals(final QueryExecutor executor, final FrostlakeParser.SelectClauseContext select) {
+        if (!(select.getParent() instanceof FrostlakeParser.SelectOperandContext)
+                || !(select.getParent().getParent() instanceof FrostlakeParser.SelectStatementContext)) {
+            return false;
+        }
+        final FrostlakeParser.SelectStatementContext statement = statementOf(select);
+        if (statement.orderByClause() != null || statement.limitClause() != null || statement.fetchClause() != null
+                || select.groupByClause() != null || select.havingClause() != null || select.qualifyClause() != null
+                || select.whereClause() != null && !executor.keepsEveryRow(select.whereClause())) {
+            return false;
+        }
+        for (final FrostlakeParser.SelectItemContext item : select.selectList().selectItem()) {
+            if (!(item instanceof FrostlakeParser.ExprItemContext) || !UnreadColumnPruning.builtFromLiterals(
+                    ((FrostlakeParser.ExprItemContext) item).booleanExpr())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The statement whose one select reads a FROM item alone, projects a SEQ1, SEQ2, SEQ4 or SEQ8 of no argument as
+     * its one item and orders the rows by it - the item's alias, its place or its text, the one key - under a LIMIT
+     * or FETCH of its own, with nothing else but its FROM; null otherwise. Its rows are the wrapped sequence's first
+     * values in that order (see {@link #orderedSequence}).
+     *
+     * @param reference the FROM item
+     * @return the statement, or null
+     */
+    static FrostlakeParser.SelectStatementContext orderedSequenceStatement(
+            final FrostlakeParser.TableReferenceContext reference) {
+        final FrostlakeParser.SelectClauseContext select = soleReader(reference);
+        if (select == null || sequenceBytes(select) == 0) {
+            return null;
+        }
+        final FrostlakeParser.SelectStatementContext statement = statementOf(select);
+        if (statement.limitClause() == null && statement.fetchClause() == null || select.whereClause() != null
+                || select.groupByClause() != null || select.havingClause() != null || select.qualifyClause() != null
+                || statement.orderByClause() == null || statement.orderByClause().orderItem().size() != 1) {
+            return null;
+        }
+        final FrostlakeParser.ExprItemContext item =
+            (FrostlakeParser.ExprItemContext) select.selectList().selectItem(0);
+        final String key = statement.orderByClause().orderItem(0).booleanExpr().getText();
+        final String alias = item.aliasName() != null ? item.aliasName().getText()
+            : item.identifier() != null ? item.identifier().getText()
+            : item.bareAliasWord() != null ? item.bareAliasWord().getText() : null;
+        return "1".equals(key) || key.equalsIgnoreCase(item.booleanExpr().getText())
+            || alias != null && resolved(alias).equals(resolved(key)) ? statement : null;
+    }
+
+    /** A plain or quoted name as it resolves: an unquoted one folded, a quoted one without its quotes. */
+    private static String resolved(final String written) {
+        return written.length() > 1 && written.startsWith("\"") && written.endsWith("\"")
+            ? written.substring(1, written.length() - 1).replace("\"\"", "\"") : written.toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * The width in bytes of the SEQ a select projects as its one item, a SEQ1, SEQ2, SEQ4 or SEQ8 of no argument; 0
+     * for any other select.
+     *
+     * @param select the select
+     * @return 1, 2, 4 or 8, or 0
+     */
+    static int sequenceBytes(final FrostlakeParser.SelectClauseContext select) {
+        if (select.selectList().selectItem().size() != 1
+                || !(select.selectList().selectItem(0) instanceof FrostlakeParser.ExprItemContext)) {
+            return 0;
+        }
+        ParseTree at = ((FrostlakeParser.ExprItemContext) select.selectList().selectItem(0)).booleanExpr();
+        while (at != null && at.getChildCount() == 1 && !(at instanceof FrostlakeParser.FunctionCallExprContext)) {
+            at = at.getChild(0);
+        }
+        if (!(at instanceof FrostlakeParser.FunctionCallExprContext)) {
+            return 0;
+        }
+        final FrostlakeParser.FunctionCallExprContext call = (FrostlakeParser.FunctionCallExprContext) at;
+        if (call.functionName() == null || call.functionArgList() != null || call.overClause() != null
+                || call.DISTINCT() != null || call.withinGroupClause() != null) {
+            return 0;
+        }
+        final String name = call.functionName().getText().toUpperCase(Locale.ROOT);
+        return "SEQ1".equals(name) ? 1 : "SEQ2".equals(name) ? 2 : "SEQ4".equals(name) ? 4
+            : "SEQ8".equals(name) ? 8 : 0;
+    }
+
+    /**
+     * Whether a statement's one ORDER BY key is descending.
+     *
+     * @param statement the statement
+     * @return true for DESC
+     */
+    static boolean orderedDescending(final FrostlakeParser.SelectStatementContext statement) {
+        return statement.orderByClause() != null && statement.orderByClause().orderItem(0).DESC() != null;
+    }
+
+    /**
+     * The first {@code count} values of a SEQ of {@code bytes} bytes over {@code rows} rows, in ascending or
+     * descending order. The sequence counts the rows from 0 and wraps at the signed maximum of its width as SEQ does
+     * by default, so past it each value up to the rows' remainder comes once more: four bytes over three billion rows
+     * hold 0 to 852516351 twice and the rest once, and eight bytes never wrap.
+     *
+     * @param bytes      the SEQ's width
+     * @param rows       how many rows the sequence numbers
+     * @param descending whether the greatest values come first
+     * @param count      how many values to answer
+     * @return the values
+     */
+    static List<Long> orderedSequence(final int bytes, final long rows, final boolean descending, final long count) {
+        final List<Long> values = new ArrayList<>();
+        final int bits = bytes * 8 - 1;
+        final boolean wraps = bits < Long.SIZE - 1 && rows > 1L << bits;
+        final long top = wraps ? (1L << bits) - 1 : rows - 1;
+        long value = descending ? top : 0L;
+        while (values.size() < count && value >= 0 && value <= top) {
+            final long times = wraps ? (rows - 1 - value) / (1L << bits) + 1 : 1L;
+            for (long i = 0; i < times && values.size() < count; i++) {
+                values.add(Long.valueOf(value));
+            }
+            value = descending ? value - 1 : value + 1;
+        }
+        return values;
     }
 
     /**

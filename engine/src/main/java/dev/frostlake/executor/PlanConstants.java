@@ -20,6 +20,8 @@ import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
 import dev.frostlake.executor.expressions.SubqueryExpression;
 
+import java.math.BigInteger;
+
 /**
  * Folds a constant part of an expression a plan writes into the value the plan writes in its place, as the account
  * computes it while the statement compiles, and a SQL function's call into its body (see {@link PlanConstantFold}).
@@ -44,4 +46,11 @@ interface PlanConstants {
      *         null where the subquery is written as it is
      */
     Expression inlinedItem(SubqueryExpression subquery);
+
+    /**
+     * @param column a column the plan reads
+     * @return the least and the greatest whole number the column of a catalog table holds, or null where it holds
+     *         none, or holds another value, or is no such column
+     */
+    BigInteger[] storedRange(PlanColumn column);
 }

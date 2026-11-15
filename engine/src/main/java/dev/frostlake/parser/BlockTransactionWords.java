@@ -38,8 +38,14 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  *   BEGIN BEGIN; END                      ';' at 11
  * </pre>
  *
- * <p>The account stacks further lines for some of these, its recovery reading on in the nested block; they are not
- * given here.
+ * <p>The account stacks further lines for two of them, its recovery reading on in the nested block (live-verified):
+ * BEGIN WORK NAME names the transaction's name and then the text's last END, and a BEGIN WORK of an IF's or a WHILE's
+ * statements the end of the text:
+ *
+ * <pre>
+ *   BEGIN BEGIN WORK NAME t1; ROLLBACK; END             'WORK' at 12, 't1' at 22, 'END' at 36
+ *   BEGIN IF (TRUE) THEN BEGIN WORK; END IF; END        'WORK' at 27, '&lt;EOF&gt;' at 44
+ * </pre>
  */
 public final class BlockTransactionWords {
 
@@ -57,14 +63,24 @@ public final class BlockTransactionWords {
             return;
         }
         Token first = null;
+        FrostlakeParser.TransactionStatementContext refusing = null;
+        Token lastEnd = null;
         final Deque<ParseTree> pending = new ArrayDeque<>();
         pending.push(script);
         while (!pending.isEmpty()) {
             final ParseTree node = pending.pop();
+            if (node instanceof TerminalNode) {
+                final Token word = ((TerminalNode) node).getSymbol();
+                if (word.getType() == FrostlakeParser.END
+                        && (lastEnd == null || word.getTokenIndex() > lastEnd.getTokenIndex())) {
+                    lastEnd = word;
+                }
+            }
             if (node instanceof FrostlakeParser.TransactionStatementContext) {
                 final Token refused = refusedWord((FrostlakeParser.TransactionStatementContext) node);
                 if (refused != null && (first == null || refused.getTokenIndex() < first.getTokenIndex())) {
                     first = refused;
+                    refusing = (FrostlakeParser.TransactionStatementContext) node;
                 }
                 continue;
             }
@@ -75,8 +91,25 @@ public final class BlockTransactionWords {
         if (first != null) {
             final List<String> lines = new ArrayList<>();
             lines.add(sentence(first));
+            if (refusing.WORK() != null && refusing.transactionName() != null) {
+                lines.add(sentence(refusing.transactionName().qualifiedName().getStart()));
+                if (lastEnd != null) {
+                    lines.add(sentence(lastEnd));
+                }
+            } else if (refusing.WORK() != null && inBranch(refusing)) {
+                final int[] end = LeadingCommentOffset.rebase(EndOfInput.line(sql), EndOfInput.position(sql));
+                lines.add("syntax error line " + end[0] + " at position " + end[1] + " unexpected '<EOF>'.");
+            }
             throw new SqlSyntaxException(SqlCompilationError.of(String.join("\n", lines)), lines, sql);
         }
+    }
+
+    /** Whether a statement is one of an IF's or a WHILE's own statements. */
+    private static boolean inBranch(final FrostlakeParser.TransactionStatementContext statement) {
+        final ParserRuleContext list = statement.getParent().getParent();
+        final ParserRuleContext owner = list == null ? null : list.getParent();
+        return owner instanceof FrostlakeParser.IfStatementContext
+            || owner instanceof FrostlakeParser.WhileStatementContext;
     }
 
     /** The token after a BEGIN that opens no transaction where the statement stands, or null. */

@@ -31,9 +31,9 @@ import java.util.Map;
  * snapshot or a written result reads the text again: a double, which the text spells as the decimal a reader takes
  * it for; a FLOAT's double (see {@link FloatOriginNode}); a DATE, a TIME, a timestamp or a BINARY (see
  * {@link TypedScalarNode}); a VECTOR (see {@link TypedVectorNode}); a UUID (see {@link UuidTextNode}); and a scaled
- * NUMBER's whole number (see {@link DecimalOriginNode}). Each node of the tree takes one tag, in the order a walk
- * from the root meets them, which the tree read back from the same text is walked in too; a vector's elements take
- * none. A DECFLOAT's place is kept apart (see {@link DecfloatTextNode#placesIn}).
+ * NUMBER's number and its type's scale (see {@link DecimalOriginNode}, {@link ScaledDecimalNode}). Each node of the
+ * tree takes one tag, in the order a walk from the root meets them, which the tree read back from the same text is
+ * walked in too; a vector's elements take none. A DECFLOAT's place is kept apart (see {@link DecfloatTextNode#placesIn}).
  */
 final class VariantMemberTypes implements Serializable {
 
@@ -57,14 +57,20 @@ final class VariantMemberTypes implements Serializable {
     /** A UUID, its text the one read back. */
     private static final byte UUID = 5;
 
-    /** A scaled NUMBER's whole number, its value the number read back. */
+    /** A scaled NUMBER's whole number, its value the number read back, its type's scale the next of the scales. */
     private static final byte WHOLE_DECIMAL = 6;
+
+    /** A scaled NUMBER's number with decimals, its value the number read back, its scale the next of the scales. */
+    private static final byte SCALED_DECIMAL = 7;
 
     private byte[] tags = new byte[16];
     private int tagCount;
     private double[] doubles = new double[4];
     private int doubleCount;
     private final List<Object> values = new ArrayList<>();
+    /** The scales of the scaled NUMBERs' nodes, in their order; null in what an older version wrote. */
+    private int[] scales = new int[4];
+    private int scaleCount;
 
     private VariantMemberTypes() {
     }
@@ -83,6 +89,7 @@ final class VariantMemberTypes implements Serializable {
         types.collect(tree);
         types.tags = Arrays.copyOf(types.tags, types.tagCount);
         types.doubles = Arrays.copyOf(types.doubles, types.doubleCount);
+        types.scales = Arrays.copyOf(types.scales, types.scaleCount);
         return types;
     }
 
@@ -118,6 +125,9 @@ final class VariantMemberTypes implements Serializable {
         if (node instanceof UuidTextNode) {
             return UUID;
         }
+        if (node instanceof ScaledDecimalNode) {
+            return SCALED_DECIMAL;
+        }
         return node instanceof DecimalOriginNode ? WHOLE_DECIMAL : AS_READ;
     }
 
@@ -132,6 +142,12 @@ final class VariantMemberTypes implements Serializable {
                 doubles = Arrays.copyOf(doubles, doubles.length * 2);
             }
             doubles[doubleCount++] = node.doubleValue();
+        } else if (tag == WHOLE_DECIMAL || tag == SCALED_DECIMAL) {
+            if (scaleCount == scales.length) {
+                scales = Arrays.copyOf(scales, scales.length * 2);
+            }
+            scales[scaleCount++] = tag == WHOLE_DECIMAL ? ((DecimalOriginNode) node).declaredScale()
+                : ((ScaledDecimalNode) node).declaredScale();
         } else if (tag == TYPED) {
             values.add(((TypedScalarNode) node).typedValue());
         } else if (tag == VECTOR) {
@@ -150,8 +166,13 @@ final class VariantMemberTypes implements Serializable {
      * @return the tree, or the member that replaces it where its root is one
      */
     JsonNode restoredIn(final JsonNode tree) {
-        // The places reached so far: the next tag, the next double and the next value.
-        return restored(tree, new int[3]);
+        // The places reached so far: the next tag, the next double, the next value and the next scale.
+        return restored(tree, new int[4]);
+    }
+
+    /** The next of the scales, or -1 where what an older version wrote keeps none. */
+    private int nextScale(final int[] at) {
+        return scales != null && at[3] < scales.length ? scales[at[3]++] : -1;
     }
 
     private JsonNode restored(final JsonNode node, final int[] at) {
@@ -171,7 +192,9 @@ final class VariantMemberTypes implements Serializable {
             case UUID:
                 return new UuidTextNode(node.asText());
             case WHOLE_DECIMAL:
-                return new DecimalOriginNode(node.decimalValue());
+                return new DecimalOriginNode(node.decimalValue(), nextScale(at));
+            case SCALED_DECIMAL:
+                return new ScaledDecimalNode(node.decimalValue(), nextScale(at));
             default:
                 break;
         }

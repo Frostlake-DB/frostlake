@@ -34,11 +34,13 @@ import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.types.DataType;
+import dev.frostlake.types.NumericType;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -107,6 +109,8 @@ final class PlanBuilder {
     private static final int DEEPEST_VIEW = 32;
 
     private final QueryExecutor executor;
+    /** The stored values the plan weighs, read once per plan (see PlanConstants#storedRange). */
+    private StoredColumnValues storedValues;
 
     /** The FROM list item each table reference stands for, from when its SELECT is entered until it is planned. */
     private final Map<FrostlakeParser.TableReferenceContext, PlanFromItem> pending = new IdentityHashMap<>();
@@ -313,7 +317,7 @@ final class PlanBuilder {
                 for (final TableColumn column : table.getColumns()) {
                     columns.add(PlanColumn.scanned(column.getName(), relationName(plan) + "."
                         + SqlIdentifiers.spellCanonical(column.getName()), column.getDataType(),
-                        new PlanRead(plan, column.getName())));
+                        new PlanRead(plan, column.getName())).storedIn(table, column.getName()));
                 }
             }
         }
@@ -408,9 +412,34 @@ final class PlanBuilder {
             final PlanColumn column = state.getScope().resolve((ColumnReferenceExpression) expression);
             name = name != null ? name : ((ColumnReferenceExpression) expression).getColumnName();
             type = column == null ? null : column.getType();
+        } else if (printer.decimalsOf(expression) != null) {
+            // An exact number's decimals decide how a read of the column is spelled: AVG of a whole number is
+            // SCALED_ROUND_INT_DIVIDE over a view's column of one too (live-verified).
+            type = new NumericType("NUMBER", 38, printer.decimalsOf(expression).intValue());
         }
-        return new PlanColumn(name, text, type, printer.getReads(), printer.getWindows(),
+        final PlanColumn column = new PlanColumn(name, text, type, printer.getReads(), printer.getWindows(),
             expression instanceof LiteralExpression && ((LiteralExpression) expression).getType() == LiteralType.NULL);
+        return printer.isCompound(expression) && !enclosed(text) ? column.markCompound() : column;
+    }
+
+    /** Whether a text stands whole in one pair of parentheses, as {@code (A + 1)} does and {@code (A) + 1} not. */
+    private static boolean enclosed(final String text) {
+        if (!text.startsWith("(") || !text.endsWith(")")) {
+            return false;
+        }
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            final char c = text.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0 && i < text.length() - 1) {
+                    return false;
+                }
+            }
+        }
+        return depth == 0;
     }
 
     private PlanColumn writtenColumn(final FrostlakeParser.SelectItemContext item, final String name) {
@@ -505,6 +534,17 @@ final class PlanBuilder {
             @Override
             public Expression inlinedItem(final SubqueryExpression subquery) {
                 return PlanConstantFold.inlinedItem(executor, subquery);
+            }
+
+            @Override
+            public BigInteger[] storedRange(final PlanColumn column) {
+                if (column.getStoredTable() == null || column.getStoredColumn() == null) {
+                    return null;
+                }
+                if (storedValues == null) {
+                    storedValues = new StoredColumnValues(executor);
+                }
+                return storedValues.wholeRange(column.getStoredTable(), column.getStoredColumn());
             }
         };
     }

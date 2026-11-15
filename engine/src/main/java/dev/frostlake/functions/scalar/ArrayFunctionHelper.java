@@ -21,6 +21,7 @@ import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.DecimalOriginNode;
 import dev.frostlake.values.FloatOriginNode;
+import dev.frostlake.values.ScaledDecimalNode;
 import dev.frostlake.values.TypedScalarNode;
 import dev.frostlake.values.TypedVectorNode;
 import dev.frostlake.values.UuidTextNode;
@@ -326,11 +327,13 @@ public final class ArrayFunctionHelper {
         final BigDecimal stripped = value.stripTrailingZeros();
         if (stripped.scale() <= 0) {
             if (value.scale() > 0) {
-                return new DecimalOriginNode(stripped.setScale(0));
+                return new DecimalOriginNode(stripped.setScale(0), value.scale());
             }
             return mapper.getNodeFactory().numberNode(stripped.toBigInteger());
         }
-        return mapper.getNodeFactory().numberNode(stripped);
+        // The scale the value's type gives it is kept for the one reader that shows it (see ScaledDecimalNode).
+        return value.scale() > stripped.scale() ? new ScaledDecimalNode(stripped, value.scale())
+            : mapper.getNodeFactory().numberNode(stripped);
     }
 
     /**
@@ -397,9 +400,9 @@ public final class ArrayFunctionHelper {
             if (node instanceof FloatOriginNode) {
                 return node;
             }
-            // A whole DECIMAL out of a scaled NUMBER keeps its kind the same way; its text is already
-            // descaled.
-            if (node instanceof DecimalOriginNode) {
+            // A whole DECIMAL out of a scaled NUMBER keeps its kind the same way, and a number with decimals out
+            // of one its type's scale; the text of either is already descaled.
+            if (node instanceof DecimalOriginNode || node instanceof ScaledDecimalNode) {
                 return node;
             }
             if (node.isDouble() || node.isFloat()) {

@@ -32,8 +32,6 @@ import dev.frostlake.types.ObjectType;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -118,8 +116,8 @@ public class TaskHistoryFunction extends TableFunction {
                         }
                         for (final TaskExecution running : task.getRunningRuns()) {
                             if (rows.size() >= resultLimit) break;
-                            rows.add(row(task, schema, running.getState(), null, instantOf(running.getScheduledTime()),
-                                running.getStartTime(), null, root, instantOf(graphRunTime(root, task, running)),
+                            rows.add(row(task, schema, running.getState(), null, running.getScheduledInstant(),
+                                running.getStartInstant(), null, root, graphRunTime(root, task, running),
                                 running.getScheduledFrom(), running.getAttempt(), running,
                                 running.getScheduledByUser()));
                         }
@@ -128,8 +126,8 @@ public class TaskHistoryFunction extends TableFunction {
                             if (rows.size() >= resultLimit) break;
                             final TaskExecution exec = history.get(i);
                             rows.add(row(task, schema, exec.getState(), exec.getErrorMessage(),
-                                instantOf(exec.getScheduledTime()), exec.getStartTime(), exec.getEndTime(), root,
-                                instantOf(graphRunTime(root, task, exec)), exec.getScheduledFrom(), exec.getAttempt(),
+                                exec.getScheduledInstant(), exec.getStartInstant(), exec.getEndInstant(), root,
+                                graphRunTime(root, task, exec), exec.getScheduledFrom(), exec.getAttempt(),
                                 exec,
                                 exec.getScheduledByUser()));
                         }
@@ -194,7 +192,7 @@ public class TaskHistoryFunction extends TableFunction {
      * cells are NULL.
      */
     private static Row row(final Task task, final Schema schema, final String state, final String errorMessage,
-                           final Instant scheduled, final LocalDateTime started, final LocalDateTime ended,
+                           final Instant scheduled, final Instant started, final Instant ended,
                            final Task root, final Instant graphRunTime, final String scheduledFrom,
                            final int attempt, final TaskExecution ran, final String scheduledBy) {
         final Long runId = root == null ? null : TaskGraphs.runId(graphRunTime);
@@ -243,21 +241,16 @@ public class TaskHistoryFunction extends TableFunction {
      * When the graph run a task's run belongs to was scheduled: a root's first-attempt run's own time, and for a
      * retry's run or another task's the time of the root's last first-attempt run that began no later than it.
      */
-    /** A run's host-local stamp as the instant it stands for, or null. */
-    private static Instant instantOf(final LocalDateTime stamp) {
-        return stamp == null ? null : stamp.atZone(ZoneId.systemDefault()).toInstant();
-    }
-
-    private static LocalDateTime graphRunTime(final Task root, final Task task, final TaskExecution run) {
+    private static Instant graphRunTime(final Task root, final Task task, final TaskExecution run) {
         if (root == null || root == task && run.getAttempt() == 1) {
-            return run.getScheduledTime();
+            return run.getScheduledInstant();
         }
-        LocalDateTime scheduled = null;
+        Instant scheduled = null;
         for (final TaskExecution rootRun : root.getExecutionHistory()) {
-            if (rootRun.getStartTime() != null && run.getStartTime() != null
-                    && !rootRun.getStartTime().isAfter(run.getStartTime()) && rootRun.getAttempt() == 1
+            if (rootRun.getStartInstant() != null && run.getStartInstant() != null
+                    && !rootRun.getStartInstant().isAfter(run.getStartInstant()) && rootRun.getAttempt() == 1
                     && !TaskTrigger.MANUAL_RETRY.reported().equals(rootRun.getScheduledFrom())) {
-                scheduled = rootRun.getScheduledTime();
+                scheduled = rootRun.getScheduledInstant();
             }
         }
         return scheduled;

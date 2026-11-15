@@ -17,6 +17,7 @@
 package dev.frostlake.executor;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -31,6 +32,9 @@ import java.util.Map;
  * <p>BINARY_OUTPUT_FORMAT, HEX or BASE64, is the text a BINARY converts to where no format of its own is written:
  * "the one-argument version of TO_CHAR, TO_VARCHAR" (documented), and a cast and every other conversion alike.
  *
+ * <p>GEOGRAPHY_OUTPUT_FORMAT and GEOMETRY_OUTPUT_FORMAT, each for its own kind, are the form a geospatial value
+ * reaches a client in: GeoJSON, WKT, EWKT, WKB or EWKB (see {@link GeoOutput}).
+ *
  * <p>Pinned per statement in a ThreadLocal, as {@link SessionTimestampMapping} is: the rendering lives deep in static
  * helpers with no session to ask, and one engine serves many sessions.
  */
@@ -43,11 +47,17 @@ public final class SessionOutputFormats {
     public static final String TIMESTAMP_LTZ = "TIMESTAMP_LTZ_OUTPUT_FORMAT";
     public static final String TIMESTAMP_TZ = "TIMESTAMP_TZ_OUTPUT_FORMAT";
     public static final String BINARY = "BINARY_OUTPUT_FORMAT";
+    public static final String GEOGRAPHY = "GEOGRAPHY_OUTPUT_FORMAT";
+    public static final String GEOMETRY = "GEOMETRY_OUTPUT_FORMAT";
+
+    /** The geospatial output format a session that sets none reads. */
+    public static final String GEOJSON = "GEOJSON";
 
     /** The built-in TIMESTAMP_OUTPUT_FORMAT, which an emptied NTZ format falls back to. */
     private static final String TIMESTAMP_DEFAULT = "YYYY-MM-DD HH24:MI:SS.FF3 TZHTZM";
 
-    private static final String[] NAMES = {DATE, TIME, TIMESTAMP, TIMESTAMP_NTZ, TIMESTAMP_LTZ, TIMESTAMP_TZ, BINARY};
+    private static final String[] NAMES = {DATE, TIME, TIMESTAMP, TIMESTAMP_NTZ, TIMESTAMP_LTZ, TIMESTAMP_TZ, BINARY,
+        GEOGRAPHY, GEOMETRY};
 
     private static final ThreadLocal<Map<String, String>> PINNED = new ThreadLocal<Map<String, String>>();
 
@@ -126,6 +136,17 @@ public final class SessionOutputFormats {
         }
         final String generic = set(TIMESTAMP);
         return generic == null || generic.isEmpty() ? null : usable(generic);
+    }
+
+    /**
+     * The form a geospatial value of a kind reaches a client in, upper-cased: GEOJSON, WKT, EWKT, WKB or EWKB.
+     *
+     * @param geography true for a GEOGRAPHY, false for a GEOMETRY
+     * @return the format the session set for the kind, or GEOJSON
+     */
+    public static String geo(final boolean geography) {
+        final String format = set(geography ? GEOGRAPHY : GEOMETRY);
+        return format == null || format.trim().isEmpty() ? GEOJSON : format.trim().toUpperCase(Locale.ROOT);
     }
 
     /** A format to apply, or null: AUTO reads as the built-in rendering. */

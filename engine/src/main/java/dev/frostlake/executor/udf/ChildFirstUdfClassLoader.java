@@ -33,8 +33,25 @@ import java.net.URLClassLoader;
  */
 public final class ChildFirstUdfClassLoader extends URLClassLoader {
 
+    /** The Java level of a routine whose packages do not name Snowpark, or -1 where Snowpark is supplied. */
+    private final int withheldLevel;
+
     public ChildFirstUdfClassLoader(final URL[] urls, final ClassLoader parent) {
+        this(urls, parent, -1);
+    }
+
+    /**
+     * A loader that supplies Snowpark's classes only to a routine whose packages name Snowpark: for any other, a
+     * Snowpark class is one no jar holds, refused as the account's loader refuses it (see
+     * {@link JavaHandlerFailure#unsupplied}).
+     *
+     * @param urls          the jars
+     * @param parent        the loader every class the jars do not hold comes from
+     * @param withheldLevel the routine's Java level where its packages do not name Snowpark, else -1
+     */
+    public ChildFirstUdfClassLoader(final URL[] urls, final ClassLoader parent, final int withheldLevel) {
         super(urls, parent);
+        this.withheldLevel = withheldLevel;
     }
 
     @Override
@@ -46,6 +63,9 @@ public final class ChildFirstUdfClassLoader extends URLClassLoader {
                     resolveClass(alreadyLoaded);
                 }
                 return alreadyLoaded;
+            }
+            if (withheldLevel >= 0 && isSnowpark(name)) {
+                throw JavaHandlerFailure.unsupplied(name, withheldLevel, readFrom(new Throwable().getStackTrace()));
             }
             if (isSharedWithEngine(name)) {
                 return super.loadClass(name, resolve);
@@ -62,7 +82,36 @@ public final class ChildFirstUdfClassLoader extends URLClassLoader {
         }
     }
 
-    private static boolean isSharedWithEngine(final String name) {
+    /** Whether a class is one of Snowpark's, the Java API's or the Scala API's. */
+    private static boolean isSnowpark(final String name) {
+        return name.startsWith("com.snowflake.snowpark_java.") || name.startsWith("com.snowflake.snowpark.");
+    }
+
+    /** The frames below a class loader's own: those of the code that read the class. */
+    private static StackTraceElement[] readFrom(final StackTraceElement[] trace) {
+        int first = 0;
+        while (first < trace.length && isLoaderFrame(trace[first])) {
+            first++;
+        }
+        final StackTraceElement[] reading = new StackTraceElement[trace.length - first];
+        System.arraycopy(trace, first, reading, 0, reading.length);
+        return reading;
+    }
+
+    private static boolean isLoaderFrame(final StackTraceElement frame) {
+        final String owner = frame.getClassName();
+        return owner.equals(ChildFirstUdfClassLoader.class.getName()) || owner.equals("java.lang.ClassLoader")
+            || owner.equals("java.net.URLClassLoader") || owner.equals("java.security.SecureClassLoader")
+            || owner.startsWith("jdk.internal.loader.");
+    }
+
+    /**
+     * Whether a class is one a handler shares with the engine, read from the engine's loader before any jar's.
+     *
+     * @param name the class's binary name
+     * @return whether it is
+     */
+    static boolean isSharedWithEngine(final String name) {
         return name.startsWith("java.")
             || name.startsWith("javax.")
             || name.startsWith("jdk.")

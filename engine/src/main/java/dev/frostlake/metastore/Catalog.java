@@ -162,10 +162,10 @@ public class Catalog {
     // oldest first. UNDROP restores the newest, and the next UNDROP of the name the one dropped before it.
     private final Map<String, List<DroppedObject>> droppedObjects = new ConcurrentHashMap<>();
     /**
-     * The latest table or schema version of each name purged with a retention of 0, kept only to be listed (see
-     * {@link #listedOnlyVersions}); guarded by the dropped versions' lock.
+     * The table, schema and database versions purged with a retention of 0, kept only to be listed (see
+     * {@link #listedOnlyVersions}), each name's oldest first; guarded by the dropped versions' lock.
      */
-    private final Map<String, DroppedObject> listedOnly = new HashMap<>();
+    private final Map<String, List<DroppedObject>> listedOnly = new HashMap<>();
 
     /** Told of every dropped version {@link #purgeExpiredDropped} forgets for good; null for none. */
     private volatile DroppedVersionPurge droppedVersionPurge;
@@ -1472,7 +1472,6 @@ public class Catalog {
         synchronized (droppedObjects) {
             // The versions whose retention ran out go first, so a long run of drops holds no rows nothing can restore.
             purgeExpiredDropped();
-            listedOnly.remove(key);
             List<DroppedObject> versions = droppedObjects.get(key);
             if (versions == null) {
                 versions = new ArrayList<>();
@@ -1520,16 +1519,21 @@ public class Catalog {
     }
 
     /**
-     * The table and schema versions purged with a retention of 0 that SHOW TABLES HISTORY and SHOW SCHEMAS HISTORY
-     * still list, by "TABLE:fqName" and "SCHEMA:fqName": the latest of each name until the name is dropped again,
-     * which UNDROP no longer finds (live-verified).
+     * The table, schema and database versions purged with a retention of 0 that SHOW TABLES, SCHEMAS and DATABASES
+     * HISTORY still list, by "TABLE:fqName", "SCHEMA:fqName" and "DATABASE:name", which UNDROP no longer finds: every
+     * version of the name, a replaced one and a dropped one alike, however often the name is dropped again
+     * (live-verified).
      *
-     * @return a copy of the listings
+     * @return a copy of the listings, each name's oldest first
      */
-    public Map<String, DroppedObject> listedOnlyVersions() {
+    public Map<String, List<DroppedObject>> listedOnlyVersions() {
         synchronized (droppedObjects) {
             purgeExpiredDropped();
-            return new TreeMap<>(listedOnly);
+            final Map<String, List<DroppedObject>> copy = new TreeMap<>();
+            for (final Map.Entry<String, List<DroppedObject>> entry : listedOnly.entrySet()) {
+                copy.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+            }
+            return copy;
         }
     }
 
@@ -1558,11 +1562,16 @@ public class Catalog {
                 if (!version.isPurgedAt(now)) {
                     kept.add(version);
                 } else {
-                    // A table or a schema kept for no day is still listed, its data gone, until its name is dropped
-                    // again.
-                    if (version.getRetentionDays() <= 0
-                            && (version.getObject() instanceof Table || version.getObject() instanceof Schema)) {
-                        listedOnly.put(entry.getKey(), version.listedOnly());
+                    // A table, a schema or a database kept for no day is still listed, its data gone, every version of
+                    // its name alike (live-verified).
+                    if (version.getRetentionDays() <= 0 && (version.getObject() instanceof Table
+                            || version.getObject() instanceof Schema || version.getObject() instanceof Database)) {
+                        List<DroppedObject> listed = listedOnly.get(entry.getKey());
+                        if (listed == null) {
+                            listed = new ArrayList<>();
+                            listedOnly.put(entry.getKey(), listed);
+                        }
+                        listed.add(version.listedOnly());
                     }
                     if (purge != null) {
                         purge.purged(entry.getKey(), version);

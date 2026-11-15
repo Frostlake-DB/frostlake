@@ -191,16 +191,19 @@ public final class JavaTableFunctions {
      */
     private static Class<?> importedClass(final Function function, final String className, final Catalog catalog,
                                           final S3PathResolver s3Resolver) {
+        // A handler whose routine's packages do not name Snowpark cannot read it (live-verified).
+        final int withheld = SnowparkPackage.withheldLevel(function.getEnvironment().getPackages(),
+            function.getRuntimeVersion());
         final AutoCloseable kept = StatementHandlerStates.state(function, JAR_TABLE_HANDLER_CLASS,
             new HandlerStateFactory() {
                 @Override
                 public AutoCloseable create() {
                     return new JavaHandlerClass(JarHandlerLoader.loadAnew(function.getImports(), className, catalog,
-                        s3Resolver));
+                        s3Resolver, withheld));
                 }
             });
         return kept != null ? ((JavaHandlerClass) kept).handled()
-            : JarHandlerLoader.loadAnew(function.getImports(), className, catalog, s3Resolver);
+            : JarHandlerLoader.loadAnew(function.getImports(), className, catalog, s3Resolver, withheld);
     }
 
     /** The handler's members, or the refusal of a class that cannot be a table function's. */

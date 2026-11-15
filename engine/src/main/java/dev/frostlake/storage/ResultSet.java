@@ -40,6 +40,8 @@ public class ResultSet {
     private boolean recursiveStep;
     /** Whether this is the answer a Snowflake Scripting RETURN handed its CALL or block. */
     private boolean scriptingAnswer;
+    /** How many rows a planned result's row stands for, or -1 (see {@link #markCountedRows}). */
+    private long countedRows = -1L;
     /** The rows a CTAS wrote or a TRUNCATE removed, when this is that statement's status; null otherwise. */
     private Long rowsInserted;
     private Long rowsDeleted;
@@ -225,6 +227,23 @@ public class ResultSet {
         this.rowsInserted = Long.valueOf(inserted);
         this.rowsDeleted = Long.valueOf(deleted);
         return this;
+    }
+
+    /**
+     * Mark a planned result whose one row stands for {@code rows} rows of a GENERATOR a select counts through it
+     * (the executor's GeneratorRowReads).
+     *
+     * @param rows how many rows the result's row stands for
+     * @return this result
+     */
+    public ResultSet markCountedRows(final long rows) {
+        this.countedRows = rows;
+        return this;
+    }
+
+    /** How many rows a planned result's row stands for (see {@link #markCountedRows}), or -1. */
+    public long getCountedRows() {
+        return countedRows;
     }
 
     /** The rows the statement wrote (see {@link #markRowsChanged}), or null when it recorded none. */

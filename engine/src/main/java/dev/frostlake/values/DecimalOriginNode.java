@@ -30,10 +30,36 @@ import java.math.BigDecimal;
 public final class DecimalOriginNode extends DecimalNode {
     private static final long serialVersionUID = 1L;
 
+    /** The scale of the NUMBER the value was read from, or -1 where it is not known. */
+    private final int declaredScale;
+
     /**
      * @param whole the value, at scale 0
      */
     public DecimalOriginNode(final BigDecimal whole) {
+        this(whole, -1);
+    }
+
+    /**
+     * @param whole         the value, at scale 0
+     * @param declaredScale the scale of the NUMBER it was read from, or -1 where it is not known
+     */
+    public DecimalOriginNode(final BigDecimal whole, final int declaredScale) {
         super(whole);
+        this.declaredScale = declaredScale;
+    }
+
+    /** The scale of the NUMBER the value was read from, or -1 where it is not known. */
+    public int declaredScale() {
+        return declaredScale;
+    }
+
+    /**
+     * The value written at the scale its type gave it, {@code 3.00}, as a Java handler's {@code String[]} element shows
+     * it (live-verified); its descaled text where the scale is not known.
+     */
+    public String scaledText() {
+        return declaredScale > 0 ? decimalValue().setScale(declaredScale).toPlainString()
+            : decimalValue().toPlainString();
     }
 }

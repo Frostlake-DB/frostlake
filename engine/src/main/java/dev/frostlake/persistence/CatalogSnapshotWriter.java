@@ -81,6 +81,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -557,7 +559,8 @@ final class CatalogSnapshotWriter {
             taskSnapshot.comment = task.getComment();
             taskSnapshot.condition = task.getCondition();
             taskSnapshot.owner = task.getOwner();
-            taskSnapshot.createdAt = task.getCreatedAt();
+            taskSnapshot.createdOn = task.getCreatedAt();
+            taskSnapshot.createdAt = LocalDateTime.ofInstant(task.getCreatedAt(), ZoneId.systemDefault());
             taskSnapshot.suspendTaskAfterNumFailures = task.getSuspendTaskAfterNumFailures();
             taskSnapshot.taskAutoRetryAttempts = task.getTaskAutoRetryAttempts();
             taskSnapshot.allowOverlappingExecution = task.isAllowOverlappingExecution();
@@ -581,6 +584,9 @@ final class CatalogSnapshotWriter {
                 run.scheduledTime = execution.getScheduledTime();
                 run.startTime = execution.getStartTime();
                 run.endTime = execution.getEndTime();
+                run.scheduledAt = execution.getScheduledInstant();
+                run.startedAt = execution.getStartInstant();
+                run.endedAt = execution.getEndInstant();
                 run.state = execution.getState();
                 run.errorMessage = execution.getErrorMessage();
                 run.rowsAffected = execution.getRowsAffected();

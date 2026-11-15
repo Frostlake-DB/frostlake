@@ -43,7 +43,8 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  * at its place within the BODY, counted from one — the frame every body-compilation refusal uses.
  *
  * <p>A named bind is told from the semi-structured path that shares its colon ({@code v:a}) by the PARSE
- * TREE, never by the text around it.
+ * TREE, never by the text around it, and so is the question mark of a row pattern's quantifier
+ * ({@code PATTERN (x? y*?)}), which is no bind (live-verified).
  */
 public final class BindsInDefinition {
 
@@ -68,7 +69,9 @@ public final class BindsInDefinition {
         }
         if (definition instanceof TerminalNode) {
             final Token token = ((TerminalNode) definition).getSymbol();
-            if (token.getType() == FrostlakeLexer.QUESTION || isRowCountBind((TerminalNode) definition)) {
+            if (token.getType() == FrostlakeLexer.QUESTION
+                    && !(definition.getParent() instanceof FrostlakeParser.RowPatternQuantifierContext)
+                    || isRowCountBind((TerminalNode) definition)) {
                 throw new RuntimeException(SqlCompilationError.at(token.getLine(),
                     token.getCharPositionInLine(), REFUSAL));
             }
@@ -100,7 +103,7 @@ public final class BindsInDefinition {
      * @param body          the body as written, already stripped of its delimiters
      */
     public static void rejectInBody(final QueryExecutor queryExecutor, final String body) {
-        rejectUnnamedInBody(body);
+        rejectUnnamedInBody(queryExecutor, body);
         if (queryExecutor == null || body == null || body.indexOf(':') < 0) {
             return;
         }
@@ -147,7 +150,7 @@ public final class BindsInDefinition {
         }
     }
 
-    private static void rejectUnnamedInBody(final String body) {
+    private static void rejectUnnamedInBody(final QueryExecutor queryExecutor, final String body) {
         if (body == null || body.indexOf('?') < 0) {
             return;
         }
@@ -156,11 +159,43 @@ public final class BindsInDefinition {
         final CommonTokenStream stream = new CommonTokenStream(lexer);
         stream.fill();
         final List<Token> tokens = stream.getTokens();
+        ParseTree parsed = null;
+        boolean read = false;
         for (final Token token : tokens) {
             if (token.getType() == FrostlakeLexer.QUESTION) {
+                if (!read) {
+                    parsed = wholeTree(queryExecutor, body);
+                    read = true;
+                }
+                if (parsed != null && isPatternQuantifier(parsed, token.getStartIndex())) {
+                    continue;
+                }
                 throw new RuntimeException(inBodyFrame(token.getLine(), token.getCharPositionInLine() + 1));
             }
         }
+    }
+
+    /** The body's parse tree, a scripting block's among them, or null where it does not parse. */
+    private static ParseTree wholeTree(final QueryExecutor queryExecutor, final String body) {
+        if (queryExecutor == null) {
+            return null;
+        }
+        final FrostlakeParser.BeginEndBlockContext block = queryExecutor.proceduralBlockOf(body);
+        return block != null ? block : bodyTree(queryExecutor, body);
+    }
+
+    /** Whether the question mark that starts at that place of the body is a row pattern's quantifier's. */
+    private static boolean isPatternQuantifier(final ParseTree tree, final int startIndex) {
+        if (tree instanceof TerminalNode) {
+            return ((TerminalNode) tree).getSymbol().getStartIndex() == startIndex
+                && tree.getParent() instanceof FrostlakeParser.RowPatternQuantifierContext;
+        }
+        for (int i = 0; i < tree.getChildCount(); i++) {
+            if (isPatternQuantifier(tree.getChild(i), startIndex)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

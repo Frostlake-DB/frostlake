@@ -51,6 +51,11 @@ import org.antlr.v4.runtime.Token;
  * <p>An offset of any kind in a query the block assigns names one token more after its two, the one after the name
  * the query's FROM reads first: {@code res := (… v PRECEDING … FROM t WHERE …)} names 'v', 'AND', then 'WHERE'.
  *
+ * <p>An offset of the first bound in a derived table names one token more, where the reading of the outer query takes
+ * up again: the derived table's closing parenthesis where the table is the outermost query's first relation and the
+ * frame's item its query's last - nothing where that query reads one table under a bare alias - and that query's FROM
+ * otherwise, as in a derived table inside another. In an EXISTS it names the token after the BETWEEN's AND.
+ *
  * <p>An offset inside a query used as a value, a scalar subquery of a select list, is read as that query's fault
  * (see {@link ValueSubqueryLines}): its SELECT first, then — when that reading reaches the offset itself — the
  * offset's own lines.
@@ -111,11 +116,83 @@ final class FrameOffsetLines {
         final List<String> lines = new ArrayList<String>();
         lines.add(SyntaxErrorListener.sentence(spoken.get(fault)));
         lines.add(SyntaxErrorListener.sentence(second));
-        final Token third = inAssignedQuery(spoken, fault) ? afterFromName(spoken, querySelect(spoken, frame)) : null;
+        final Token third;
+        if (inAssignedQuery(spoken, fault)) {
+            third = afterFromName(spoken, querySelect(spoken, frame));
+        } else if (inExists(spoken, frame)) {
+            // An EXISTS reads on to the token after its second line's (live-verified).
+            final int at = spoken.indexOf(second);
+            third = at >= 0 && at + 1 < spoken.size() ? spoken.get(at + 1) : null;
+        } else {
+            // A derived table reads on past an offset of the first bound only, named before the BETWEEN's AND.
+            third = second.getType() == FrostlakeLexer.AND ? derivedTableToken(spoken, frame) : null;
+        }
         if (third != null && third.getType() != Token.EOF) {
             lines.add(SyntaxErrorListener.sentence(third));
         }
         return lines;
+    }
+
+    /** Whether the frame stands in the query of an EXISTS. */
+    private static boolean inExists(final List<Token> spoken, final int frame) {
+        final int select = querySelect(spoken, frame);
+        return select >= 2 && spoken.get(select - 1).getType() == FrostlakeLexer.LPAREN
+            && spoken.get(select - 2).getType() == FrostlakeLexer.EXISTS;
+    }
+
+    /**
+     * Whether the token at {@code fault} stands in a window frame's bounds.
+     *
+     * @param spoken the text's default-channel tokens
+     * @param fault  the index of the first offending token
+     * @return whether it does
+     */
+    static boolean standsInFrame(final List<Token> spoken, final int fault) {
+        return fault >= 1 && frameWord(spoken, fault) >= 0;
+    }
+
+    /**
+     * The token an offset in a derived table names after its two (live-verified): the derived table's closing
+     * parenthesis where the table is the outermost query's first relation and the frame's item its query's last item -
+     * nothing more where that query reads one table under a bare alias - and that query's FROM otherwise, a derived
+     * table inside another's among them. Null for a frame in no derived table.
+     */
+    private static Token derivedTableToken(final List<Token> spoken, final int frame) {
+        final int select = querySelect(spoken, frame);
+        if (select < 2 || spoken.get(select - 1).getType() != FrostlakeLexer.LPAREN
+                || spoken.get(select - 2).getType() != FrostlakeLexer.FROM) {
+            return null;
+        }
+        int depth = 0;
+        int from = -1;
+        int lastComma = -1;
+        int close = -1;
+        for (int i = select + 1; i < spoken.size() && close < 0; i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.LPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.RPAREN) {
+                if (depth == 0) {
+                    close = i;
+                }
+                depth--;
+            } else if (depth == 0 && type == FrostlakeLexer.FROM && from < 0) {
+                from = i;
+            } else if (depth == 0 && type == FrostlakeLexer.COMMA && from < 0) {
+                lastComma = i;
+            } else if (type == Token.EOF || type == FrostlakeLexer.SEMI) {
+                return null;
+            }
+        }
+        if (close < 0 || from < frame) {
+            return null;
+        }
+        if (querySelect(spoken, select - 2) != 0 || lastComma > frame) {
+            return spoken.get(from);
+        }
+        final boolean aliasedTable = close == from + 3 && SyntaxErrorListener.isNameLike(spoken.get(from + 1))
+            && SyntaxErrorListener.isNameLike(spoken.get(from + 2));
+        return aliasedTable ? null : spoken.get(close);
     }
 
     /** The lines for a bind written as a frame's offset, or null when the colon opens none. */

@@ -234,6 +234,55 @@ public class DropCommandHandler implements CommandHandler {
         }
     }
 
+    /**
+     * Keep a schema a CREATE OR REPLACE replaces as a dropped version of its name, as DROP SCHEMA keeps one: SHOW
+     * SCHEMAS HISTORY lists it, and UNDROP restores it once the name is free (live-verified for the listing). Its
+     * tables' storage waits with the version. The caller drops the schema, and then sets its stages aside under the
+     * version (see QueryExecutor#setAsideStages).
+     *
+     * @param databaseName the schema's database
+     * @param schema       the schema replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedSchema(final String databaseName, final Schema schema) {
+        final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
+        final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
+        final Map<String, String> kept = new LinkedHashMap<>();
+        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+        snapshotAndReleaseStorage(databaseName, schema, tableRows, hiddenTableRows, kept, ownTemporary);
+        final DroppedObject dropped = new DroppedObject(schema, tableRows, hiddenTableRows,
+            RetentionChain.effectiveDays(catalog.databaseExact(databaseName), schema, null),
+            StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
+        keepStorages(dropped, kept);
+        dropped.keepSessionTables(ownTemporary);
+        catalog.recordDropped("SCHEMA:" + QualifiedName.key(databaseName, schema.getName()), dropped);
+        return dropped;
+    }
+
+    /**
+     * Keep a database a CREATE OR REPLACE replaces as a dropped version of its name, as DROP DATABASE keeps one: SHOW
+     * DATABASES HISTORY lists it (live-verified). The caller drops the database, and then sets its stages aside.
+     *
+     * @param database the database replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedDatabase(final Database database) {
+        final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
+        final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
+        final Map<String, String> kept = new LinkedHashMap<>();
+        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+        for (final Schema schema : database.getAllSchemas()) {
+            snapshotAndReleaseStorage(database.getName(), schema, tableRows, hiddenTableRows, kept, ownTemporary);
+        }
+        final DroppedObject dropped = new DroppedObject(database, tableRows, hiddenTableRows,
+            RetentionChain.effectiveDays(database, null, null),
+            StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
+        keepStorages(dropped, kept);
+        dropped.keepSessionTables(ownTemporary);
+        catalog.recordDropped("DATABASE:" + database.getName(), dropped);
+        return dropped;
+    }
+
     /** Notes on a dropped schema's or database's version where each of its tables' storage waits. */
     private static void keepStorages(final DroppedObject dropped, final Map<String, String> kept) {
         for (final Map.Entry<String, String> table : kept.entrySet()) {

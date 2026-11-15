@@ -160,6 +160,29 @@ public class DDLCommandHandler implements CommandHandler {
      * {@link #setStreamManager}. Sibling create handlers must read it through this getter (never
      * snapshot it by value at construction time, when it is still null).
      */
+    /**
+     * Keep a schema a CREATE OR REPLACE replaces as a dropped version of its name (see
+     * DropCommandHandler#keepReplacedSchema).
+     *
+     * @param databaseName the schema's database
+     * @param schema       the schema replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedSchema(final String databaseName, final Schema schema) {
+        return dropHandler.keepReplacedSchema(databaseName, schema);
+    }
+
+    /**
+     * Keep a database a CREATE OR REPLACE replaces as a dropped version of its name (see
+     * DropCommandHandler#keepReplacedDatabase).
+     *
+     * @param database the database replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedDatabase(final Database database) {
+        return dropHandler.keepReplacedDatabase(database);
+    }
+
     StreamManager getStreamManager() {
         return streamManager;
     }
