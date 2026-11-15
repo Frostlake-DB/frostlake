@@ -17,7 +17,6 @@
 package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.ConditionalDdlOutcome;
-import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
@@ -132,8 +131,7 @@ final class EventTableCommandHandler {
         }
         // The source has to be there before anything else is asked; what it is, is judged once the statement is
         // known to create something (live-verified).
-        final String sourceName = cloning
-            ? queryExecutor.searchPathQualified(ParseTreeText.getQualifiedName(ctx.qualifiedName(0))) : null;
+        final String sourceName = cloning ? queryExecutor.searchPathQualified(queryExecutor.copySourceName(ctx)) : null;
         final String sourceKind = cloning ? queryExecutor.storedRelationKind(sourceName) : null;
         final Table source = cloning && sourceKind == null
             ? catalog.resolveTableAsWritten(sourceName, "Object", "CLONE") : null;

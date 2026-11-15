@@ -18,9 +18,12 @@ package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.Taggable;
+import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.Tag;
 import dev.frostlake.parser.FrostlakeParser;
 
@@ -29,6 +32,7 @@ import org.antlr.v4.runtime.tree.ParseTree;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -36,7 +40,7 @@ import java.util.Map;
  * so the tags it names reach TAG_REFERENCES. The clause hangs off several DDL rules, so the search
  * walks the statement's parse tree rather than naming one accessor.
  */
-final class InlineTags {
+public final class InlineTags {
 
     private InlineTags() {
     }
@@ -65,8 +69,28 @@ final class InlineTags {
      */
     static void apply(final Taggable target, final FrostlakeParser.TagListContext tags,
                       final QueryExecutor queryExecutor) {
-        final Map<String, List<String>> valuesByTag = new LinkedHashMap<>();
         final Map<String, Tag> resolved = new LinkedHashMap<>();
+        final Map<String, String> values = valuesOf(tags, queryExecutor, resolved);
+        for (final Map.Entry<String, String> value : values.entrySet()) {
+            TagAssignments.set(target, resolved.get(value.getKey()), value.getValue());
+        }
+    }
+
+    /**
+     * Refuse a tag clause that gives a tag two values, as {@link #apply} does, without applying it: what an object
+     * that is made in one step judges before it is made.
+     *
+     * @param tags          the tag clause
+     * @param queryExecutor the executor whose catalog resolves the tags
+     */
+    static void requireOneValueEach(final FrostlakeParser.TagListContext tags, final QueryExecutor queryExecutor) {
+        valuesOf(tags, queryExecutor, new LinkedHashMap<String, Tag>());
+    }
+
+    /** The value a clause gives each tag, by the tag's identity, the tags themselves put in {@code resolved}. */
+    private static Map<String, String> valuesOf(final FrostlakeParser.TagListContext tags,
+                                                final QueryExecutor queryExecutor, final Map<String, Tag> resolved) {
+        final Map<String, List<String>> valuesByTag = new LinkedHashMap<>();
         for (final FrostlakeParser.TagAssignmentContext assignment : tags.tagAssignment()) {
             final Tag tag = queryExecutor.getCatalog().getTag(
                 QualifiedName.of(ParseTreeText.qualifiedNameParts(assignment.qualifiedName())).toString());
@@ -79,6 +103,7 @@ final class InlineTags {
             }
             values.add(value);
         }
+        final Map<String, String> first = new LinkedHashMap<>();
         for (final Map.Entry<String, List<String>> tag : valuesByTag.entrySet()) {
             final List<String> values = tag.getValue();
             for (final String value : values) {
@@ -87,10 +112,48 @@ final class InlineTags {
                         + " with multiple values provided, values = " + String.join(", ", values));
                 }
             }
+            first.put(tag.getKey(), values.get(0));
         }
-        for (final Map.Entry<String, List<String>> tag : valuesByTag.entrySet()) {
-            TagAssignments.set(target, resolved.get(tag.getKey()), tag.getValue().get(0));
+        return first;
+    }
+
+    /**
+     * Refuse a tag clause the session could not apply as the object is made, before anything is created: every tag it
+     * names has to exist - a missing one is named as written, folded - and be one the session may apply, as SET TAG
+     * asks (see ApplyPrivileges), and each value has to be one its tag allows (live-verified).
+     *
+     * @param tags          the tag clause
+     * @param queryExecutor the executor whose catalog resolves the tags
+     */
+    public static void requireApplicable(final FrostlakeParser.TagListContext tags, final QueryExecutor queryExecutor) {
+        final Catalog catalog = queryExecutor.getCatalog();
+        if (catalog == null) {
+            return;
         }
+        for (final FrostlakeParser.TagAssignmentContext assignment : tags.tagAssignment()) {
+            final String tagName = ParseTreeText.getQualifiedName(assignment.qualifiedName());
+            if (!catalog.hasTagExact(tagName)) {
+                throw new RuntimeException(SqlCompilationError.doesNotExistAsSpelled("Tag",
+                    tagName.toUpperCase(Locale.ROOT)));
+            }
+            final Tag tag = catalog.getTagExact(tagName);
+            ApplyPrivileges.require(queryExecutor, Privilege.APPLY_TAG, "TAG", catalog.qualifiedExactName(tagName),
+                tag.getOwner());
+            TagValues.requireAllowed(tag, TagValues.text(assignment.qualifiedName(), assignment.tagValue(),
+                queryExecutor));
+        }
+    }
+
+    /**
+     * Whether a tag clause is a CREATE STAGE's own, which the statement judges once its name is: a stage of the name
+     * there is refused for the name first, while IF NOT EXISTS still judges the tags (live-verified).
+     *
+     * @param tags the tag clause
+     * @return whether it is a CREATE STAGE's
+     */
+    public static boolean isStageOwn(final FrostlakeParser.TagListContext tags) {
+        return tags.getParent() instanceof FrostlakeParser.CreateStatementContext
+            && ((FrostlakeParser.CreateStatementContext) tags.getParent()).STAGE() != null;
     }
 
     /**

@@ -320,28 +320,29 @@ public class DDLCommandHandler implements CommandHandler {
      * A schema-level object is created in the schema its name spells, each qualifier matched exactly: with a
      * schema SS and no "ss", CREATE TABLE "ss".t names a schema that does not exist, and is refused for it before
      * anything else of the statement is judged — whatever the kind, under OR REPLACE and IF NOT EXISTS alike, and
-     * a database qualifier likewise (live-verified kind by kind). A function and a procedure are left to their
-     * own handler, which judges what the statement says of itself before it looks for the schema.
+     * a database qualifier likewise, and a name given through IDENTIFIER() as one written (live-verified kind by
+     * kind). A function and a procedure are left to their own handler, which judges what the statement says of
+     * itself before it looks for the schema.
      */
     private void requireExactContainer(final FrostlakeParser.CreateStatementContext ctx) {
-        final FrostlakeParser.QualifiedNameContext written;
-        if (ctx.objectName() != null) {
-            // A table or a view; a name given through IDENTIFIER() is resolved by its handler.
-            written = ctx.objectName().qualifiedName();
-        } else {
-            final boolean schemaLevel = ctx.STREAM() != null || ctx.TASK() != null || ctx.PIPE() != null
-                || ctx.SEQUENCE() != null || ctx.STAGE() != null || ctx.FILE() != null && ctx.FORMAT() != null
-                || ctx.TAG() != null
-                || ctx.MASKING() != null && ctx.POLICY() != null && ctx.ROW() == null
-                || ctx.ROW() != null && ctx.ACCESS() != null && ctx.POLICY() != null
-                || ctx.DYNAMIC() != null && ctx.TABLE() != null;
-            written = schemaLevel && ctx.DATABASE() == null && !ctx.qualifiedName().isEmpty()
-                ? ctx.qualifiedName(0) : null;
+        // A table, a view, a stream, a task, a pipe, a sequence, a stage, a file format, a tag, a masking or a row
+        // access policy, a dynamic table.
+        final boolean schemaLevel = ctx.objectName() != null || ctx.STREAM() != null || ctx.TASK() != null
+            || ctx.PIPE() != null || ctx.SEQUENCE() != null || ctx.STAGE() != null
+            || ctx.FILE() != null && ctx.FORMAT() != null || ctx.TAG() != null
+            || ctx.MASKING() != null && ctx.POLICY() != null && ctx.ROW() == null
+            || ctx.ROW() != null && ctx.ACCESS() != null && ctx.POLICY() != null
+            || ctx.DYNAMIC() != null && ctx.TABLE() != null;
+        if (!schemaLevel || ctx.DATABASE() != null) {
+            return;
         }
+        final FrostlakeParser.ObjectNameContext created = QueryExecutor.createdName(ctx);
+        final String[] written = created != null ? queryExecutor.resolveObjectNameParts(created)
+            : ctx.qualifiedName() != null ? ParseTreeText.qualifiedNameParts(ctx.qualifiedName()) : null;
         if (written == null) {
             return;
         }
-        final String[] parts = catalog.withoutAccount(ParseTreeText.qualifiedNameParts(written), 3);
+        final String[] parts = catalog.withoutAccount(written, 3);
         if (parts.length == 2 || parts.length == 3) {
             catalog.requireOwningSchema(QualifiedName.of(parts));
         }
@@ -411,20 +412,26 @@ public class DDLCommandHandler implements CommandHandler {
     }
 
     private Object handleCloneStream(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String streamQualifiedName = getText(ctx.qualifiedName(0));
+        final String[] streamParts = queryExecutor.createdNameParts(ctx);
+        final String streamQualifiedName = QualifiedName.join(streamParts);
         // The name as the parse tree canonicalises it: unquoted folds to upper case, a quoted name keeps its own.
         final String streamName = extractObjectName(streamQualifiedName);
-        final String sourceQualifiedName = getText(ctx.qualifiedName(1));
-        final Stream source = catalog.resolveStream(sourceQualifiedName);
-        if (source == null) {
-            throw new RuntimeException(SqlCompilationError.doesNotExist("Stream", sourceQualifiedName));
+        final String[] sourceParts = queryExecutor.copySourceParts(ctx);
+        final String sourceQualifiedName = QualifiedName.join(sourceParts);
+        final Schema sourceSchema = catalog.requireOwningSchema(QualifiedName.of(sourceParts));
+        final String sourceObject = sourceParts[sourceParts.length - 1];
+        if (!sourceSchema.hasStream(sourceObject)) {
+            // A source written bare is named bare, one written by a path in full (live-verified).
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Stream",
+                sourceParts.length == 1 ? sourceQualifiedName : sourceSchema.qualifiedName(sourceObject)));
         }
+        final Stream source = sourceSchema.getStream(sourceObject);
         requireOwnedStreamSource(source, sourceQualifiedName);
         try {
             final Schema schema = resolveSchemaFromQualifiedName(streamQualifiedName);
             schema.rejectNameHeldByOtherKind(streamName, RelationKind.STREAM, false);
             refuseTakenName(ctx.or_replace() == null && !ifNotExists, schema.hasStreamExact(streamName),
-                qualifiedNameParts(ctx.qualifiedName(0)));
+                streamParts);
             checkCreatePrivilege(Privilege.CREATE_STREAM, schema);
             // The clone reads the same table as its source, recorded as read from where the clone lives; a table
             // stream whose table is gone, or that a clone made lost, has none to give it (live-verified).
@@ -451,7 +458,7 @@ public class DDLCommandHandler implements CommandHandler {
             schema.addStream(clone);
             logger.trace("Cloned stream {} from {}", streamName, sourceQualifiedName);
         } catch (final RuntimeException e) {
-            handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            handleIfNotExists(ifNotExists, e, "object", streamParts);
             logger.debug("Stream already exists (IF NOT EXISTS): {}", streamName);
         }
         return null;
@@ -461,7 +468,8 @@ public class DDLCommandHandler implements CommandHandler {
         if (ctx.CLONE() != null) {
             return handleCloneStream(ctx, ifNotExists);
         }
-        final String streamQualifiedName = getText(ctx.qualifiedName(0));
+        final String[] streamParts = queryExecutor.createdNameParts(ctx);
+        final String streamQualifiedName = QualifiedName.join(streamParts);
         // The name as the parse tree canonicalises it: unquoted folds to upper case, a quoted name keeps its own.
         final String streamName = extractObjectName(streamQualifiedName);
         final boolean orReplace = ctx.or_replace() != null;
@@ -472,7 +480,8 @@ public class DDLCommandHandler implements CommandHandler {
                 "Invalid operation COPY GRANTS without specifying source object."
                     + " Please use either OR REPLACE or CLONE."));
         }
-        final String sourceName = getText(ctx.qualifiedName(1));
+        final String[] writtenSourceParts = queryExecutor.resolveObjectNameParts(ctx.streamSource().objectName());
+        final String sourceName = QualifiedName.join(writtenSourceParts);
 
         // The kind of source: a table (an event table is one), a view, a stage's directory table, a
         // dynamic table, or an external table — which this engine has none of, so only its refusals apply.
@@ -483,9 +492,8 @@ public class DDLCommandHandler implements CommandHandler {
 
         // Parse qualified source name; a table or a view the current schema does not hold is looked for along
         // the session's SEARCH_PATH.
-        final String[] sourceParts = kind.STAGE() != null ? qualifiedNameParts(ctx.qualifiedName(1))
-            : QualifiedName.parse(queryExecutor.searchPathQualified(
-                QualifiedName.join(qualifiedNameParts(ctx.qualifiedName(1))))).parts();
+        final String[] sourceParts = kind.STAGE() != null ? writtenSourceParts
+            : QualifiedName.parse(queryExecutor.searchPathQualified(sourceName)).parts();
         final Schema sourceSchema;
         final String sourceObjectName;
 
@@ -572,7 +580,7 @@ public class DDLCommandHandler implements CommandHandler {
             if (!sourceSchema.hasTable(sourceObjectName) && sourceSchema.hasDynamicTable(sourceObjectName)) {
                 throw new RuntimeException(SqlCompilationError.objectOfOtherType("DYNAMIC_TABLE", "TABLE"));
             }
-            if (!sourceSchema.hasTable(sourceObjectName) && qualifiedNameParts(ctx.qualifiedName(1)).length == 1) {
+            if (!sourceSchema.hasTable(sourceObjectName) && writtenSourceParts.length == 1) {
                 // A source written bare is named bare, where one written by a path is named in full.
                 throw new RuntimeException(SqlCompilationError.doesNotExist("Table", sourceObjectName));
             }
@@ -650,8 +658,7 @@ public class DDLCommandHandler implements CommandHandler {
             // A name another kind of relation holds, and for a plain create a stream of the name, are refused
             // before the privilege to create one is asked (live-verified).
             schema.rejectNameHeldByOtherKind(streamName, RelationKind.STREAM, false);
-            refuseTakenName(!orReplace && !ifNotExists, schema.hasStreamExact(streamName),
-                qualifiedNameParts(ctx.qualifiedName(0)));
+            refuseTakenName(!orReplace && !ifNotExists, schema.hasStreamExact(streamName), streamParts);
             checkCreatePrivilege(Privilege.CREATE_STREAM, schema);
             // A table or view source is recorded as read from where the STREAM lives, so it names the same object
             // whatever the reading session's context; a table stream is bound to its table itself (StreamSources).
@@ -693,7 +700,7 @@ public class DDLCommandHandler implements CommandHandler {
                 start.forView(stream, viewBaseTables, ctx.streamPoint(), showInitialRows);
             }
             if (orReplace) {
-                queryExecutor.requireOwnership("STREAM", qualifiedNameParts(ctx.qualifiedName(0)), null);
+                queryExecutor.requireOwnership("STREAM", streamParts, null);
                 // OR REPLACE replaces the stream of EXACTLY this name: "s" and S are two streams.
                 if (schema.hasStreamExact(streamName)) {
                     schema.dropStream(streamName);
@@ -706,7 +713,7 @@ public class DDLCommandHandler implements CommandHandler {
 
             logger.trace("Created stream: {} on {} {}", streamName, sourceType, sourceName);
         } catch (final RuntimeException e) {
-            handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            handleIfNotExists(ifNotExists, e, "object", streamParts);
             logger.debug("Stream already exists (IF NOT EXISTS): {}", streamName);
         }
         return null;
@@ -1605,7 +1612,9 @@ public class DDLCommandHandler implements CommandHandler {
 
     public Object handleUseStatement(final FrostlakeParser.UseStatementContext ctx) {
         if (ctx.DATABASE() != null) {
-            final String dbName = queryExecutor.resolveObjectName(ctx.objectName());
+            // A quoted name holding a dot is one part, and names the database it spells.
+            final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
+            final String dbName = parts.length == 1 ? parts[0] : QualifiedName.join(parts);
             catalog.useDatabaseReference(dbName);
             logger.trace("Using database: {}", dbName);
         } else if (ctx.SCHEMA() != null) {
@@ -1819,17 +1828,18 @@ public class DDLCommandHandler implements CommandHandler {
             ((Tag) dropped.getObject()).markDdl(catalog.currentUserForDdl());
             logger.trace("Undropped tag: {}", name);
         } else if (ctx.DATABASE() != null) {
-            final String name = getText(ctx.identifier());
+            final String name = DatabaseNames.of(
+                queryExecutor.resolveObjectNameParts(ctx.undroppedName().objectName()), catalog);
+            if (catalog.hasDatabaseExact(name)) {
+                // A database of the name exists, and the restored one would replace it, its tables and all: refused
+                // before any dropped version is looked for, and a dropped one stays for a later UNDROP
+                // (live-verified).
+                throw new RuntimeException(SqlCompilationError.of(
+                    "Object '" + SqlIdentifiers.spellCanonical(name) + "' already exists."));
+            }
             final DroppedObject dropped = catalog.takeDropped("DATABASE:" + name);
             if (dropped == null || dropped.getObject() == null) {
                 throw new RuntimeException("Database " + name + " did not exist or was purged.");
-            }
-            if (catalog.hasDatabaseExact(name)) {
-                // A database of the name exists, and the restored one would replace it, its tables and all:
-                // refused, and the dropped version stays for a later UNDROP.
-                catalog.recordDropped("DATABASE:" + name, dropped);
-                throw new RuntimeException(SqlCompilationError.of(
-                    "Object '" + SqlIdentifiers.spellCanonical(name) + "' already exists."));
             }
             final Database restoredDb = (Database) dropped.getObject();
             catalog.restoreDatabase(restoredDb);
@@ -1991,8 +2001,12 @@ public class DDLCommandHandler implements CommandHandler {
      */
     void handleIfNotExists(final boolean ifNotExists, final RuntimeException e, final String objectName,
                            final FrostlakeParser.QualifiedNameContext written) {
-        handleIfNotExists(ifNotExists, namedAsWritten(e, catalog.withoutAccount(
-            ParseTreeText.qualifiedNameParts(written), 3)), objectName);
+        handleIfNotExists(ifNotExists, e, objectName, ParseTreeText.qualifiedNameParts(written));
+    }
+
+    void handleIfNotExists(final boolean ifNotExists, final RuntimeException e, final String objectName,
+                           final String[] writtenParts) {
+        handleIfNotExists(ifNotExists, namedAsWritten(e, catalog.withoutAccount(writtenParts, 3)), objectName);
     }
 
     void handleIfNotExists(final boolean ifNotExists, final RuntimeException e, final String objectName) {

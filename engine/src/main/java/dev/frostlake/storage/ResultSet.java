@@ -40,6 +40,9 @@ public class ResultSet {
     private boolean recursiveStep;
     /** Whether this is the answer a Snowflake Scripting RETURN handed its CALL or block. */
     private boolean scriptingAnswer;
+    /** The rows a CTAS wrote or a TRUNCATE removed, when this is that statement's status; null otherwise. */
+    private Long rowsInserted;
+    private Long rowsDeleted;
 
     public ResultSet(final List<ResultSetColumn> columns, final List<Row> rows) {
         this.columns = new ArrayList<>(columns);
@@ -67,6 +70,8 @@ public class ResultSet {
         copy.jdbcUpdateCount = jdbcUpdateCount;
         copy.relationStatistics = relationStatistics;
         copy.scriptingAnswer = scriptingAnswer;
+        copy.rowsInserted = rowsInserted;
+        copy.rowsDeleted = rowsDeleted;
         return copy;
     }
 
@@ -206,5 +211,29 @@ public class ResultSet {
     public ResultSet markScriptingAnswer() {
         this.scriptingAnswer = true;
         return this;
+    }
+
+    /**
+     * Record the rows the statement this status answers wrote and removed where it is no DML statement — a CREATE
+     * TABLE … AS SELECT, a TRUNCATE — which a driver reads beside the status as the statement's stats.
+     *
+     * @param inserted the rows written
+     * @param deleted  the rows removed
+     * @return this result
+     */
+    public ResultSet markRowsChanged(final long inserted, final long deleted) {
+        this.rowsInserted = Long.valueOf(inserted);
+        this.rowsDeleted = Long.valueOf(deleted);
+        return this;
+    }
+
+    /** The rows the statement wrote (see {@link #markRowsChanged}), or null when it recorded none. */
+    public Long getRowsInserted() {
+        return rowsInserted;
+    }
+
+    /** The rows the statement removed (see {@link #markRowsChanged}), or null when it recorded none. */
+    public Long getRowsDeleted() {
+        return rowsDeleted;
     }
 }

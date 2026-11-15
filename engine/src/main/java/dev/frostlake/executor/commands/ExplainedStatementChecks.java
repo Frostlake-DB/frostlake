@@ -89,15 +89,14 @@ public final class ExplainedStatementChecks {
                 throw taken(parts);
             }
             if (create.CLONE() != null || create.LIKE() != null) {
-                catalog.resolveTableAsWritten(executor.searchPathQualified(
-                    ParseTreeText.getQualifiedName(create.qualifiedName(0))), "Object",
+                catalog.resolveTableAsWritten(executor.searchPathQualified(executor.copySourceName(create)), "Object",
                     create.CLONE() != null ? "CLONE" : "DUPLICATE");
             }
             return true;
         }
         if (create.SEQUENCE() != null || create.SCHEMA() != null) {
-            final String[] parts = catalog.withoutAccount(
-                ParseTreeText.qualifiedNameParts(create.qualifiedName(0)), create.SCHEMA() != null ? 2 : 3);
+            final String[] parts = catalog.withoutAccount(executor.createdNameParts(create),
+                create.SCHEMA() != null ? 2 : 3);
             final boolean held = create.SCHEMA() != null ? schemaHeld(catalog, parts)
                 : catalog.requireOwningSchema(QualifiedName.of(parts)).hasSequenceExact(parts[parts.length - 1]);
             if (!replaced && held) {
@@ -108,9 +107,8 @@ public final class ExplainedStatementChecks {
             }
             return true;
         }
-        if (create.STREAM() != null && create.streamSourceKind() != null && create.streamSourceKind().TABLE() != null
-                && create.qualifiedName().size() > 1) {
-            catalog.resolveTableAsWritten(ParseTreeText.getQualifiedName(create.qualifiedName(1)), "Table");
+        if (create.streamSource() != null && create.streamSourceKind().TABLE() != null) {
+            catalog.resolveTableAsWritten(executor.resolveObjectName(create.streamSource().objectName()), "Table");
         }
         return true;
     }

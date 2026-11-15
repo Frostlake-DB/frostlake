@@ -183,8 +183,10 @@ final class NamesJudgedFirst {
         if (isHeld(queryExecutor.resolveObjectName(create.objectName()), catalog)) {
             return true;
         }
-        if (table && (create.LIKE() != null || create.CLONE() != null) && create.qualifiedName().size() == 1) {
-            return !isHeld(String.join(".", ParseTreeText.qualifiedNameParts(create.qualifiedName(0))), catalog);
+        final String[] source = table && (create.LIKE() != null || create.CLONE() != null)
+            ? queryExecutor.copySourceParts(create) : null;
+        if (source != null) {
+            return !isHeld(String.join(".", source), catalog);
         }
         return false;
     }

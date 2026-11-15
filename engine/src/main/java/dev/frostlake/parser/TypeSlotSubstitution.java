@@ -41,9 +41,25 @@ final class TypeSlotSubstitution {
      */
     static boolean readsAsType(final String substituted, final int start) {
         final FrostlakeParser.SqlScriptContext tree = SyntaxErrorListener.cleanParse(substituted);
-        if (tree == null) {
-            return false;
-        }
+        return tree != null && typeAt(tree, start);
+    }
+
+    /**
+     * Whether a parse of {@code text}, whose first fault stands past character {@code start}, reads the token starting
+     * there as a data type: the tree up to that fault is the one a clean parse would build, so a short word widened to
+     * a type is judged where the rest of its statement still faults ({@code ALTER TABLE t DROP COLUMN c INT;} reads no
+     * type, {@code CREATE FUNCTION f(a INT c)} does).
+     *
+     * @param text  the text with the known type in place
+     * @param start the character where the known type begins
+     * @return true when the substitute stands in a type slot
+     */
+    static boolean readsAsTypeBeforeFault(final String text, final int start) {
+        return typeAt(SyntaxErrorListener.anyParse(text), start);
+    }
+
+    /** Whether the token of a tree starting at character {@code start} stands within a data type. */
+    private static boolean typeAt(final ParseTree tree, final int start) {
         final Deque<ParseTree> pending = new ArrayDeque<>();
         pending.push(tree);
         while (!pending.isEmpty()) {

@@ -1016,7 +1016,7 @@ public class CreateRelationalHandler implements CommandHandler {
     private static void recordCreateText(final FrostlakeParser.CreateStatementContext ctx, final DynamicTable dt) {
         final CharStream input = ctx.getStart().getInputStream();
         final StringBuilder head = new StringBuilder(input.getText(Interval.of(ctx.getStart().getStartIndex(),
-            ctx.qualifiedName(0).getStop().getStopIndex())));
+            ctx.dynamicTableName().getStop().getStopIndex())));
         if (ctx.dynamicTableColumns() != null) {
             head.append(' ').append(input.getText(Interval.of(ctx.dynamicTableColumns().getStart().getStartIndex(),
                 ctx.dynamicTableColumns().getStop().getStopIndex())));
@@ -1042,8 +1042,8 @@ public class CreateRelationalHandler implements CommandHandler {
         if (ctx.CLONE() != null) {
             return cloneDynamicTable(ctx, ifNotExists);
         }
-        final String qualifiedName = getText(ctx.qualifiedName(0));
-        final String[] parts = catalog.withoutAccount(qualifiedNameParts(ctx.qualifiedName(0)), 3);
+        final String qualifiedName = queryExecutor.createdObjectName(ctx);
+        final String[] parts = catalog.withoutAccount(queryExecutor.createdNameParts(ctx), 3);
         // Its properties are judged before anything the statement names is looked for (live-verified).
         CreatedObjectProperties.requireDynamicTableProperties(ctx, parts[parts.length - 1]);
         final boolean orReplace = ctx.or_replace() != null;
@@ -1203,9 +1203,9 @@ public class CreateRelationalHandler implements CommandHandler {
      * statement gives replaces the source's. A point in time is accepted: the clone's rows come from its query.
      */
     private Object cloneDynamicTable(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qualifiedName = getText(ctx.qualifiedName(0));
-        final String[] parts = catalog.withoutAccount(qualifiedNameParts(ctx.qualifiedName(0)), 3);
-        final String[] sourceParts = catalog.withoutAccount(qualifiedNameParts(ctx.qualifiedName(1)), 3);
+        final String qualifiedName = queryExecutor.createdObjectName(ctx);
+        final String[] parts = catalog.withoutAccount(queryExecutor.createdNameParts(ctx), 3);
+        final String[] sourceParts = catalog.withoutAccount(queryExecutor.copySourceParts(ctx), 3);
         final Schema sourceSchema = dynamicTableSchema(sourceParts);
         final String sourceName = sourceParts[sourceParts.length - 1];
         if (!sourceSchema.hasDynamicTable(sourceName)) {
@@ -1250,7 +1250,7 @@ public class CreateRelationalHandler implements CommandHandler {
             schema.dropDynamicTable(dtName);
         }
         schema.addDynamicTable(clone);
-        logger.trace("Cloned dynamic table {} from {}", qualifiedName, getText(ctx.qualifiedName(1)));
+        logger.trace("Cloned dynamic table {} from {}", qualifiedName, QualifiedName.join(sourceParts));
         return null;
     }
 }

@@ -441,7 +441,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
      * IMMEDIATE of several, which hands back each statement's answer - the ids of each result. Each result is typed
      * as its statement reads (see {@link SnowflakeStatementTypes#answered}); only a query's rows go back as Arrow, and
      * each result of several goes back as JSON, a query's too (live-verified). A DML statement's answer carries its
-     * counts beside its rows (see {@link SnowflakeRowset#writeStats}).
+     * counts beside its rows, and a CTAS's or a TRUNCATE's the rows it wrote or removed beside its status (see
+     * {@link SnowflakeRowset#writeStats}).
      */
     private ObjectNode answer(final SessionContext session, final ExecutionResult result, final List<Long> types,
                               final List<Boolean> queries, final String written) {
@@ -459,7 +460,7 @@ final class SnowflakeProtocolHandler implements HttpHandler {
                 final long type = SnowflakeStatementTypes.answered(types.get(0).longValue(), results.get(0));
                 SnowflakeRowset.write(results.get(0), data, arrow(session)
                     && SnowflakeStatementTypes.answersInArrow(type, queries.get(0).booleanValue(), results.get(0)));
-                if (SnowflakeStatementTypes.isDml(type)) {
+                if (SnowflakeRowset.carriesStats(type, results.get(0))) {
                     SnowflakeRowset.writeStats(results.get(0), data);
                 }
             }
@@ -477,7 +478,7 @@ final class SnowflakeProtocolHandler implements HttpHandler {
             SnowflakeRowset.write(results.get(i), data, false);
             final long type = SnowflakeStatementTypes.answered(eachStatements ? types.get(i).longValue()
                 : SnowflakeStatementTypes.SELECT, results.get(i));
-            if (SnowflakeStatementTypes.isDml(type)) {
+            if (SnowflakeRowset.carriesStats(type, results.get(i))) {
                 SnowflakeRowset.writeStats(results.get(i), data);
             }
             describe(data, session, id, type, written);

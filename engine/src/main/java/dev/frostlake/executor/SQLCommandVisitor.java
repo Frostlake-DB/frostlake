@@ -36,6 +36,7 @@ import dev.frostlake.executor.commands.DbtProjects;
 import dev.frostlake.executor.commands.DynamicTableProperties;
 import dev.frostlake.executor.commands.ExternalVolumeCommandHandler;
 import dev.frostlake.executor.commands.GrantRevokeHandler;
+import dev.frostlake.executor.commands.InlineTags;
 import dev.frostlake.executor.commands.IntegrationCommandHandler;
 import dev.frostlake.executor.commands.LoopControlPlacement;
 import dev.frostlake.executor.commands.ManualRunPrivileges;
@@ -267,7 +268,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             DoubledSigns.rejectAheadOfCaret(ctx);
             CaretOperator.rejectInStatement(ctx);
             DoubledSigns.rejectInStatement(ctx);
-            FromClauseProcedureJobs.require(ctx, procedureDepth > 0);
+            FromClauseProcedureJobs.require(ctx, procedureDepth > 0, queryExecutor);
             ReadOnlyRequest.require(ctx);
             if (catalog != null && catalog.getCurrentDatabase() == null) {
                 rejectWithoutCurrentDatabase(ctx);
@@ -512,22 +513,10 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         } else if (node instanceof FrostlakeParser.JoinPolicyClauseContext) {
             requireApplyAttachedPolicy("JOIN_POLICY", ((FrostlakeParser.JoinPolicyClauseContext) node).qualifiedName());
         }
-        if (node instanceof FrostlakeParser.TagListContext) {
-            final FrostlakeParser.TagListContext tags = (FrostlakeParser.TagListContext) node;
-            for (final FrostlakeParser.TagAssignmentContext assignment : tags.tagAssignment()) {
-                final String tagName = getText(assignment.qualifiedName());
-                if (catalog != null && !catalog.hasTagExact(tagName)) {
-                    throw new RuntimeException(SqlCompilationError.doesNotExistAsSpelled("Tag", tagName.toUpperCase(Locale.ROOT)));
-                }
-                if (catalog != null) {
-                    // Setting a tag as the object is created asks APPLY on it as SET TAG does (see ApplyPrivileges).
-                    ApplyPrivileges.require(queryExecutor, Privilege.APPLY_TAG, "TAG",
-                        catalog.qualifiedExactName(tagName), catalog.getTagExact(tagName).getOwner());
-                    // ALLOWED_VALUES is judged before the object is created, as live does.
-                    TagValues.requireAllowed(catalog.getTagExact(tagName),
-                        TagValues.text(assignment.qualifiedName(), assignment.tagValue(), queryExecutor));
-                }
-            }
+        // A CREATE STAGE judges its own clause once its name is (see InlineTags#isStageOwn).
+        if (node instanceof FrostlakeParser.TagListContext && catalog != null
+                && !InlineTags.isStageOwn((FrostlakeParser.TagListContext) node)) {
+            InlineTags.requireApplicable((FrostlakeParser.TagListContext) node, queryExecutor);
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             rejectUnknownTagReferences(node.getChild(i));
@@ -968,7 +957,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         final Catalog catalog = queryExecutor.getCatalog();
         try {
             if (create.CONTACT() != null) {
-                return catalog.findContact(getText(create.qualifiedName(0))) != null;
+                return catalog.findContact(queryExecutor.createdObjectName(create)) != null;
             }
             if (create.objectName() == null) {
                 return false;
@@ -3407,6 +3396,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     // Only the last statement's conditional branch may reach the status sentence.
                     ConditionalDdlOutcome.clear();
                     DdlStatusNote.clear();
+                    DdlRowCounts.clear();
                     // A statement of a text of several reports its places against its own text, and fails named
                     // the way a multi-statement request names it.
                     final SourcePosition displaced = severalStatements ? LeadingCommentOffset.begin(new SourcePosition(

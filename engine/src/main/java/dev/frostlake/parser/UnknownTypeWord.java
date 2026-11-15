@@ -79,7 +79,12 @@ public final class UnknownTypeWord {
         if (parameters != null) {
             return "Unsupported data type '" + lastPart + "(" + String.join(", ", parameters) + ")'.";
         }
-        return "Unsupported data type '" + (lastQuoted ? lastPart : lastPart.toUpperCase(Locale.ROOT)) + "'.";
+        return "Unsupported data type '" + spelledName() + "'.";
+    }
+
+    /** The word as a refusal names it when written bare: its last dotted part, folded unless written quoted. */
+    public String spelledName() {
+        return lastQuoted ? lastPart : lastPart.toUpperCase(Locale.ROOT);
     }
 
     /** The sentence the word is refused in as the type of an Iceberg table's column. */

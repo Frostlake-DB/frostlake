@@ -134,7 +134,7 @@ final class SnowflakeDescribe {
         final long type = SnowflakeStatementTypes.typeOf(statement);
         if (kind instanceof FrostlakeParser.ProceduralStatementContext
                 || statement.getStart().getType() == FrostlakeParser.CALL
-                || type == SnowflakeStatementTypes.SCL || type == SnowflakeStatementTypes.ALTER_SESSION) {
+                || SnowflakeStatementTypes.changesSession(type)) {
             return null;
         }
         final List<ResultSetColumn> status = new ArrayList<>();

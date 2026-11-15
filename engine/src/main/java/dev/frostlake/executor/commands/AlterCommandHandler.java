@@ -59,7 +59,6 @@ import dev.frostlake.metastore.SqlObject;
 import dev.frostlake.metastore.StreamSources;
 import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.TableShadows;
-import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.Taggable;
 import dev.frostlake.metastore.model.Account;
 import dev.frostlake.metastore.model.AggregationPolicy;
@@ -237,7 +236,12 @@ public class AlterCommandHandler implements CommandHandler {
                 return null;
             }
             if (ctx.DATABASE() != null) {
-                final String dbName = visitor.getText(ctx.identifier());
+                // A name of several parts is refused whatever IF EXISTS says (see DatabaseNames); a database that is
+                // not there is forgiven by it as before.
+                branchHandlesIfExists = true;
+                final String dbName = DatabaseNames.of(
+                    queryExecutor.resolveObjectNameParts(ctx.containerName().objectName()), catalog);
+                branchHandlesIfExists = false;
                 final Database database = catalog.databaseExact(dbName);
                 SystemDatabase.refuseChange(database.getName());
                 altered = database;
@@ -885,9 +889,10 @@ public class AlterCommandHandler implements CommandHandler {
                     logger.debug("Table does not exist (IF EXISTS): {}", tableName);
                 } else {
                     if (tableParts.length == 1 && ctx.tableAction() != null && ctx.tableAction().RENAME() != null
-                            && ctx.tableAction().COLUMN() != null && !alterTargetTableExists(tableParts)) {
-                        // RENAME COLUMN names a missing table as it was written, where the table's other
-                        // actions name it by its full path (live-verified).
+                            && (ctx.tableAction().COLUMN() != null || ctx.tableAction().CONSTRAINT() != null)
+                            && !alterTargetTableExists(tableParts)) {
+                        // RENAME COLUMN and RENAME CONSTRAINT name a missing table as it was written, where the
+                        // table's other actions name it by its full path (live-verified).
                         throw new RuntimeException(SqlCompilationError.doesNotExist("Table", tableParts[0]));
                     }
                     final Table table = catalog.resolveTable(QualifiedName.of(tableParts));
@@ -4096,38 +4101,14 @@ public class AlterCommandHandler implements CommandHandler {
         }
     }
 
-    /**
-     * Apply a SET TAG action's assignments to a taggable object, validating tag existence, the session's APPLY on
-     * each tag and ALLOWED_VALUES.
-     */
+    /** Apply a SET TAG action to a taggable object, judged whole before any tag is set (see AlteredTags). */
     private void applyTagSet(final Taggable target, final FrostlakeParser.TagSetContext set) {
-        for (final FrostlakeParser.TagAssignContext assign : set.tagAssign()) {
-            final Tag tag = referencedTag(assign.qualifiedName());
-            requireApplyTag(assign.qualifiedName(), tag);
-            final String value = TagValues.text(assign.qualifiedName(), assign.tagValue(), queryExecutor);
-            TagValues.requireAllowed(tag, value);
-            TagAssignments.set(target, tag, value);
-        }
+        new AlteredTags(queryExecutor, visitor).set(target, set);
     }
 
-    /** Apply an UNSET TAG action, removing each named tag association from a taggable object. */
+    /** Apply an UNSET TAG action to a taggable object, judged whole before any tag is taken off (see AlteredTags). */
     private void applyTagUnset(final Taggable target, final FrostlakeParser.TagUnsetContext unset) {
-        for (final FrostlakeParser.QualifiedNameContext qn : unset.qualifiedName()) {
-            final Tag tag = referencedTag(qn);
-            requireApplyTag(qn, tag);
-            TagAssignments.unset(target, tag);
-        }
-    }
-
-    /**
-     * Refuses setting or unsetting a tag the session may not apply: either takes APPLY TAG on the account, or APPLY
-     * on the tag beside the privilege on the object the statement already asks (documented, "Tag privileges"; see
-     * ApplyPrivileges). Owning the object alone was enough, so a role that cloned a table a tag-driven masking
-     * policy protects re-tagged its clone's column and read it in clear.
-     */
-    private void requireApplyTag(final FrostlakeParser.QualifiedNameContext name, final Tag tag) {
-        ApplyPrivileges.require(queryExecutor, Privilege.APPLY_TAG, "TAG",
-            catalog.qualifiedExactName(visitor.getText(name)), tag.getOwner());
+        new AlteredTags(queryExecutor, visitor).unset(target, unset);
     }
 
     /**

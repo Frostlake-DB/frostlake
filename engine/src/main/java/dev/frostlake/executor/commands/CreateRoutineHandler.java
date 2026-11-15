@@ -60,6 +60,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -152,16 +153,22 @@ public class CreateRoutineHandler implements CommandHandler {
      * @return null, as every CREATE handler answers
      */
     public Object handleCreateExternalFunction(final FrostlakeParser.CreateStatementContext ctx) {
-        final String qualifiedName = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qualifiedName = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         final Schema schema = routineSchema(parts, qualifiedName, "function");
         final String functionName = parts[parts.length - 1];
-        final List<Parameter> parameters = parseParameters(ctx);
-        schema.requireNotHeldByOtherKind(true, functionName, parameters);
-        DDLCommandHandler.refuseTakenName(!orReplace, schema.hasFunctionSignature(functionName, parameters), parts);
+        // An argument with no type gives the function no signature to look up: it is refused once the integration is
+        // (see UntypedArguments).
+        final boolean untyped = UntypedArguments.any(ctx.parameterList());
+        final List<Parameter> parameters = untyped ? null : parseParameters(ctx);
+        if (!untyped) {
+            schema.requireNotHeldByOtherKind(true, functionName, parameters);
+            DDLCommandHandler.refuseTakenName(!orReplace, schema.hasFunctionSignature(functionName, parameters),
+                parts);
+        }
         ddl.checkCreatePrivilege(Privilege.CREATE_FUNCTION, schema);
-        if (orReplace) {
+        if (orReplace && !untyped) {
             queryExecutor.requireFunctionOwnership(schema, functionName, parameterTypes(parameters));
         }
         FrostlakeParser.QualifiedNameContext integration = null;
@@ -190,6 +197,7 @@ public class CreateRoutineHandler implements CommandHandler {
         }
         final String integrationName = ExternalFunctions.requireFunctionIntegration(catalog,
             queryExecutor.getSecurityManager(), integration);
+        UntypedArguments.reject(ctx.parameterList());
         if (ctx.STRING_LITERAL() == null) {
             throw new RuntimeException(SqlCompilationError.of("Missing option(s): [AS]"));
         }
@@ -222,8 +230,8 @@ public class CreateRoutineHandler implements CommandHandler {
     }
 
     public Object handleCreateFunction(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qualifiedName = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qualifiedName = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
 
         // What the statement says of itself is judged before any name in it resolves: the options' order (a
@@ -232,7 +240,7 @@ public class CreateRoutineHandler implements CommandHandler {
         RoutineStatementRules.judge(ctx);
         rejectSourcelessCopyGrants(ctx);
         rejectVectorSignature(ctx, functionLanguage(ctx), false, hasMemoizableOption(ctx));
-        if (hasMemoizableOption(ctx)) {
+        if (hasMemoizableOption(ctx) && !UntypedArguments.any(ctx.parameterList())) {
             final boolean table = ctx.returnType() != null && ctx.returnType().TABLE() != null;
             requireMemoizableShape(functionLanguage(ctx).name(), table,
                 table || ctx.returnType() == null || ctx.returnType().dataTypeName() == null ? StringType.VARCHAR
@@ -245,6 +253,11 @@ public class CreateRoutineHandler implements CommandHandler {
         // before it does nothing (live-verified).
         final Schema schema = routineSchema(parts, qualifiedName, "function");
         final String functionName = parts[parts.length - 1];
+        // An argument with no type gives the routine no signature: it is refused once the schema is, a repeated name
+        // first (see UntypedArguments).
+        if (UntypedArguments.any(ctx.parameterList())) {
+            rejectRepeatedSignatureNames(ctx);
+        }
         final List<Parameter> parameters = parseParameters(ctx);
         // OR REPLACE needs OWNERSHIP of the overload it replaces; the overload itself is dropped only once the
         // new definition has passed every check, so a refused replacement leaves it in place (live-verified).
@@ -580,8 +593,8 @@ public class CreateRoutineHandler implements CommandHandler {
     }
 
     public Object handleCreateProcedure(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qualifiedName = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qualifiedName = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
 
         // A procedure takes a function's options, in the same order, and is judged in the same phases as a
@@ -598,6 +611,10 @@ public class CreateRoutineHandler implements CommandHandler {
         }
         final Schema schema = routineSchema(parts, qualifiedName, "procedure");
         final String procedureName = parts[parts.length - 1];
+        // As for a function: an argument with no type is refused once the schema is (see UntypedArguments).
+        if (UntypedArguments.any(ctx.parameterList())) {
+            rejectRepeatedSignatureNames(ctx);
+        }
         final List<Parameter> parameters = parseParameters(ctx);
         // OR REPLACE needs OWNERSHIP of the overload it replaces; the overload itself is dropped only once the
         // new definition has passed every check, so a refused replacement leaves it in place.
@@ -689,8 +706,11 @@ public class CreateRoutineHandler implements CommandHandler {
             requireMemoizableLanguage(procedureLanguage.name());
             throw memoizableScalarOnly();
         }
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final String procedureName = parts[parts.length - 1];
+        if (UntypedArguments.any(ctx.parameterList())) {
+            rejectRepeatedSignatureNames(ctx);
+        }
         final List<Parameter> parameters = parseParameters(ctx);
         final RoutineEnvironment environment = checkedProcedureEnvironment(ctx, procedureLanguage, procedureName,
             parameters, new RoutineEnvironments(catalog, queryExecutor), null);
@@ -938,7 +958,7 @@ public class CreateRoutineHandler implements CommandHandler {
     private DataType firstVector(final FrostlakeParser.CreateStatementContext ctx) {
         if (ctx.parameterList() != null) {
             for (final FrostlakeParser.ParameterDefContext def : ctx.parameterList().parameterDef()) {
-                if (def.dataTypeName().VECTOR() != null) {
+                if (def.dataTypeName() != null && def.dataTypeName().VECTOR() != null) {
                     return columnParser.parseDataType(def.dataTypeName(), def.typeParameters());
                 }
             }
@@ -1497,14 +1517,33 @@ public class CreateRoutineHandler implements CommandHandler {
 
 
     /**
-     * Refuse a signature that repeats a name, before anything else about the routine is judged - the
-     * body compile, a block declaring a variable twice and the language's own type rule all come after
-     * it. Names are compared as they RESOLVE: an unquoted one folds, so {@code (x INT, X INT)} repeats
-     * while {@code ("x" INT, x INT)} is two arguments and is created. The account says "function
-     * signature" for a PROCEDURE too, and a duplicate in a TABLE return carries a sentence of its own.
-     * Neither sentence takes the compilation-error prefix (live-verified).
+     * Refuse a signature that repeats a name or leaves a type out, before anything else about the routine is judged -
+     * the body compile, a block declaring a variable twice and the language's own type rule all come after it. A
+     * returned column required after an optional one is refused first, at its name, a column written without a type
+     * counting as required; then a repeated argument name, then a repeated column name; then an argument written
+     * without a type (see UntypedArguments) and last a column written without one. Names are compared as they
+     * RESOLVE: an unquoted one folds, so {@code (x INT, X INT)} repeats while {@code ("x" INT, x INT)} is two
+     * arguments and is created. The account says "function signature" for a PROCEDURE too, and a duplicate in a
+     * TABLE return carries a sentence of its own. None of the sentences after the first takes the compilation-error
+     * prefix (all live-verified).
      */
     private void rejectRepeatedSignatureNames(final FrostlakeParser.CreateStatementContext ctx) {
+        final List<FrostlakeParser.ReturnColumnContext> columns = ctx.returnType() != null
+            && ctx.returnType().returnColumnList() != null ? ctx.returnType().returnColumnList().returnColumn()
+            : Collections.<FrostlakeParser.ReturnColumnContext>emptyList();
+        // The last column written with a DEFAULT: a column after it without one is refused at its name, in the words
+        // a routine's arguments are (live-verified).
+        String optional = null;
+        for (final FrostlakeParser.ReturnColumnContext column : columns) {
+            if (column.DEFAULT() != null) {
+                optional = ParseTreeText.namePartText(column.returnColumnName());
+            } else if (optional != null) {
+                final Token at = column.getStart();
+                throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
+                    "required argument " + ParseTreeText.namePartText(column.returnColumnName())
+                        + " cannot follow optional argument " + optional));
+            }
+        }
         final Set<String> arguments = new LinkedHashSet<>();
         if (ctx.parameterList() != null) {
             for (final FrostlakeParser.ParameterDefContext parameter : ctx.parameterList().parameterDef()) {
@@ -1514,30 +1553,18 @@ public class CreateRoutineHandler implements CommandHandler {
                 }
             }
         }
-        final Set<String> columns = new LinkedHashSet<>();
-        if (ctx.returnType() != null && ctx.returnType().returnColumnList() != null) {
-            // The last column written with a DEFAULT: a column after it without one is refused at its name, in the
-            // words a routine's arguments are (live-verified).
-            String optional = null;
-            for (final FrostlakeParser.ReturnColumnContext column
-                    : ctx.returnType().returnColumnList().returnColumn()) {
-                final String name = ParseTreeText.namePartText(column.returnColumnName()).toUpperCase(Locale.ROOT);
-                if (column.dataTypeName() == null) {
-                    // A column written without its type is refused in its own words (live-verified).
-                    throw new RuntimeException("Return signature missing data type for column '" + name + "'.");
-                }
-                if (column.DEFAULT() != null) {
-                    optional = ParseTreeText.namePartText(column.returnColumnName());
-                } else if (optional != null) {
-                    final Token at = column.getStart();
-                    throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
-                        "required argument " + ParseTreeText.namePartText(column.returnColumnName())
-                            + " cannot follow optional argument " + optional));
-                }
-                if (!columns.add(name)) {
-                    throw new RuntimeException(
-                        "Return signature contains a duplicate column name '" + name + "'.");
-                }
+        final Set<String> names = new LinkedHashSet<>();
+        for (final FrostlakeParser.ReturnColumnContext column : columns) {
+            final String name = ParseTreeText.namePartText(column.returnColumnName()).toUpperCase(Locale.ROOT);
+            if (!names.add(name)) {
+                throw new RuntimeException("Return signature contains a duplicate column name '" + name + "'.");
+            }
+        }
+        UntypedArguments.reject(ctx.parameterList());
+        for (final FrostlakeParser.ReturnColumnContext column : columns) {
+            if (column.dataTypeName() == null) {
+                throw new RuntimeException("Return signature missing data type for column '"
+                    + ParseTreeText.namePartText(column.returnColumnName()).toUpperCase(Locale.ROOT) + "'.");
             }
         }
     }

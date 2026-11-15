@@ -20,6 +20,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.Token;
 
@@ -377,10 +378,12 @@ public final class UnknownTypeWords {
 
     /**
      * Whether a token may be a type's word: an identifier, or a keyword of this grammar the account reads as a plain
-     * name there, OTHER; LANGUAGE and SESSION are refused where they stand (all live-verified).
+     * name there, OTHER; LANGUAGE and SESSION are refused where they stand, and so is an escape word (see
+     * {@link #isEscapeWord}) (all live-verified).
      */
     private static boolean isWord(final Token token) {
-        return SyntaxErrorListener.isIdentifierToken(token) || token.getType() == FrostlakeLexer.OTHER;
+        return (SyntaxErrorListener.isIdentifierToken(token) || token.getType() == FrostlakeLexer.OTHER)
+            && !isEscapeWord(token.getText());
     }
 
     /**
@@ -682,9 +685,10 @@ public final class UnknownTypeWords {
     /**
      * The reading of a statement whose one word is shorter than any known type, {@code LET q r;}: the stand-in is
      * written in its place, the rest of the text moved along, and the statement is taken as read where the text
-     * then parses cleanly. A DECLARE item's word ({@code declared}) whose text still faults past it is told by those
-     * faults, their places put back (see {@link #widenedFaults}); any other is null, where the places of a later
-     * fault would no longer be the written ones.
+     * then parses cleanly. A text that still faults past the word is told by those faults, their places put back
+     * (see {@link #widenedFaults}), where the stand-in reads as a type or the word is a DECLARE item's ({@code
+     * declared}): {@code CREATE FUNCTION f(a b c)} is the c, as {@code CREATE TABLE t (c b c2)} is the c2, while
+     * {@code ALTER TABLE t DROP COLUMN c zz} keeps its fault at the word (all live-verified).
      */
     private static UnknownTypeWords shortWord(final String sql, final List<UnknownTypeWord> words, final Token word,
                                               final int from, final int to, final boolean declared) {
@@ -693,7 +697,8 @@ public final class UnknownTypeWords {
         }
         final String widened = sql.substring(0, from) + STAND_IN + sql.substring(to);
         if (SyntaxErrorListener.cleanParse(widened) == null) {
-            return declared ? widenedFaults(widened, word, from, to) : null;
+            return declared || TypeSlotSubstitution.readsAsTypeBeforeFault(widened, from)
+                ? widenedFaults(widened, word, from, to) : null;
         }
         if (!TypeSlotSubstitution.readsAsType(widened, from)) {
             return null;
@@ -702,6 +707,17 @@ public final class UnknownTypeWords {
         read.add(new UnknownTypeWord(from, word.getText(), word.getText(), false, null, false));
         return new UnknownTypeWords(new UnknownTypeReading(widened, read,
             SyntaxErrorListener.inIcebergTableStatement(tokensOf(sql), tokenStartingAt(tokensOf(sql), from))), null);
+    }
+
+    /**
+     * Whether a word is one of the escape words the account's lexer keeps as keywords, d, t, ts, fn and oj, which no
+     * type slot reads as a name: {@code SELECT 1::d} is a syntax error at the d, where {@code 1::dd} is an unsupported
+     * data type (live-verified).
+     */
+    static boolean isEscapeWord(final String word) {
+        final String lower = word.toLowerCase(Locale.ROOT);
+        return "d".equals(lower) || "t".equals(lower) || "ts".equals(lower) || "fn".equals(lower)
+            || "oj".equals(lower);
     }
 
     /**

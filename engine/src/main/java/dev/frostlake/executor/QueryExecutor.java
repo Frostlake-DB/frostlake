@@ -1180,7 +1180,8 @@ public class QueryExecutor implements ImportLocalizer {
         final FrostlakeParser.StatementContext described = visitor.describedStatement(executedStatement);
         final FrostlakeParser.ObjectNameContext reference = described == null
             || described.getStart().getType() != FrostlakeParser.CREATE
-            && described.getStart().getType() != FrostlakeParser.DROP ? null
+            && described.getStart().getType() != FrostlakeParser.DROP
+            && described.getStart().getType() != FrostlakeParser.UNDROP ? null
             : DdlStatusMessage.identifierReference(described);
         final String[] referencedParts = reference == null ? null : resolveObjectNameParts(reference);
         final String sentence = DdlStatusMessage.forStatement(described, ConditionalDdlOutcome.take(),
@@ -1188,7 +1189,13 @@ public class QueryExecutor implements ImportLocalizer {
         // A sentence the statement's handler adds follows it (see DdlStatusNote).
         final String note = DdlStatusNote.take();
         statusRows.add(new Row(Arrays.asList((Object) (note == null ? sentence : sentence + " " + note))));
-        return new ResultSet(statusColumns, statusRows);
+        final ResultSet answer = new ResultSet(statusColumns, statusRows);
+        // The rows a CTAS wrote or a TRUNCATE removed travel with its status (see DdlRowCounts).
+        final long[] changed = DdlRowCounts.take();
+        if (changed != null) {
+            answer.markRowsChanged(changed[0], changed[1]);
+        }
+        return answer;
     }
 
     /**
@@ -3297,6 +3304,7 @@ public class QueryExecutor implements ImportLocalizer {
                     // handler reported must not leak into this one's status sentence.
                     ConditionalDdlOutcome.clear();
                     DdlStatusNote.clear();
+                    DdlRowCounts.clear();
                     ScanStar.clearScan();
 
                     // If we have lateral context and this is a query statement (SELECT), pass it along.
@@ -8818,7 +8826,10 @@ public class QueryExecutor implements ImportLocalizer {
                 requireTableUnlocked(fullyQualifiedName, table.getName());
             }
 
+            // The rows removed are the ones the statement saw, a transaction's own writes among them.
+            final int removed = readTableRowsForTransaction(fullyQualifiedName).size();
             emptyTableContents(fullyQualifiedName);
+            DdlRowCounts.record(0, removed);
             logger.trace("Truncated table: {}", tableName);
 
         } catch (final SecurityException e) {
@@ -10588,6 +10599,79 @@ public class QueryExecutor implements ImportLocalizer {
             return resolveIdentifierArgument(ctx.identifierArgument(), targetsARowChange(ctx));
         }
         return ParseTreeText.qualifiedNameParts(ctx.qualifiedName());
+    }
+
+    /**
+     * The name a CREATE gives the object it makes, where its kind writes one that may be an {@code IDENTIFIER()}
+     * reference: a relation's {@code objectName}; the {@code createdName} or {@code containerName} of a database, a
+     * schema, a stream, a task, a sequence, a stage, a file format, a tag, a contact and a git repository; a policy's
+     * {@code createdPolicyName}; a function's, an external function's or a procedure's {@code routineName}; a dynamic
+     * table's {@code dynamicTableName}; and an alert's {@code alertName}.
+     *
+     * @param ctx the statement
+     * @return the name, or null for a kind that writes its name otherwise
+     */
+    public static FrostlakeParser.ObjectNameContext createdName(final FrostlakeParser.CreateStatementContext ctx) {
+        if (ctx.createdName() != null) {
+            return ctx.createdName().objectName();
+        }
+        if (ctx.createdPolicyName() != null) {
+            return ctx.createdPolicyName().objectName();
+        }
+        if (ctx.routineName() != null) {
+            return ctx.routineName().objectName();
+        }
+        if (ctx.dynamicTableName() != null) {
+            return ctx.dynamicTableName().objectName();
+        }
+        if (ctx.alertName() != null) {
+            return ctx.alertName().objectName();
+        }
+        return ctx.containerName() != null ? ctx.containerName().objectName() : ctx.objectName();
+    }
+
+    /**
+     * {@link #createdName}'s canonical parts, an {@code IDENTIFIER()} reference resolved as
+     * {@link #resolveObjectNameParts} resolves one.
+     *
+     * @param ctx the statement
+     * @return the parts
+     */
+    public String[] createdNameParts(final FrostlakeParser.CreateStatementContext ctx) {
+        return resolveObjectNameParts(createdName(ctx));
+    }
+
+    /**
+     * {@link #createdNameParts} joined into the name a qualified name's text spells.
+     *
+     * @param ctx the statement
+     * @return the name
+     */
+    public String createdObjectName(final FrostlakeParser.CreateStatementContext ctx) {
+        return QualifiedName.join(createdNameParts(ctx));
+    }
+
+    /**
+     * The canonical parts of the object a CREATE's CLONE copies, or of the table its LIKE takes its columns from, an
+     * {@code IDENTIFIER()} reference resolved as {@link #resolveObjectNameParts} resolves one.
+     *
+     * @param ctx the statement
+     * @return the parts, or null where the statement copies nothing
+     */
+    public String[] copySourceParts(final FrostlakeParser.CreateStatementContext ctx) {
+        final FrostlakeParser.SourceObjectNameContext source = ctx.sourceObjectName();
+        return source == null || source.objectName() == null ? null : resolveObjectNameParts(source.objectName());
+    }
+
+    /**
+     * {@link #copySourceParts} joined into the name a qualified name's text spells.
+     *
+     * @param ctx the statement
+     * @return the name, or null where the statement copies nothing
+     */
+    public String copySourceName(final FrostlakeParser.CreateStatementContext ctx) {
+        final String[] parts = copySourceParts(ctx);
+        return parts == null ? null : QualifiedName.join(parts);
     }
 
     /**

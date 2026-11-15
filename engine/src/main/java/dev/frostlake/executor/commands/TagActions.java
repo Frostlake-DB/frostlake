@@ -25,10 +25,14 @@ import dev.frostlake.metastore.Taggable;
 import dev.frostlake.metastore.model.Tag;
 import dev.frostlake.parser.FrostlakeParser;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * An ALTER's SET TAG and UNSET TAG actions over one object. Each tag named has to exist, for either action: one
  * that is missing and named bare is refused by that name alone, one named by a path by its full path; a value has
- * to be one the tag allows.
+ * to be one the tag allows. An action is judged whole before any tag changes, so a refused one leaves the object's
+ * tags as they were (live-verified).
  */
 final class TagActions {
 
@@ -45,11 +49,19 @@ final class TagActions {
      */
     static void set(final Taggable target, final FrostlakeParser.TagSetContext set, final Catalog catalog,
                     final QueryExecutor queryExecutor) {
+        final List<Tag> tags = new ArrayList<>();
         for (final FrostlakeParser.TagAssignContext assign : set.tagAssign()) {
-            final Tag tag = tag(assign.qualifiedName(), catalog);
+            tags.add(tag(assign.qualifiedName(), catalog));
+        }
+        final List<String> values = new ArrayList<>();
+        for (int i = 0; i < tags.size(); i++) {
+            final FrostlakeParser.TagAssignContext assign = set.tagAssign(i);
             final String value = TagValues.text(assign.qualifiedName(), assign.tagValue(), queryExecutor);
-            TagValues.requireAllowed(tag, value);
-            TagAssignments.set(target, tag, value);
+            TagValues.requireAllowed(tags.get(i), value);
+            values.add(value);
+        }
+        for (int i = 0; i < tags.size(); i++) {
+            TagAssignments.set(target, tags.get(i), values.get(i));
         }
     }
 
@@ -61,8 +73,12 @@ final class TagActions {
      * @param catalog the catalog the tags live in
      */
     static void unset(final Taggable target, final FrostlakeParser.TagUnsetContext unset, final Catalog catalog) {
+        final List<Tag> tags = new ArrayList<>();
         for (final FrostlakeParser.QualifiedNameContext name : unset.qualifiedName()) {
-            TagAssignments.unset(target, tag(name, catalog));
+            tags.add(tag(name, catalog));
+        }
+        for (final Tag tag : tags) {
+            TagAssignments.unset(target, tag);
         }
     }
 

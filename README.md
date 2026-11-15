@@ -50,6 +50,36 @@ As against Snowflake, the driver reads its default Arrow results on JDK 16+ only
 `--add-opens=java.base/java.nio=ALL-UNNAMED`; append `&JDBC_QUERY_RESULT_FORMAT=JSON` to the URL to do without.
 Details in [`docs/http-api.md`](docs/http-api.md#the-snowflake-jdbc-driver).
 
+## Snowflake's Python connector and Snowflake CLI
+
+Snowflake's Python connector (`snowflake-connector-python`) and Snowflake CLI (`snow`) connect to the same HTTP
+server. Give the connector the server's host and port with `protocol='http'`; the account, user and password are
+not checked:
+
+```python
+import snowflake.connector
+
+conn = snowflake.connector.connect(account='frostlake', user='any', password='any',
+                                   host='127.0.0.1', port=18082, protocol='http')
+print(conn.cursor().execute("SELECT CURRENT_VERSION()").fetchone())
+```
+
+For `snow`, add a connection to its `config.toml` and pass `-c frostlake` to a command — `snow sql`, `snow object`
+and `snow stage create`, `copy` and `list-files` work:
+
+```toml
+[connections.frostlake]
+account = "frostlake"
+user = "any"
+password = "any"
+host = "127.0.0.1"
+port = 18082
+protocol = "http"
+```
+
+REMOVE, which `snow stage remove` sends, is refused until the server's `frostlake.properties` sets
+`command.removeEnabled=true`.
+
 ## Trademarks & Disclaimer
 
 Frostlake is an independent project and is **not affiliated with, endorsed by, or sponsored

@@ -8,12 +8,21 @@ fix, not a regression**: SQL that Snowflake rejects and Frostlake accepted was a
 closing it can break code that relied on the leniency. Those changes are listed first in every release
 for exactly that reason.
 
-## 0.4.1 — unreleased
-
-Changes since 0.4.0 accumulate here as they land.
+## 0.5.0 — 2026-11-15
 
 ### Now refused (SQL that earlier versions accepted)
 
+- **A masking, row access or storage lifecycle policy refuses an argument name written twice** (live-verified):
+  `CREATE MASKING POLICY p AS (v STRING, v STRING) RETURNS STRING -> v` is `Argument 'V' repeats in the function
+  signature.`, as a routine's signature is, where the policy was created.
+- **CREATE STAGE … CLONE refuses an internal source, and a temporary one for a permanent clone** (live-verified): a
+  clone of an internal stage — OR REPLACE and IF NOT EXISTS alike, a temporary internal stage among them — is
+  `Unsupported feature 'Cloning internal and temporary stages'.`, and a permanent clone of a temporary external stage
+  `SQL compilation error: Temp stage cannot be cloned to a permanent stage.`, where both cloned the stage; a plain
+  create over a taken name is refused for the name first.
+- **DROP DATABASE IF EXISTS refuses a name of several parts** (live-verified): `DROP DATABASE IF EXISTS a.b` is
+  `Object does not exist, or operation cannot be performed.`, where it answered that nothing was dropped; four parts
+  are `database identifier '…' has too many qualifiers`.
 - **A privacy policy's body is compiled when the policy is created** (live-verified): an unknown name is refused in the
   body's own frame, `CREATE PRIVACY POLICY p AS () RETURNS PRIVACY_BUDGET -> some_column` being `error line 1 at
   position 1 invalid identifier 'SOME_COLUMN'` and a name inside `PRIVACY_BUDGET(BUDGET_NAME => nosuch_col)` placed
@@ -342,6 +351,11 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Added
 
+- **ALTER STAGE … SET TAG and UNSET TAG, and CREATE STAGE … WITH TAG** (live-verified): a stage takes tags as the
+  other kinds do, SYSTEM$GET_TAG and TAG_REFERENCES read them, a clone carries its source's tags and a renamed stage
+  keeps them. CREATE STAGE judges its tags once its name is, so a taken name is refused first while IF NOT EXISTS over a
+  stage that is there still judges them. A tag action that does not read to the statement's end is read as the stage's
+  properties are, `ALTER STAGE s SET TAG t = 'x' COMMENT = 'c'` being a syntax error at the tag's name.
 - **COMMENT ON reads eighteen more kinds of object, answered as each kind's ALTER ... SET COMMENT** (live-verified):
   ALERT, NETWORK RULE, STREAMLIT, NOTEBOOK, the AUTHENTICATION, PASSWORD, SESSION, PACKAGES, AGGREGATION, PROJECTION,
   JOIN and PRIVACY POLICY, IMAGE REPOSITORY, SERVICE, CORTEX SEARCH SERVICE, MODEL, GIT REPOSITORY, SEMANTIC VIEW and
@@ -496,6 +510,82 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Fixed
 
+- **An argument written without a type is refused in the account's words** (live-verified): `CREATE FUNCTION f(a)
+  RETURNS INT AS '1'`, a procedure, an anonymous procedure and every kind of policy alike, is `Missing data type for
+  argument 'A'` (code 90201), where it was a syntax error at the parenthesis. A required argument after an optional
+  one, a width, the language, the schema and an unknown type come first, then a repeated argument name and a returned
+  column's repeated name, a policy's taken name and an external function's integration; a returned column with no type
+  comes after it, and a returned column required after an optional one now comes before the repeated names.
+- **An external function refuses a name that is no type in its own sentence** (live-verified): `SQL compilation
+  error: External functions may not have datatype 'B' as arguments` (code 2176) for an argument and `… as its return
+  type` (2177) for the result, where it was `Unsupported data type 'B'.`; a name written with parameters keeps the
+  general sentence.
+- **A fault after a short name standing as a type is told where it stands, and d, t, ts, fn and oj name no type**
+  (live-verified): `CREATE FUNCTION f(a b c)` is a syntax error at the c and `CREATE TABLE t (c b c2)` at the c2, where
+  both named the b; `SELECT 1::d` and `CREATE TABLE t (a ts)` are syntax errors at the word, which the account keeps as
+  a keyword, where they were unsupported data types.
+- **SET TAG and UNSET TAG are judged whole before any tag changes, on every kind** (live-verified): every tag named has
+  to exist before any value is judged, so `ALTER TASK k SET TAG t1 = 'x', nosuch = 'y'` leaves t1 as it was, where it
+  set it, and an UNSET naming a missing tag takes none off.
+- **More refusals carry the account's error code and SQLSTATE**, to a handler and to a client's driver alike
+  (live-verified): a constraint that is not there 1450 / 42601, a clustering key's column renamed 3320 and dropped
+  3203 / 42601, a repeated argument name 90200, a returned column's repeated name 90211 and a required argument after
+  an optional one 946 / 42601.
+- **ALTER TABLE … RENAME CONSTRAINT names a missing table as it was written** (live-verified), `Table 'T0' does not
+  exist or not authorized.` for a bare name, as RENAME COLUMN does, where it named the table by its full path.
+- **The driver endpoints answer each statement with the type id the account answers it with** (live-verified): a DDL
+  statement its kind's or its action's own — CREATE TABLE 0x6101, CREATE VIEW 0x6114, ALTER TABLE ADD COLUMN 0x6202,
+  SET TAG 0x6281, a table's rename 0x6401, DROP STREAM 0x6307 and the rest measured — or its family's (CREATE
+  0x6100, ALTER 0x6200, DROP 0x6300, a rename 0x6400, UNDROP 0x6800); SET 0x6901, UNSET 0x6902, BEGIN 0x5400, COMMIT
+  0x5100, ROLLBACK 0x5200, EXPLAIN 0x2000, CALL and a block 0x9000, LIST 0x4400 and REMOVE 0; and an EXECUTE
+  IMMEDIATE of a written text the id of the statement it runs. Snowflake's drivers read each id in the class they read
+  the generic one in.
+- **CREATE DYNAMIC TABLE, ALERT, EXTERNAL FUNCTION and GIT REPOSITORY take `IDENTIFIER()` as the name, and an alert's
+  CLONE as its source** (live-verified). The word IDENTIFIER with no whole reference after it names a dynamic table or
+  an external function, the parenthesis after it being the column or the parameter list, and is refused at the
+  parenthesis for an alert and a git repository.
+- **CREATE TAG, CONTACT, FUNCTION, PROCEDURE and the masking, row access, projection, aggregation, join and privacy
+  policies take `IDENTIFIER()` as the name** (live-verified), OR REPLACE, OR ALTER, IF NOT EXISTS, TEMPORARY and
+  SECURE alike. The word IDENTIFIER with no whole reference after it names a function or a procedure, the parenthesis
+  after it being its parameter list — `CREATE FUNCTION IDENTIFIER(a INT) …` makes a function called IDENTIFIER and
+  `IDENTIFIER('a' || 'b')()` is refused at the string — and is refused at the parenthesis for a tag and a contact,
+  at the parenthesis and the token after it for a policy.
+- **A missing FILE FORMAT or STREAM clone source written bare is named as written** (live-verified): `CREATE FILE
+  FORMAT f CLONE nosuch` is `File format 'NOSUCH' does not exist or not authorized. …`, where the session's database
+  and schema were added to the name; a source written by a path is still named in full.
+- **Snowflake's drivers read the rows a CREATE TABLE … AS SELECT wrote, or a TRUNCATE removed, as the statement's
+  stats** (live-verified): the driver endpoints send them beside the status — `numRowsInserted` for a CTAS,
+  temporary, transient, replacing or run by EXECUTE IMMEDIATE, `numRowsDeleted` for a TRUNCATE, none where no row
+  changed — and type the two statements 0x6111 and 0x6210, as the account does; USE answers 0x4300, where it answered
+  0x6000.
+- **A CLONE's source, and a LIKE's, may be named through `IDENTIFIER()`** (live-verified) for a table, an event table,
+  a dynamic table, a schema, a database, a stream, a task, a sequence, a stage and a file format, as the account takes
+  it; the word IDENTIFIER with no whole reference after it is refused at the parenthesis, a database's and a schema's
+  source too. A database's source of several parts is refused as a database's own name is, and a schema's of more
+  than two parts with the generic sentence unless the first is this account's locator, where those were syntax errors
+  or cloned the wrong schema.
+- **DROP, UNDROP, ALTER and COMMENT ON DATABASE judge a database's name by its parts** (live-verified): two or three
+  parts are `Object does not exist, or operation cannot be performed.` and four `database identifier '…' has too many
+  qualifiers`, IF EXISTS forgiving neither, where UNDROP, ALTER and COMMENT ON refused a dotted name as a syntax error
+  and DROP looked it up as one name. A quoted name holding a dot, `"a.b"`, names its database in DROP, UNDROP and USE,
+  where none of them found it; a name led by this account's locator is taken. UNDROP, ALTER and COMMENT ON take an
+  `IDENTIFIER()` name, DROP refuses `IDENTIFIER('a' || 'b')` at the `'||'`, and UNDROP over a database that exists is
+  `Object '…' already exists.` before any dropped version is looked for.
+- **A CREATE takes `IDENTIFIER()` as the name of a database, a schema, a stream, a task, a sequence, a stage and a
+  file format** (live-verified), as it did for a table and a view, so Snowflake CLI's `snow stage create` makes the
+  stage: `CREATE STAGE IF NOT EXISTS IDENTIFIER('db.s.st')`, the statement it sends, was a syntax error. IF NOT
+  EXISTS, OR REPLACE, OR ALTER and CLONE take the reference alike, and a stream reads its source that way too
+  (`ON TABLE IDENTIFIER('t')`). The word IDENTIFIER with no whole reference after it is refused where the account
+  refuses it: a database's and a schema's at the token where the reference stops, every other kind's at the
+  parenthesis, with nothing reported after it. A database's name of several parts is no syntax error any more: two or
+  three parts are `Object does not exist, or operation cannot be performed.`, four or more `database identifier '…'
+  has too many qualifiers`, and two led by this account's locator name the database. A name given through
+  `IDENTIFIER()` is matched to its database and schema exactly, as a written one is: `CREATE TABLE
+  IDENTIFIER('"s".t') (a INT)` with only a schema `S` made the table in `S`, where the account refuses it.
+- **A procedure called in a FROM clause names the object of a refused child job as the account does**
+  (live-verified): a database's and a schema's name, and the name an `IDENTIFIER()` reference gives, follow
+  `… in FROM clause on DATABASE 'D'.`, where nothing did; `CREATE TABLE IDENTIFIER('t') CLONE src` named `on TABLE
+  CLONE 'SRC'`.
 - **Snowflake's Python connector reads a DML statement's row count** (live-verified): the driver endpoints send only
   a query's rows as Arrow, and every other answer as a JSON rowset, as the account does: a status, a DML statement's
   counts, SHOW, DESCRIBE, EXPLAIN, a CALL's or a block's answer, and each result of a text of several. A DML answer
@@ -1359,6 +1449,8 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Changed
 
+- **The published jars are compiled for the JDK 17 API whatever JDK builds them** (`maven.compiler.release` 17), and
+  the engine's javadoc jar leaves out the generated parser and the "Use" pages: about half the size, the search kept.
 - **A correlated EXISTS or NOT EXISTS with conditions beside its equality, and a correlated subquery whose key
   compares under a collation, are computed once for every key**: the inner rows are kept once, grouped by the
   equality's key with the columns the other conditions read, and each outer row tests those conditions over its own

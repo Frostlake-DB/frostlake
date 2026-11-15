@@ -190,6 +190,18 @@ final class StatementKindText {
             final FrostlakeParser.QualifiedNameContext name;
             if (child instanceof FrostlakeParser.IdentifierContext) {
                 return null;
+            } else if (child instanceof FrostlakeParser.CreatedNameContext
+                    || child instanceof FrostlakeParser.CreatedPolicyNameContext
+                    || child instanceof FrostlakeParser.RoutineNameContext
+                    || child instanceof FrostlakeParser.DynamicTableNameContext
+                    || child instanceof FrostlakeParser.AlertNameContext) {
+                final FrostlakeParser.ObjectNameContext created =
+                    QueryExecutor.createdName((FrostlakeParser.CreateStatementContext) rule);
+                name = created == null ? null : created.qualifiedName();
+            } else if (child instanceof FrostlakeParser.ContainerNameContext) {
+                final FrostlakeParser.ObjectNameContext written =
+                    ((FrostlakeParser.ContainerNameContext) child).objectName();
+                name = written == null ? null : written.qualifiedName();
             } else if (child instanceof FrostlakeParser.ObjectNameContext) {
                 name = ((FrostlakeParser.ObjectNameContext) child).qualifiedName();
             } else if (child instanceof FrostlakeParser.QualifiedNameContext) {

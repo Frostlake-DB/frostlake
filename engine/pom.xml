@@ -241,4 +241,32 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- The release's javadoc leaves out the ANTLR-generated parser, lexer, listener and visitor (FrostlakeParser
+             alone is some 700 pages). Their sources stay on the source path, as every other class compiles against
+             them; they are only not documented. -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <configuration>
+                            <sourcepath>${project.build.sourceDirectory}${path.separator}${project.build.directory}/generated-sources/antlr4</sourcepath>
+                            <sourceFileExcludes>
+                                <sourceFileExclude>**/parser/FrostlakeParser.java</sourceFileExclude>
+                                <sourceFileExclude>**/parser/FrostlakeLexer.java</sourceFileExclude>
+                                <sourceFileExclude>**/parser/FrostlakeListener.java</sourceFileExclude>
+                                <sourceFileExclude>**/parser/FrostlakeBaseListener.java</sourceFileExclude>
+                                <sourceFileExclude>**/parser/FrostlakeVisitor.java</sourceFileExclude>
+                                <sourceFileExclude>**/parser/FrostlakeBaseVisitor.java</sourceFileExclude>
+                            </sourceFileExcludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

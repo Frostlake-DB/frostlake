@@ -44,8 +44,9 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
  * The format a statement's answer takes at the Snowflake driver endpoints, read off the wire as a driver reads it:
  * only a query's rows go back as Arrow where the session takes Arrow, every other answer - a status, a DML
  * statement's counts, a listing, a description, a plan, a block's answer - as a JSON rowset, as does each result of a
- * text of several; a DML answer carries its counts in {@code stats} when it changed a row. Snowflake's Python connector
- * reads a DML statement's rowcount off that JSON rowset alone.
+ * text of several; a DML answer carries its counts in {@code stats} when it changed a row, and a CREATE TABLE … AS
+ * SELECT's or a TRUNCATE's status the rows it wrote or removed. Each statement answers the type id the account answers
+ * it with. Snowflake's Python connector reads a DML statement's rowcount off that JSON rowset alone.
  */
 public class SnowflakeResultFormatTest {
 
@@ -161,6 +162,108 @@ public class SnowflakeResultFormatTest {
         run(token, "ALTER SESSION SET JDBC_QUERY_RESULT_FORMAT = 'JSON'", 1);
         assertEquals("json", format(run(token, "SELECT * FROM fmt_t ORDER BY id", 1)));
         run(token, "DROP DATABASE fmt_db", 1);
+    }
+
+    @Test
+    public void aCtasAndATruncateAnswerTheRowsTheyChangedAsStats() throws IOException, InterruptedException {
+        final String token = login();
+        run(token, "CREATE OR REPLACE DATABASE fmt_db3", 1);
+        assertEquals(0x4300, run(token, "USE SCHEMA fmt_db3.public", 1).path("statementTypeId").asLong());
+        run(token, "CREATE TABLE src (a INT)", 1);
+        run(token, "INSERT INTO src VALUES (1), (2), (3), (4)", 1);
+        final JsonNode created = run(token, "CREATE TABLE dst AS SELECT * FROM src", 1);
+        assertEquals("json", format(created));
+        assertEquals(0x6111, created.path("statementTypeId").asLong());
+        assertEquals("{\"numRowsInserted\":4,\"numRowsDeleted\":0,\"numRowsUpdated\":0,\"numDmlDuplicates\":0}",
+            created.path("stats").toString());
+        assertFalse(run(token, "CREATE TABLE dst0 AS SELECT * FROM src WHERE FALSE", 1).has("stats"));
+        assertFalse(run(token, "CREATE TABLE IF NOT EXISTS dst AS SELECT * FROM src", 1).has("stats"));
+        assertFalse(run(token, "CREATE TABLE dst1 CLONE src", 1).has("stats"));
+        final JsonNode truncated = run(token, "TRUNCATE TABLE dst", 1);
+        assertEquals(0x6210, truncated.path("statementTypeId").asLong());
+        assertEquals("{\"numRowsInserted\":0,\"numRowsDeleted\":4,\"numRowsUpdated\":0,\"numDmlDuplicates\":0}",
+            truncated.path("stats").toString());
+        assertFalse(run(token, "TRUNCATE TABLE dst", 1).has("stats"));
+        final JsonNode immediate = run(token, "EXECUTE IMMEDIATE 'CREATE TABLE dst2 AS SELECT 1 AS a'", 1);
+        assertEquals(1, immediate.path("stats").path("numRowsInserted").asInt());
+        run(token, "DROP DATABASE fmt_db3", 1);
+    }
+
+    @Test
+    public void eachStatementAnswersTheAccountsTypeId() throws IOException, InterruptedException {
+        final String token = login();
+        final String[][] cases = {
+            {"CREATE OR REPLACE DATABASE fmt_db5", "6100"},
+            {"USE SCHEMA fmt_db5.public", "4300"},
+            {"CREATE TABLE t1 (a INT)", "6101"},
+            {"CREATE TABLE t2 AS SELECT 1 AS a", "6111"},
+            {"CREATE TABLE t3 (a INT)", "6101"},
+            {"CREATE VIEW v1 AS SELECT a FROM t1", "6114"},
+            {"CREATE MATERIALIZED VIEW mv1 AS SELECT a FROM t1", "6111"},
+            {"CREATE SEQUENCE sq1", "6102"},
+            {"CREATE STAGE st1", "6100"},
+            {"CREATE STREAM sm1 ON TABLE t1", "6107"},
+            {"CREATE TASK tk1 AS SELECT 1", "6108"},
+            {"CREATE TAG tg1", "6116"},
+            {"CREATE MASKING POLICY mp1 AS (v STRING) RETURNS STRING -> v", "6112"},
+            {"CREATE ROW ACCESS POLICY rp1 AS (v STRING) RETURNS BOOLEAN -> TRUE", "6115"},
+            {"CREATE PROJECTION POLICY pp1 AS () RETURNS PROJECTION_CONSTRAINT -> PROJECTION_CONSTRAINT(ALLOW => TRUE)",
+                "611d"},
+            {"CREATE CONTACT ct1 EMAIL_DISTRIBUTION_LIST = 'a@example.com'", "6126"},
+            {"CREATE EVENT TABLE et1", "6923"},
+            {"CREATE FUNCTION f1() RETURNS INT AS '1'", "6100"},
+            {"CREATE PROCEDURE p1() RETURNS INT LANGUAGE SQL AS 'BEGIN RETURN 1; END'", "6100"},
+            {"ALTER TABLE t1 ADD COLUMN b INT", "6202"},
+            {"ALTER TABLE t1 ALTER COLUMN b COMMENT 'x'", "6204"},
+            {"COMMENT ON COLUMN t1.b IS 'c'", "6204"},
+            {"ALTER TABLE t1 DROP COLUMN b", "6203"},
+            {"ALTER TABLE t1 CLUSTER BY (a)", "6201"},
+            {"ALTER TABLE t1 DROP CLUSTERING KEY", "6208"},
+            {"ALTER TABLE t1 ADD CONSTRAINT pk PRIMARY KEY (a)", "6103"},
+            {"ALTER TABLE t1 SET TAG tg1 = 'x'", "6281"},
+            {"ALTER TABLE t1 UNSET TAG tg1", "6282"},
+            {"ALTER TABLE t1 SET COMMENT = 'c'", "6200"},
+            {"ALTER VIEW v1 SET SECURE", "6209"},
+            {"ALTER TAG tg1 SET ALLOWED_VALUES 'x', 'y'", "62be"},
+            {"ALTER TAG tg1 UNSET COMMENT", "6280"},
+            {"ALTER CONTACT ct1 SET COMMENT = 'c'", "62a5"},
+            {"ALTER TABLE t3 RENAME COLUMN a TO a2", "6402"},
+            {"ALTER TABLE t3 RENAME TO t3r", "6401"},
+            {"ALTER VIEW v1 RENAME TO v1r", "6408"},
+            {"ALTER SEQUENCE sq1 RENAME TO sq1r", "640a"},
+            {"ALTER STAGE st1 RENAME TO st1r", "6409"},
+            {"ALTER FUNCTION f1() RENAME TO f1r", "6406"},
+            {"ALTER PROCEDURE p1() RENAME TO p1r", "6400"},
+            {"TRUNCATE TABLE t2", "6210"},
+            {"DROP STREAM sm1", "6307"},
+            {"DROP TASK tk1", "6308"},
+            {"DROP MASKING POLICY mp1", "6309"},
+            {"DROP ROW ACCESS POLICY rp1", "630a"},
+            {"DROP PROJECTION POLICY pp1", "631c"},
+            {"DROP CONTACT ct1", "6322"},
+            {"DROP TABLE t2", "6300"},
+            {"UNDROP TABLE t2", "6800"},
+            {"SET fmt_v = 1", "6901"},
+            {"UNSET fmt_v", "6902"},
+            {"ALTER SESSION SET QUERY_TAG = 'x'", "4100"},
+            {"BEGIN", "5400"},
+            {"COMMIT", "5100"},
+            {"ROLLBACK", "5200"},
+            {"EXPLAIN SELECT 1", "2000"},
+            {"CALL p1r()", "9000"},
+            {"EXECUTE IMMEDIATE $$BEGIN RETURN 1; END$$", "9000"},
+            {"EXECUTE IMMEDIATE 'CREATE TABLE t9 (a INT)'", "6101"},
+            {"EXECUTE IMMEDIATE 'UPDATE t3r SET a2 = 2'", "3200"},
+            {"SHOW TABLES", "4400"},
+            {"LIST @st1r", "4400"},
+            {"DESCRIBE TABLE t3r", "4500"},
+            {"SELECT 1", "1000"},
+            {"DROP DATABASE fmt_db5", "6300"},
+        };
+        for (final String[] statement : cases) {
+            assertEquals(statement[1], Long.toHexString(run(token, statement[0], 1).path("statementTypeId").asLong()),
+                statement[0]);
+        }
     }
 
     @Test

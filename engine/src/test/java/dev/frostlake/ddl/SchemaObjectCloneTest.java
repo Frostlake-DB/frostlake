@@ -26,10 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * A task, a stage and a file format are cloned on their own as a schema clone copies them (documented: CREATE
  * ... CLONE, "Other schema objects: CREATE [ OR REPLACE ] { ALERT | FILE FORMAT | SEQUENCE | STAGE | STREAM |
- * TASK } [ IF NOT EXISTS ] object_name CLONE source_object_name"): a task suspended with its definition, a stage
- * with its definition and, when internal, no files, a file format with its options. The three statements were syntax
- * errors. A temporary clone of an external stage or of a file format is its session's own, where an internal stage is
- * no temporary clone's source and a transient clone is a syntax error (live-verified).
+ * TASK } [ IF NOT EXISTS ] object_name CLONE source_object_name"): a task suspended with its definition, an external
+ * stage with its definition, a file format with its options. The three statements were syntax errors. A temporary clone
+ * of an external stage or of a file format is its session's own; an internal stage is no clone's source, nor a
+ * temporary one a permanent clone's, and a transient clone is a syntax error (live-verified).
  */
 public class SchemaObjectCloneTest extends MeasuredCellsTestSupport {
 
@@ -54,13 +54,26 @@ public class SchemaObjectCloneTest extends MeasuredCellsTestSupport {
     }
 
     @Test
-    public void anInternalStageClonesWithoutItsFiles() {
-        Assumptions.assumeFalse(isLiveSnowflake(), "stages a local file");
+    public void noInternalOrTemporaryStageIsAPermanentClonesSource() {
         engine.execute("CREATE OR REPLACE STAGE socint");
-        stageLocalFile("socint", "one.csv", "1\n");
-        assertTrue(answer("LIST @socint").contains("one.csv"), answer("LIST @socint"));
-        engine.execute("CREATE OR REPLACE STAGE socint2 CLONE socint");
-        assertAnswer("", "LIST @socint2");
+        engine.execute("CREATE OR REPLACE TEMPORARY STAGE soctint");
+        engine.execute("CREATE OR REPLACE TEMPORARY STAGE soctext URL = 's3://bucket/path/'");
+        engine.execute("CREATE OR REPLACE STAGE soctaken");
+        final String internal = "REFUSED Unsupported feature 'Cloning internal and temporary stages'.";
+        final String temporary = "REFUSED SQL compilation error: Temp stage cannot be cloned to a permanent stage.";
+        assertAnswer(internal, "CREATE STAGE socint2 CLONE socint");
+        assertAnswer(internal, "CREATE OR REPLACE STAGE socint2 CLONE socint");
+        assertAnswer(internal, "CREATE STAGE IF NOT EXISTS socint2 CLONE socint");
+        assertAnswer(internal, "CREATE STAGE IF NOT EXISTS soctaken CLONE socint");
+        assertAnswer(internal, "CREATE STAGE socint3 CLONE soctint");
+        assertAnswer(temporary, "CREATE STAGE soctext2 CLONE soctext");
+        assertAnswer(temporary, "CREATE STAGE IF NOT EXISTS soctaken CLONE soctext");
+        assertAnswer(temporary, "CREATE OR REPLACE STAGE soctaken CLONE soctext");
+        assertAnswer("REFUSED SQL compilation error: | Object 'SOCTAKEN' already exists.",
+            "CREATE STAGE soctaken CLONE socint");
+        assertAnswer("REFUSED SQL compilation error: | Object 'SOCTAKEN' already exists.",
+            "CREATE STAGE soctaken CLONE soctext");
+        assertAnswer("Stage area SOCTEXT3 successfully created.", "CREATE TEMPORARY STAGE soctext3 CLONE soctext");
     }
 
     @Test

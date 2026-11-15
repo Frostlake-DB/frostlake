@@ -58,8 +58,9 @@
              flatten-maven-plugin below rewrites ${revision} to a literal in the installed/deployed poms so
              consumers never see the placeholder. -->
         <revision>0.5.0-SNAPSHOT</revision>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <!-- javac's release flag: the language level, the bytecode version and the JDK 17 API at once, so a build
+             on a newer JDK still yields jars that run on 17. -->
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!-- Perf harnesses are @Tag("perf"); excluded by default, included via the perf/perf-mem
              profiles defined in the perf-tests module. -->
@@ -198,6 +199,8 @@
                             -->
                             <doclint>all,-missing</doclint>
                             <failOnError>true</failOnError>
+                            <!-- No "Use" pages: listing every place a class is used roughly doubles the javadoc. -->
+                            <use>false</use>
                         </configuration>
                         <executions>
                             <execution>

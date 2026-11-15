@@ -88,13 +88,30 @@ final class SnowflakeRowset {
     }
 
     /**
-     * Writes a DML statement's {@code stats}: the rows it inserted, deleted and updated, read off its count columns,
-     * with no duplicates counted; none where nothing changed, as the account answers (live-verified).
+     * Whether a statement's answer carries {@code stats}: a DML statement's does, and a CREATE TABLE … AS SELECT's or
+     * a TRUNCATE's, whose status records the rows it wrote or removed (see ResultSet#markRowsChanged).
+     *
+     * @param type the type id the answer goes back with
+     * @param rs   the statement's result
+     * @return whether to write its stats (see {@link #writeStats})
+     */
+    static boolean carriesStats(final long type, final ResultSet rs) {
+        return SnowflakeStatementTypes.isDml(type) || rs.getRowsInserted() != null;
+    }
+
+    /**
+     * Writes a statement's {@code stats}: the rows it inserted, deleted and updated — a DML statement's read off its
+     * count columns, a CTAS's or a TRUNCATE's from what its status records — with no duplicates counted; none where
+     * nothing changed, as the account answers (live-verified).
      *
      * @param rs   the statement's result
      * @param data the answer's {@code data}
      */
     static void writeStats(final ResultSet rs, final ObjectNode data) {
+        if (rs.getRowsInserted() != null) {
+            writeStats(rs.getRowsInserted().longValue(), rs.getRowsDeleted().longValue(), 0, data);
+            return;
+        }
         if (rs.getRows().isEmpty()) {
             return;
         }
@@ -118,6 +135,11 @@ final class SnowflakeRowset {
                 updated += count;
             }
         }
+        writeStats(inserted, deleted, updated, data);
+    }
+
+    private static void writeStats(final long inserted, final long deleted, final long updated,
+                                   final ObjectNode data) {
         if (inserted == 0 && deleted == 0 && updated == 0) {
             return;
         }
