@@ -1133,6 +1133,16 @@ public class Schema extends SqlObject {
         return streams.get(name);
     }
 
+    /**
+     * Whether a name reaches a stream, folding case as {@link #getStream} does.
+     *
+     * @param name the name
+     * @return whether {@link #getStream} finds a stream by it
+     */
+    public boolean hasStream(final String name) {
+        return streams.has(name);
+    }
+
     public List<Stream> getStreams() {
         return streams.values();
     }

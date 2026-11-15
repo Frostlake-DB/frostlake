@@ -1268,6 +1268,47 @@ import java.util.List;
     }
 
     /**
+     * Refuses the parenthesis after the word IDENTIFIER where a CREATE reads that word as the name of what it makes,
+     * or of a stream's source, no whole reference following it: live reports that '(' and nothing after it, of the
+     * statement or of any statement after it (live-verified).
+     */
+    private void refuseCreatedNameParenthesis(final Token open, final ParserRuleContext name) {
+        notifyErrorListeners(open, "unexpected '('", new InputEndingFault(this, name));
+    }
+
+    /**
+     * Refuses the parenthesis after the word IDENTIFIER where a CREATE … POLICY reads that word as the policy's name,
+     * no whole reference following it, and the first token inside it: live reports both, and goes on reading the
+     * statement after them (live-verified).
+     */
+    private void refuseOpenedPolicyName(final Token open, final ParserRuleContext content, final ParserRuleContext name) {
+        notifyErrorListeners(open, "unexpected '('", new IdentifierReferenceFault(this, name, false));
+        if (content.getChildCount() > 0) {
+            final Token first = content.getStart();
+            notifyErrorListeners(first, "unexpected '" + first.getText() + "'",
+                new IdentifierReferenceFault(this, name, false));
+        }
+    }
+
+    /**
+     * Refuses the value after the word IDENTIFIER where a CREATE FUNCTION or PROCEDURE reads that word as the routine's
+     * name and the parenthesis after it as its parameter list: the string, the variable, the bind or the number
+     * standing where a parameter's name must, and nothing more of the statement (live-verified).
+     */
+    private void refuseRoutineNameValue(final Token value, final ParserRuleContext name) {
+        notifyErrorListeners(value, "unexpected '" + value.getText() + "'", new IdentifierReferenceFault(this, name, true));
+    }
+
+    /**
+     * Refuses the parenthesis after the word IDENTIFIER where a CREATE ALERT reads that word as the alert's name, no
+     * whole reference following it: live reports that '(' and nothing more of the statement, a statement after it
+     * still read (live-verified).
+     */
+    private void refuseAlertNameParenthesis(final Token open, final ParserRuleContext name) {
+        notifyErrorListeners(open, "unexpected '('", new IdentifierReferenceFault(this, name, true));
+    }
+
+    /**
      * Refuses the plain word a GRANT of privileges writes in the parentheses after a table named by the word
      * IDENTIFIER alone: the account reads that word as the table's own name and the parentheses as a list of types, so
      * GRANT SELECT ON TABLE IDENTIFIER(t) TO ROLE r is refused at the t and nothing after it is reported (see
@@ -1864,7 +1905,7 @@ undropStatement
     : UNDROP TABLE qualifiedName SEMI?
     | UNDROP ICEBERG TABLE qualifiedName SEMI?
     | UNDROP SCHEMA qualifiedName SEMI?
-    | UNDROP DATABASE identifier SEMI?
+    | UNDROP DATABASE undroppedName SEMI?
     | UNDROP TAG qualifiedName SEMI?
     | UNDROP DYNAMIC TABLE qualifiedName SEMI?
     // A session, an authentication or a packages policy is read and restored by no UNDROP (live-verified).
@@ -1874,17 +1915,19 @@ undropStatement
 createStatement
     // TRANSIENT is the only modifier a DATABASE takes: live-verified, `CREATE TEMPORARY DATABASE d` is
     // a syntax error ON THE WORD DATABASE, so TEMPORARY must NOT be accepted here.
-    : CREATE or_replace? TRANSIENT? DATABASE if_not_exists? identifier
-        (CLONE identifier (timeTravelClause cloneTimedOption* | cloneContentOption*))? databaseProperty* SEMI?
+    : CREATE or_replace? TRANSIENT? DATABASE if_not_exists? containerName
+        (CLONE sourceObjectName (timeTravelClause cloneTimedOption* | cloneContentOption*))? databaseProperty* SEMI?
     // A SCHEMA takes MORE spellings than it supports, and the difference is the whole point: live
     // PARSES `CREATE TEMPORARY/TEMP/VOLATILE SCHEMA` and then refuses each with "Unsupported feature
     // '<WORD> SCHEMA'." — a message that can only exist if the word was read. LOCAL and GLOBAL are the
     // boundary: `CREATE LOCAL TEMPORARY SCHEMA` IS a syntax error, so the pair below is deliberately
     // not the (LOCAL | GLOBAL)? group the TABLE alternative uses.
     // A comma may stand between two properties, but not after WITH MANAGED ACCESS (refused in Java, at the comma).
-    // OR ALTER is read whatever follows: IF NOT EXISTS, a CLONE and a tag are refused in Java (live-verified).
-    | CREATE (or_replace | or_alter)? (TRANSIENT | TEMPORARY | TEMP | VOLATILE)? SCHEMA if_not_exists? qualifiedName
-        (CLONE qualifiedName (timeTravelClause cloneTimedOption* | cloneContentOption*))?
+    // OR ALTER is read whatever follows: IF NOT EXISTS, a CLONE and a tag are refused in Java (live-verified). It
+    // reads the name as the kinds below do (see createdName), where a plain CREATE reads it as a database's.
+    | CREATE (or_replace? (TRANSIENT | TEMPORARY | TEMP | VOLATILE)? SCHEMA if_not_exists? containerName
+        | or_alter (TRANSIENT | TEMPORARY | TEMP | VOLATILE)? SCHEMA if_not_exists? createdName)
+        (CLONE sourceObjectName (timeTravelClause cloneTimedOption* | cloneContentOption*))?
         (schemaProperty (COMMA? schemaProperty)*)? SEMI?
     // A table must say what its columns ARE: an explicit column list, CLONE, LIKE, or CTAS. A body-less
     // `CREATE TABLE t`, `CREATE TABLE t TAG (…)` or `CREATE TABLE t CLUSTER BY (…)` is a syntax error in
@@ -1893,11 +1936,11 @@ createStatement
     // (EXTERNAL_VOLUME, CATALOG, BASE_LOCATION, … arrive as table options); only TRANSIENT may precede it.
     // The options stand before the query a table is created from, after a list of column names too; none
     // follows the query (live-verified).
-    | CREATE (or_replace | or_alter)? (TRANSIENT ICEBERG? | (LOCAL | GLOBAL)? (TEMPORARY | TEMP) | VOLATILE | HYBRID | ICEBERG)? TABLE if_not_exists? objectName tableTailOption* (LPAREN columnList RPAREN tableTailOption* (AS selectStatement)? | CLONE qualifiedName timeTravelClause? tableTailOption* | LIKE qualifiedName tableTailOption* | USING TEMPLATE selectStatement templateTailOption* | (columnListOptional tableTailOption*)? AS selectStatement) SEMI?
+    | CREATE (or_replace | or_alter)? (TRANSIENT ICEBERG? | (LOCAL | GLOBAL)? (TEMPORARY | TEMP) | VOLATILE | HYBRID | ICEBERG)? TABLE if_not_exists? objectName tableTailOption* (LPAREN columnList RPAREN tableTailOption* (AS selectStatement)? | CLONE sourceObjectName timeTravelClause? tableTailOption* | LIKE sourceObjectName tableTailOption* | USING TEMPLATE selectStatement templateTailOption* | (columnListOptional tableTailOption*)? AS selectStatement) SEMI?
     // An event table's columns are the fixed OpenTelemetry set, so it is written without a column list.
     // A clone of another event table takes no property after the source, only before it (judged as the table's), and
     // may be of the source at a point of time (live-verified).
-    | CREATE or_replace? EVENT TABLE if_not_exists? objectName tableTailOption* (CLONE qualifiedName timeTravelClause?)? SEMI?
+    | CREATE or_replace? EVENT TABLE if_not_exists? objectName tableTailOption* (CLONE sourceObjectName timeTravelClause?)? SEMI?
     // TEMPORARY/TEMP/VOLATILE views, live-measured, including the keyword ORDER: SECURE comes
     // BEFORE the temporary keyword on a view (`CREATE SECURE TEMPORARY VIEW` parses,
     // `CREATE TEMPORARY SECURE VIEW` is a syntax error) — the opposite of a function, below.
@@ -1914,23 +1957,23 @@ createStatement
     | CREATE or_replace? SECURE? MATERIALIZED VIEW if_not_exists? objectName copyGrants? (LPAREN viewColumnList RPAREN copyGrants?)? (commentClause | clusterByClause | viewProperty)* trailingViewColumns? tagList? AS selectStatement SEMI?
     // COMMENT is one of the pre-AS options; a trailing COMMENT after the query is a syntax error (live-verified).
     // A clone takes the source's definition and data; only the target lag and the warehouse may be given anew.
-    | CREATE or_replace? TRANSIENT? DYNAMIC TABLE if_not_exists? qualifiedName (CLONE qualifiedName timeTravelClause? copyGrants? dynamicTableCloneOption* | dynamicTableColumns? dynamicTableOptions (LPAREN identifierList RPAREN)? AS selectStatement) SEMI?
+    | CREATE or_replace? TRANSIENT? DYNAMIC TABLE if_not_exists? dynamicTableName (CLONE sourceObjectName timeTravelClause? copyGrants? dynamicTableCloneOption* | dynamicTableColumns? dynamicTableOptions (LPAREN identifierList RPAREN)? AS selectStatement) SEMI?
     // The tags come before COPY GRANTS, WITH optional; the AT | BEFORE point follows the source's name
     // directly, ahead of the options (live-verified).
-    | CREATE or_replace? STREAM if_not_exists? qualifiedName tagList? copyGrants? ON streamSourceKind qualifiedName streamPoint? streamOptions? commentClause? SEMI?
+    | CREATE or_replace? STREAM if_not_exists? createdName tagList? copyGrants? ON streamSourceKind streamSource streamPoint? streamOptions? commentClause? SEMI?
     // A clone takes the source's definition and its current offset.
-    | CREATE or_replace? STREAM if_not_exists? qualifiedName CLONE qualifiedName copyGrants? SEMI?
+    | CREATE or_replace? STREAM if_not_exists? createdName CLONE sourceObjectName copyGrants? SEMI?
     // EXECUTE AS USER follows the options and the AFTER list and precedes WHEN (live-verified).
-    | CREATE or_replace? TASK if_not_exists? qualifiedName tagList? taskContacts? warehouseClause? taskOptions? afterClause? commentClause? taskExecuteAs? (WHEN booleanExpr)? AS taskBody SEMI?
+    | CREATE or_replace? TASK if_not_exists? createdName tagList? taskContacts? warehouseClause? taskOptions? afterClause? commentClause? taskExecuteAs? (WHEN booleanExpr)? AS taskBody SEMI?
     // A task, a stage or a file format cloned on its own (documented: CREATE <object> ... CLONE).
-    | CREATE or_replace? TASK if_not_exists? qualifiedName CLONE qualifiedName SEMI?
+    | CREATE or_replace? TASK if_not_exists? createdName CLONE sourceObjectName SEMI?
     // CREATE OR ALTER makes the task, or changes it to what the statement writes; it takes no IF NOT EXISTS and no
     // contacts, reads a tag clause only to refuse it, and leaves the tags a task carries as they are (live-verified,
     // documented).
-    | CREATE or_alter TASK qualifiedName tagList? warehouseClause? taskOptions? afterClause? commentClause?
+    | CREATE or_alter TASK createdName tagList? warehouseClause? taskOptions? afterClause? commentClause?
         taskExecuteAs? (WHEN booleanExpr)? AS taskBody SEMI?
     | CREATE or_replace? PIPE if_not_exists? qualifiedName pipeOptions? AS copyStatement commentClause? SEMI?
-    | CREATE or_replace? SEQUENCE if_not_exists? qualifiedName (CLONE qualifiedName | WITH? sequenceOptions? commentClause?) SEMI?
+    | CREATE or_replace? SEQUENCE if_not_exists? createdName (CLONE sourceObjectName | WITH? sequenceOptions? commentClause?) SEMI?
     | CREATE or_replace? WAREHOUSE if_not_exists? identifier warehouseProperties? commentClause? SEMI?
     // CREATE COMPUTE POOL: MIN_NODES, MAX_NODES and INSTANCE_FAMILY are required, checked by the
     // handler so the missing-option report matches a real account's.
@@ -1941,46 +1984,46 @@ createStatement
     // and the parentheses around the defining query are optional.
     | CREATE or_replace? CORTEX SEARCH SERVICE if_not_exists? qualifiedName ON identifier
       (ATTRIBUTES identifierList)? cortexSearchOption* AS (LPAREN selectStatement RPAREN | selectStatement) SEMI?
-    | CREATE or_replace? (TEMPORARY | TEMP)? STAGE if_not_exists? qualifiedName stageProperties? tagList? commentClause? SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP)? STAGE if_not_exists? createdName stageProperties? tagList? commentClause? SEMI?
     // A temporary clone of a stage or a file format is taken; a transient one is a syntax error at the kind
     // (live-verified).
-    | CREATE or_replace? (TEMPORARY | TEMP)? STAGE if_not_exists? qualifiedName CLONE qualifiedName SEMI?
-    | CREATE or_replace? (TEMPORARY | TEMP)? FILE FORMAT if_not_exists? qualifiedName (copyFormatOption (COMMA? copyFormatOption)*)? commentClause? SEMI?
-    | CREATE or_replace? (TEMPORARY | TEMP)? FILE FORMAT if_not_exists? qualifiedName CLONE qualifiedName SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP)? STAGE if_not_exists? createdName CLONE sourceObjectName SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP)? FILE FORMAT if_not_exists? createdName (copyFormatOption (COMMA? copyFormatOption)*)? commentClause? SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP)? FILE FORMAT if_not_exists? createdName CLONE sourceObjectName SEMI?
     // ALLOWED_VALUES comes first; PROPAGATE, ON_CONFLICT and COMMENT follow in any order, and the handler refuses
     // one written twice, and an ON_CONFLICT unless the tag propagates.
-    | CREATE or_replace? TAG if_not_exists? qualifiedName tagProperties? tagSetProperty* SEMI?
+    | CREATE or_replace? TAG if_not_exists? createdName tagProperties? tagSetProperty* SEMI?
     // CREATE OR ALTER TAG reads the properties CREATE TAG reads, and describes the whole tag.
-    | CREATE or_alter TAG qualifiedName tagProperties? tagSetProperty* SEMI?
+    | CREATE or_alter TAG createdName tagProperties? tagSetProperty* SEMI?
     // An alert: a condition evaluated on a schedule and an action run when it returns rows, or a clone of one.
-    | CREATE (or_replace | or_alter)? ALERT if_not_exists? qualifiedName alertDefinition SEMI?
+    | CREATE (or_replace | or_alter)? ALERT if_not_exists? alertName alertDefinition SEMI?
     // An external function: a call would reach a remote service through an API integration. Its options are
     // read here and judged by the handler; a call is refused, as nothing outside the account is reached.
-    | CREATE or_replace? SECURE? EXTERNAL FUNCTION qualifiedName LPAREN parameterList? RPAREN RETURNS returnType
+    | CREATE or_replace? SECURE? EXTERNAL FUNCTION routineName LPAREN parameterList? RPAREN RETURNS returnType
         externalFunctionOption* (AS STRING_LITERAL)? SEMI?
     // A Git repository clone: ORIGIN, API_INTEGRATION, GIT_CREDENTIALS and COMMENT, judged by the handler.
-    | CREATE or_replace? GIT REPOSITORY if_not_exists? qualifiedName gitRepositoryOption* SEMI?
+    | CREATE or_replace? GIT REPOSITORY if_not_exists? createdName gitRepositoryOption* SEMI?
     // A function takes the temporary keyword BEFORE SECURE and admits no LOCAL/GLOBAL prefix —
     // both live-measured, and both the reverse of the view rule above. Its options take EXECUTE AS last, as a
     // procedure's do, for the handler to refuse: a function has no invocation type.
-    | CREATE or_replace? (TEMPORARY | TEMP | VOLATILE)? SECURE? AGGREGATE? FUNCTION if_not_exists? qualifiedName LPAREN parameterList? RPAREN copyGrants? RETURNS returnType functionOption* (executeAsClause (functionOption | executeAsClause)*)? (AS bodyDefinition)? SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP | VOLATILE)? SECURE? AGGREGATE? FUNCTION if_not_exists? routineName LPAREN parameterList? RPAREN copyGrants? RETURNS returnType functionOption* (executeAsClause (functionOption | executeAsClause)*)? (AS bodyDefinition)? SEMI?
     // A procedure takes a function's options, then EXECUTE AS last. An option or a second EXECUTE AS after it is
     // read here so the handler refuses it as the syntax error the account reports at that word.
-    | CREATE or_replace? (TEMPORARY | TEMP | VOLATILE)? SECURE? PROCEDURE if_not_exists? qualifiedName LPAREN parameterList? RPAREN copyGrants? RETURNS returnType functionOption* (executeAsClause (functionOption | executeAsClause)*)? (AS bodyDefinition)?  SEMI?
+    | CREATE or_replace? (TEMPORARY | TEMP | VOLATILE)? SECURE? PROCEDURE if_not_exists? routineName LPAREN parameterList? RPAREN copyGrants? RETURNS returnType functionOption* (executeAsClause (functionOption | executeAsClause)*)? (AS bodyDefinition)?  SEMI?
     | CREATE or_replace? USER if_not_exists? identifier userProperties? SEMI?
     | CREATE or_replace? ROLE if_not_exists? identifier commentClause? SEMI?
-    | CREATE or_replace? MASKING POLICY if_not_exists? qualifiedName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_replace? MASKING POLICY if_not_exists? createdPolicyName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
     // CREATE OR ALTER makes the policy, or changes it to what the statement writes: its body, its COMMENT and its
     // EXEMPT_OTHER_POLICIES, never its signature. It takes no IF NOT EXISTS (live-verified).
-    | CREATE or_alter MASKING POLICY qualifiedName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_alter MASKING POLICY createdPolicyName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
     // RETURNS reads any type: one other than BOOLEAN is refused by name once the body has compiled (live-verified).
-    | CREATE or_replace? ROW ACCESS POLICY if_not_exists? qualifiedName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
-    | CREATE or_alter ROW ACCESS POLICY qualifiedName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
-    | CREATE or_replace? CONTACT if_not_exists? qualifiedName (contactProperty (COMMA? contactProperty)*)? SEMI?
-    | CREATE or_replace? PROJECTION POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
-    | CREATE or_replace? AGGREGATION POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
-    | CREATE or_replace? JOIN POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
-    | CREATE or_replace? PRIVACY POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
+    | CREATE or_replace? ROW ACCESS POLICY if_not_exists? createdPolicyName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_alter ROW ACCESS POLICY createdPolicyName AS LPAREN parameterList RPAREN RETURNS dataTypeName typeParameters? THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_replace? CONTACT if_not_exists? createdName (contactProperty (COMMA? contactProperty)*)? SEMI?
+    | CREATE or_replace? PROJECTION POLICY if_not_exists? createdPolicyName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_replace? AGGREGATION POLICY if_not_exists? createdPolicyName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
+    | CREATE or_replace? JOIN POLICY if_not_exists? createdPolicyName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
+    | CREATE or_replace? PRIVACY POLICY if_not_exists? createdPolicyName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
     // A storage lifecycle policy takes its tags after its properties (live-verified).
     | CREATE or_replace? STORAGE lifecycle=IDENTIFIER {refuseKindWord($ctx, $lifecycle, "LIFECYCLE");} POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) storageLifecycleProperty* tagList? SEMI?
     // A DBT project, which is never created here: its location is judged (DbtProjects) and the project refused.
@@ -2317,7 +2360,7 @@ schemaProperty
 // live takes it for all of them, IF EXISTS and a session variable included. FUNCTION and PROCEDURE are
 // left on the plain name: their REQUIRED signature's parens would sit against the call's own.
 dropStatement
-    : DROP DATABASE if_exists? objectName objectSignature? dropBehavior? SEMI?
+    : DROP DATABASE if_exists? (objectName | openedValueReference) objectSignature? dropBehavior? SEMI?
     | DROP SCHEMA if_exists? objectName objectSignature? dropBehavior? SEMI?
     | DROP TABLE if_exists? (objectName | openedValueReference) objectSignature? dropBehavior? SEMI?
     | DROP ICEBERG TABLE if_exists? (objectName | openedValueReference) objectSignature? dropBehavior? SEMI?
@@ -2413,7 +2456,7 @@ externalTableAction
     ;
 
 alterStatement
-    : ALTER DATABASE if_exists? identifier databaseAction SEMI?
+    : ALTER DATABASE if_exists? containerName databaseAction SEMI?
     | ALTER SCHEMA if_exists? qualifiedName schemaAction SEMI?
     | ALTER TABLE if_exists? (objectName | openedIdentifierReference) tableAction SEMI?
     | ALTER ICEBERG TABLE if_exists? (objectName | openedIdentifierReference) (icebergTableAction | tableAction) SEMI?
@@ -2484,6 +2527,96 @@ objectName
     : KW_IDENTIFIER_REF LPAREN identifierArgument RPAREN
     | qualifiedName
     | KW_IDENTIFIER_OPEN
+    ;
+
+// The name a CREATE gives a stream, a task, a sequence, a stage, a file format, a tag, a contact or a git repository,
+// and the schema CREATE OR ALTER makes or changes: the name, or an IDENTIFIER() reference to it. The word IDENTIFIER without a whole reference after it is
+// the name itself, so the parenthesis after it is what the statement refuses: CREATE STAGE IDENTIFIER('a' || 'b') and
+// CREATE TASK IDENTIFIER(UPPER('t')) AS SELECT 1 at the '(' (live-verified). A rule of its own, so the objectName a
+// CREATE reads for a relation stays the one that marks one.
+createdName
+    : objectName
+    | openedNameParenthesis
+    ;
+
+// The name of the database or the schema a CREATE makes, and of the database an ALTER or a COMMENT ON changes: the
+// name, or an IDENTIFIER() reference to it. An IDENTIFIER() the lexer found not whole is read as a reference all the
+// same, refused where it stops being one: CREATE DATABASE IDENTIFIER('a' || 'b') and ALTER DATABASE IDENTIFIER('a' ||
+// 'b') SET COMMENT = 'x' at the '||', CREATE SCHEMA IDENTIFIER() at the ')' and CREATE DATABASE
+// IDENTIFIER(UPPER('d')) at UPPER (live-verified). A database's name of more parts than one is refused in Java, as live
+// refuses it.
+containerName
+    : objectName
+    | openedIdentifierReference
+    ;
+
+// The name a CREATE gives a policy — a masking, a row access, a projection, an aggregation, a join or a privacy
+// policy: the name, or an IDENTIFIER() reference to it. The word IDENTIFIER without a whole reference after it is the
+// name itself: the parenthesis after it is refused where it stands, and the first token inside it, the rest of the
+// statement read on (see refuseOpenedPolicyName).
+createdPolicyName
+    : objectName
+    | KW_IDENTIFIER_OPEN LPAREN openedIdentifierContent RPAREN
+      {refuseOpenedPolicyName($LPAREN, $openedIdentifierContent.ctx, $ctx);}
+    ;
+
+// The name a CREATE gives a function, an external function or a procedure: the name, or an IDENTIFIER() reference to
+// it. The word IDENTIFIER without a whole reference after it is the routine's own name and the parenthesis after it
+// the routine's parameter list: CREATE FUNCTION IDENTIFIER(a INT) RETURNS INT AS 'a' makes a function called
+// IDENTIFIER, and CREATE FUNCTION IDENTIFIER('a' || 'b')() is refused at the string, which no parameter's name may be
+// (see refuseRoutineNameValue).
+routineName
+    : objectName
+    | KW_IDENTIFIER_OPEN LPAREN openedReferenceValue openedIdentifierContent RPAREN
+      {refuseRoutineNameValue($openedReferenceValue.start, $ctx);}
+    ;
+
+// The name a CREATE gives a dynamic table: the name, or an IDENTIFIER() reference to it. The word IDENTIFIER without a
+// whole reference after it is the table's own name and the parenthesis after it its column list, so a string there is
+// refused where it stands, as a routine's parameter list refuses one (see refuseRoutineNameValue), and an empty list
+// at its ')' (live-verified).
+dynamicTableName
+    : objectName
+    | KW_IDENTIFIER_OPEN LPAREN openedReferenceValue openedIdentifierContent RPAREN
+      {refuseRoutineNameValue($openedReferenceValue.start, $ctx);}
+    ;
+
+// The name a CREATE gives an alert: the name, or an IDENTIFIER() reference to it. The word IDENTIFIER without a whole
+// reference after it is the name itself, and the parenthesis after it is refused where it stands (see
+// refuseAlertNameParenthesis).
+alertName
+    : objectName
+    | KW_IDENTIFIER_OPEN LPAREN openedIdentifierContent RPAREN {refuseAlertNameParenthesis($LPAREN, $ctx);}
+    ;
+
+// The object a CLONE copies, or the table a LIKE takes its columns from: its name, or an IDENTIFIER() reference to it.
+// Every kind reads it as createdName reads a name, a database's and a schema's too: CREATE DATABASE d CLONE
+// IDENTIFIER('a' || 'b') is refused at the '(' (live-verified).
+sourceObjectName
+    : objectName
+    | openedNameParenthesis
+    ;
+
+// The database an UNDROP restores: its name, or an IDENTIFIER() reference to it, read as createdName reads a name —
+// UNDROP DATABASE IDENTIFIER('a' || 'b') is refused at the '(' (live-verified).
+undroppedName
+    : objectName
+    | openedNameParenthesis
+    ;
+
+// The object a stream is created on: its name, or an IDENTIFIER() reference to it, read as createdName reads one —
+// CREATE STREAM s ON TABLE IDENTIFIER('a' || 'b') is refused at the '(' (live-verified).
+streamSource
+    : objectName
+    | openedNameParenthesis
+    ;
+
+// The word IDENTIFIER as the name a CREATE reads (createdName, streamSource, sourceObjectName) or an UNDROP restores
+// (undroppedName), with the parenthesis no whole reference
+// fills after it. The parentheses are read whole so that the statement's shape still predicts past them, and the '('
+// alone is refused (see refuseCreatedNameParenthesis).
+openedNameParenthesis
+    : KW_IDENTIFIER_OPEN LPAREN openedIdentifierContent RPAREN {refuseCreatedNameParenthesis($LPAREN, $ctx);}
     ;
 
 // A name a statement reads only as a WHOLE reference: an IDENTIFIER() the lexer found broken is no name at
@@ -2603,7 +2736,7 @@ identifierArgument
     ;
 
 commentStatement
-    : COMMENT if_exists? ON DATABASE identifier IS stringText SEMI?
+    : COMMENT if_exists? ON DATABASE containerName IS stringText SEMI?
     | COMMENT if_exists? ON SCHEMA qualifiedName IS stringText SEMI?
     | COMMENT if_exists? ON TABLE qualifiedName IS stringText SEMI?
     | COMMENT if_exists? ON DYNAMIC TABLE qualifiedName IS stringText SEMI?
@@ -3151,9 +3284,10 @@ parameterList
 
 // An argument's name takes the words a variable's does (see variableName): live creates f(case INT), f(join INT)
 // and a masking policy over (join VARCHAR) alike (live-verified).
-// A default may be a condition, NOT TRUE or TRUE AND FALSE (live-verified).
+// A default may be a condition, NOT TRUE or TRUE AND FALSE (live-verified), and follows a type only.
+// A name with no type parses so the statement can refuse it in the account's own words (see UntypedArguments).
 parameterDef
-    : variableName dataTypeName typeParameters? ((DEFAULT | COLON_EQ) booleanExpr)?
+    : variableName (dataTypeName typeParameters? ((DEFAULT | COLON_EQ) booleanExpr)?)?
     ;
 
 // The argument types naming one overload. An argument may be written with its name, as a CREATE writes it, and a
@@ -4149,6 +4283,9 @@ streamAction
 stageAction
     // Several properties at once, a comma between two of them or none.
     : SET stageSetting (COMMA? stageSetting)*
+    // A tag action whose text does not read whole is read as properties are, TAG their first (see StageTagLines).
+    | tagSet
+    | tagUnset
     | RENAME TO qualifiedName
     | UNSET optionKey
     // Registers the stage's files in its directory table. An option is a plain word judged by the handler,
@@ -4213,7 +4350,7 @@ tagUnsetProperty
 
 // The body of CREATE ALERT: a CLONE of another alert, or the properties, the condition and the action.
 alertDefinition
-    : CLONE qualifiedName
+    : CLONE sourceObjectName
     | tagList? alertProperty* IF LPAREN EXISTS LPAREN alertCondition RPAREN RPAREN THEN taskBody
     ;
 

@@ -16,6 +16,7 @@
 package dev.frostlake.http;
 
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.SqlStringLiterals;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
@@ -28,13 +29,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The statement type id the Snowflake driver reads from a query's answer, read from the statement's parse tree. The
- * driver takes a DML type's rows as the counts it reports, a type that answers no rows as an update count of 0, and
- * every other type as a result set: SELECT 0x1000, INSERT 0x3100, UPDATE 0x3200, DELETE 0x3300, MERGE 0x3400, a
- * multi-table INSERT 0x3500, COPY INTO a table 0x3600 and into a stage 0x3700, a session variable 0x4000, ALTER
- * SESSION 0x4100, USE 0x4300 (and 1, 2, 3 for a database, a schema, a warehouse), SHOW 0x4400, DESCRIBE 0x4500,
- * LIST 0x4701, a transaction's statement 0x5000, GET 0x7101, PUT 0x7102, REMOVE 0x7103, and any other DDL 0x6000.
- * A flow chain answers as its last statement, the one whose result it hands back.
+ * The statement type id the Snowflake driver reads from a query's answer, read from the statement's parse tree as the
+ * account sends it (live-verified): SELECT 0x1000, EXPLAIN 0x2000, INSERT 0x3100, UPDATE 0x3200, DELETE 0x3300, MERGE
+ * 0x3400, a multi-table INSERT 0x3500, COPY INTO a table 0x3600 and into a stage 0x3700, ALTER SESSION 0x4100, USE
+ * 0x4300 (a database, a schema or a bare name alike), SHOW and LIST 0x4400, DESCRIBE 0x4500, BEGIN and START
+ * TRANSACTION 0x5400, COMMIT 0x5100, ROLLBACK 0x5200, a DDL statement its kind's id (see {@link SnowflakeDdlTypes}),
+ * SET 0x6901, UNSET 0x6902, GET 0x7101, PUT 0x7102, CALL and a block 0x9000, REMOVE 0 (the account's own UNKNOWN). An
+ * EXECUTE IMMEDIATE of a text written out answers as the statement its text runs, a block's as a block. The driver
+ * takes a DML type's rows as the counts it reports, an id it reads as answering no rows — every id from 0x4000 to 0x6FFF
+ * but SHOW, DESCRIBE and LIST — as an update count of 0, and every other id as a result set. A flow chain answers as
+ * its last statement, the one whose result it hands back.
  */
 final class SnowflakeStatementTypes {
 
@@ -46,17 +50,21 @@ final class SnowflakeStatementTypes {
     private static final long MULTI_INSERT = 0x3500;
     private static final long COPY = 0x3600;
     private static final long UNLOAD = 0x3700;
-    static final long SCL = 0x4000;
-    static final long ALTER_SESSION = 0x4100;
+    private static final long EXPLAIN = 0x2000;
+    private static final long ALTER_SESSION = 0x4100;
     private static final long USE = 0x4300;
     private static final long SHOW = 0x4400;
     private static final long DESCRIBE = 0x4500;
-    private static final long LIST = 0x4701;
+    private static final long BEGIN = 0x5400;
+    private static final long COMMIT = 0x5100;
+    private static final long ROLLBACK = 0x5200;
+    private static final long DDL = 0x6000;
+    private static final long SET_VARIABLE = 0x6901;
+    private static final long UNSET_VARIABLE = 0x6902;
     private static final long GET = 0x7101;
     private static final long PUT = 0x7102;
-    private static final long REMOVE = 0x7103;
-    private static final long TCL = 0x5000;
-    private static final long DDL = 0x6000;
+    private static final long CALL = 0x9000;
+    private static final long UNKNOWN = 0;
 
     private SnowflakeStatementTypes() {
     }
@@ -181,12 +189,16 @@ final class SnowflakeStatementTypes {
         final int first = words.isEmpty() ? -1 : words.get(0).intValue();
         final int second = words.size() > 1 ? words.get(1).intValue() : -1;
         if (first == FrostlakeParser.CALL) {
+            return CALL;
+        }
+        if (kind instanceof FrostlakeParser.QueryStatementContext) {
             return SELECT;
         }
-        if (kind instanceof FrostlakeParser.QueryStatementContext
-                || kind instanceof FrostlakeParser.ExplainStatementContext
-                || kind instanceof FrostlakeParser.ProceduralStatementContext) {
-            return SELECT;
+        if (kind instanceof FrostlakeParser.ExplainStatementContext) {
+            return EXPLAIN;
+        }
+        if (kind instanceof FrostlakeParser.ProceduralStatementContext) {
+            return procedural((FrostlakeParser.ProceduralStatementContext) kind);
         }
         if (kind instanceof FrostlakeParser.ShowStatementContext
                 || kind instanceof FrostlakeParser.ShowClassStatementContext
@@ -197,7 +209,7 @@ final class SnowflakeStatementTypes {
             return DESCRIBE;
         }
         if (kind instanceof FrostlakeParser.ListStatementContext) {
-            return LIST;
+            return SHOW;
         }
         if (kind instanceof FrostlakeParser.GetStatementContext) {
             return GET;
@@ -206,24 +218,26 @@ final class SnowflakeStatementTypes {
             return PUT;
         }
         if (kind instanceof FrostlakeParser.RemoveStatementContext) {
-            return REMOVE;
+            return UNKNOWN;
         }
         if (kind instanceof FrostlakeParser.DmlStatementContext) {
             return dmlType((FrostlakeParser.DmlStatementContext) kind);
         }
         if (kind instanceof FrostlakeParser.TransactionStatementContext) {
-            return TCL;
+            return first == FrostlakeParser.COMMIT ? COMMIT : first == FrostlakeParser.ROLLBACK ? ROLLBACK : BEGIN;
         }
-        if (kind instanceof FrostlakeParser.SessionSetStatementContext
-                || kind instanceof FrostlakeParser.SessionUnsetStatementContext) {
-            return SCL;
+        if (kind instanceof FrostlakeParser.SessionSetStatementContext) {
+            return SET_VARIABLE;
         }
-        if (kind instanceof FrostlakeParser.UseStatementContext) {
-            return second == FrostlakeParser.DATABASE ? USE + 1 : second == FrostlakeParser.SCHEMA ? USE + 2
-                : second == FrostlakeParser.WAREHOUSE ? USE + 3 : USE;
+        if (kind instanceof FrostlakeParser.SessionUnsetStatementContext) {
+            return UNSET_VARIABLE;
         }
         if (first == FrostlakeParser.ALTER && second == FrostlakeParser.SESSION) {
             return ALTER_SESSION;
+        }
+        if (kind instanceof FrostlakeParser.DdlStatementContext) {
+            final FrostlakeParser.DdlStatementContext ddl = (FrostlakeParser.DdlStatementContext) kind;
+            return ddl.useStatement() != null ? USE : SnowflakeDdlTypes.of(ddl);
         }
         // The listings and descriptions other statement families parse (SHOW SERVICES, DESCRIBE TASK, ...) answer
         // rows as well: the leading word decides.
@@ -234,6 +248,51 @@ final class SnowflakeStatementTypes {
             return DESCRIBE;
         }
         return DDL;
+    }
+
+    /**
+     * A block's id, or an EXECUTE IMMEDIATE's: the statement its text runs, where the text is written out — the last of
+     * them, for a text of several — and SELECT where only the run knows it (see {@link #answered}).
+     */
+    private static long procedural(final FrostlakeParser.ProceduralStatementContext procedural) {
+        final FrostlakeParser.ExecuteImmediateStatementContext immediate = procedural.executeImmediateStatement();
+        if (immediate == null) {
+            return CALL;
+        }
+        final String text = writtenText(immediate);
+        if (text == null) {
+            return SELECT;
+        }
+        final List<Long> types = of(text);
+        return types.get(types.size() - 1).longValue();
+    }
+
+    /** The text an EXECUTE IMMEDIATE runs, where it writes it as one string, else null. */
+    private static String writtenText(final FrostlakeParser.ExecuteImmediateStatementContext immediate) {
+        final FrostlakeParser.ExpressionContext written = immediate.expression();
+        if (written == null || written.getStart() != written.getStop()) {
+            return null;
+        }
+        final Token token = written.getStart();
+        if (token.getType() == FrostlakeParser.STRING_LITERAL) {
+            return SqlStringLiterals.decode(token.getText());
+        }
+        if (token.getType() == FrostlakeParser.DOLLAR_QUOTED_STRING) {
+            final String dollars = token.getText();
+            return dollars.substring(2, dollars.length() - 2);
+        }
+        return null;
+    }
+
+    /**
+     * Whether an id is a statement's that changes the session itself — SET, UNSET, ALTER SESSION — which a
+     * description answers with no columns.
+     *
+     * @param type the id
+     * @return whether it changes the session
+     */
+    static boolean changesSession(final long type) {
+        return type == SET_VARIABLE || type == UNSET_VARIABLE || type == ALTER_SESSION;
     }
 
     /**
@@ -269,8 +328,8 @@ final class SnowflakeStatementTypes {
 
     /** Whether the driver reads a result of the type as rows rather than as an update count. */
     private static boolean readsRows(final long type) {
-        return type == SELECT || type == SHOW || type == DESCRIBE || type == LIST || type == GET || type == PUT
-            || type == REMOVE;
+        return type == SELECT || type == SHOW || type == DESCRIBE || type == GET || type == PUT || type == EXPLAIN
+            || type == CALL || type == UNKNOWN;
     }
 
     private static long dmlType(final FrostlakeParser.DmlStatementContext dml) {

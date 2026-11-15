@@ -164,6 +164,7 @@ public final class AlterStatementAnchor {
             if (!(child instanceof ParserRuleContext) || child instanceof FrostlakeParser.If_existsContext
                     || child instanceof FrostlakeParser.QualifiedNameContext
                     || child instanceof FrostlakeParser.ObjectNameContext
+                    || child instanceof FrostlakeParser.ContainerNameContext
                     || child instanceof FrostlakeParser.OpenedIdentifierReferenceContext
                     || child instanceof FrostlakeParser.IdentifierContext) {
                 continue;

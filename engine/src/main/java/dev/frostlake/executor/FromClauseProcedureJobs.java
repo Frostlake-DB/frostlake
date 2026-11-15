@@ -49,6 +49,8 @@ import java.util.Set;
  *   COMMIT, ROLLBACK                   … type 'COMMIT', 'ROLLBACK' …
  * </pre>
  *
+ * <p>The object is named by the last part of its name, a name given through IDENTIFIER() by the one it gives.
+ *
  * <p>A PUT and a GET are no child jobs at all: a procedure's body may run neither, however it is called.
  *
  * <p>The rule reaches as deep as the call does: the text an EXECUTE IMMEDIATE runs and the body of a
@@ -92,14 +94,16 @@ final class FromClauseProcedureJobs {
      * @param statement the statement about to run
      * @param ownersRights whether an owner's-rights procedure is running, which refuses a statement that
      *     changes the session in words of its own
+     * @param executor the executor that resolves a name given through IDENTIFIER()
      */
-    static void require(final FrostlakeParser.StatementContext statement, final boolean ownersRights) {
+    static void require(final FrostlakeParser.StatementContext statement, final boolean ownersRights,
+                        final QueryExecutor executor) {
         if (DEPTH.get()[0] == 0) {
             return;
         }
         final String type = typeOf(statement, ownersRights);
         if (type != null) {
-            throw new RuntimeException(INVALID + type + CHILD_JOB + targetOf(statement) + ".");
+            throw new RuntimeException(INVALID + type + CHILD_JOB + targetOf(statement, executor) + ".");
         }
     }
 
@@ -171,11 +175,11 @@ final class FromClauseProcedureJobs {
     }
 
     /** " on KIND 'NAME'" for the statements the account names their object in, else nothing. */
-    private static String targetOf(final FrostlakeParser.StatementContext statement) {
+    private static String targetOf(final FrostlakeParser.StatementContext statement, final QueryExecutor executor) {
         final FrostlakeParser.DmlStatementContext dml = statement.dmlStatement();
         if (dml != null) {
-            final String table = dmlTable(dml);
-            return table == null ? "" : " on TABLE '" + table + "'";
+            final String table = dmlTable(dml, executor);
+            return table == null || table.isEmpty() ? "" : " on TABLE '" + table + "'";
         }
         final FrostlakeParser.DdlStatementContext ddl = statement.ddlStatement();
         if (ddl == null || ddl.createStatement() == null && ddl.dropStatement() == null) {
@@ -192,45 +196,72 @@ final class FromClauseProcedureJobs {
                 }
                 continue;
             }
-            final String name = lastPart(child);
+            final String name = lastPart(child, executor);
             if (name != null) {
-                return kind.length() == 0 ? "" : " on " + kind + " '" + name + "'";
+                return kind.length() == 0 || name.isEmpty() ? "" : " on " + kind + " '" + name + "'";
             }
         }
         return "";
     }
 
     /** The table a DML statement writes, by the last part of its name. */
-    private static String dmlTable(final FrostlakeParser.DmlStatementContext dml) {
+    private static String dmlTable(final FrostlakeParser.DmlStatementContext dml, final QueryExecutor executor) {
         if (dml.insertStatement() != null) {
-            return lastPart(dml.insertStatement().objectName());
+            return lastPart(dml.insertStatement().objectName(), executor);
         }
         if (dml.updateStatement() != null) {
-            return lastPart(dml.updateStatement().objectName());
+            return lastPart(dml.updateStatement().objectName(), executor);
         }
         if (dml.deleteStatement() != null) {
-            return lastPart(dml.deleteStatement().objectName());
+            return lastPart(dml.deleteStatement().objectName(), executor);
         }
         if (dml.mergeStatement() != null) {
-            return lastPart(dml.mergeStatement().qualifiedName());
+            return lastPart(dml.mergeStatement().qualifiedName(), executor);
         }
         return null;
     }
 
-    /** The last part of the name a node writes, or null when the node is no name. */
-    private static String lastPart(final ParseTree node) {
-        final FrostlakeParser.QualifiedNameContext name;
+    /**
+     * The last part of the name a node writes — the name a CREATE gives what it makes, read through the rule that
+     * holds it, and an IDENTIFIER() reference by the name it gives — or null when the node is no name; empty for a
+     * reference that resolves to no name.
+     */
+    private static String lastPart(final ParseTree node, final QueryExecutor executor) {
+        if (node instanceof FrostlakeParser.CreatedNameContext) {
+            return lastPart(((FrostlakeParser.CreatedNameContext) node).objectName(), executor);
+        }
+        if (node instanceof FrostlakeParser.CreatedPolicyNameContext) {
+            return lastPart(((FrostlakeParser.CreatedPolicyNameContext) node).objectName(), executor);
+        }
+        if (node instanceof FrostlakeParser.RoutineNameContext) {
+            return lastPart(((FrostlakeParser.RoutineNameContext) node).objectName(), executor);
+        }
+        if (node instanceof FrostlakeParser.DynamicTableNameContext) {
+            return lastPart(((FrostlakeParser.DynamicTableNameContext) node).objectName(), executor);
+        }
+        if (node instanceof FrostlakeParser.AlertNameContext) {
+            return lastPart(((FrostlakeParser.AlertNameContext) node).objectName(), executor);
+        }
+        if (node instanceof FrostlakeParser.ContainerNameContext) {
+            return lastPart(((FrostlakeParser.ContainerNameContext) node).objectName(), executor);
+        }
+        final String[] parts;
         if (node instanceof FrostlakeParser.ObjectNameContext) {
-            name = ((FrostlakeParser.ObjectNameContext) node).qualifiedName();
+            final FrostlakeParser.ObjectNameContext name = (FrostlakeParser.ObjectNameContext) node;
+            if (name.qualifiedName() != null) {
+                parts = ParseTreeText.qualifiedNameParts(name.qualifiedName());
+            } else {
+                try {
+                    parts = executor.resolveObjectNameParts(name);
+                } catch (final RuntimeException unresolved) {
+                    return "";
+                }
+            }
         } else if (node instanceof FrostlakeParser.QualifiedNameContext) {
-            name = (FrostlakeParser.QualifiedNameContext) node;
+            parts = ParseTreeText.qualifiedNameParts((FrostlakeParser.QualifiedNameContext) node);
         } else {
             return null;
         }
-        if (name == null) {
-            return null;
-        }
-        final String[] parts = ParseTreeText.qualifiedNameParts(name);
-        return parts.length == 0 ? null : parts[parts.length - 1];
+        return parts.length == 0 ? "" : parts[parts.length - 1];
     }
 }

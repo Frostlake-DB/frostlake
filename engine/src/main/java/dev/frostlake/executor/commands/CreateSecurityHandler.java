@@ -92,7 +92,7 @@ public class CreateSecurityHandler implements CommandHandler {
     }
 
     public Object handleCreateTag(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String tagName = getText(ctx.qualifiedName(0));
+        final String tagName = queryExecutor.createdObjectName(ctx);
         // MASKING is not a tag property — Snowflake refuses it at compile time, before IF NOT
         // EXISTS could forgive anything (live-verified wording).
         if (ctx.tagProperties() != null && ctx.tagProperties().MASKING() != null) {
@@ -129,7 +129,7 @@ public class CreateSecurityHandler implements CommandHandler {
         TagPropagation.requireConsistent(allowedValues, propagate, onConflict);
         if (ctx.or_replace() != null) {
             // Replacing a tag needs OWNERSHIP of it.
-            queryExecutor.requireOwnership("TAG", qualifiedNameParts(ctx.qualifiedName(0)), null);
+            queryExecutor.requireOwnership("TAG", queryExecutor.createdNameParts(ctx), null);
             // Asked before the tag a replacement drops is gone.
             ddl.checkCreatePrivilege(Privilege.CREATE_TAG, ddl.resolveSchemaFromQualifiedName(tagName));
             try { catalog.dropTagExact(tagName); } catch (final RuntimeException ignored) {}
@@ -137,7 +137,7 @@ public class CreateSecurityHandler implements CommandHandler {
         try {
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists,
                 ddl.resolveSchemaFromQualifiedName(tagName).hasTagExact(ddl.extractObjectName(tagName)),
-                qualifiedNameParts(ctx.qualifiedName(0)));
+                queryExecutor.createdNameParts(ctx));
             ddl.checkCreatePrivilege(Privilege.CREATE_TAG,
                 ddl.resolveSchemaFromQualifiedName(tagName));
             catalog.createTag(tagName, allowedValues, comment);
@@ -148,7 +148,7 @@ public class CreateSecurityHandler implements CommandHandler {
             }
             logger.trace("Created tag: {}", tagName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", queryExecutor.createdNameParts(ctx));
             logger.debug("Tag already exists (IF NOT EXISTS): {}", tagName);
         }
         return null;
@@ -259,8 +259,8 @@ public class CreateSecurityHandler implements CommandHandler {
     }
 
     public Object handleCreateMaskingPolicy(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         final PolicyProperties properties =
             PolicyProperties.read(ddl, ctx.policyCreateProperty(), "MASKING_POLICY", true);
@@ -284,12 +284,19 @@ public class CreateSecurityHandler implements CommandHandler {
                 // The name is judged before the signature and the body are (live-verified).
                 throw policyNameTaken(parts);
             }
+            // The declared types are judged first, the arguments' and then the result's, and the argument names after
+            // them (live-verified).
             final List<Parameter> params = new ArrayList<>();
             if (ctx.parameterList() != null) {
                 for (final FrostlakeParser.ParameterDefContext p : ctx.parameterList().parameterDef()) {
-                    params.add(columnParser.parseParameterDef(p));
+                    if (p.dataTypeName() != null) {
+                        params.add(columnParser.parseParameterDef(p));
+                    }
                 }
             }
+            final DataType declaredReturnType = ctx.dataTypeName() != null
+                ? columnParser.parseRoutineDataType(ctx.dataTypeName(), ctx.typeParameters()) : null;
+            UntypedArguments.rejectInPolicy(ctx.parameterList());
             final String returnType = ctx.dataTypeName() != null ? ctx.dataTypeName().getText().toUpperCase(Locale.ROOT) : "STRING";
             // The body is stored as EXPRESSION TEXT verbatim: a string-literal body keeps its
             // quotes ('***') so DESCRIBE shows it as typed (live-verified) and policy application
@@ -298,8 +305,6 @@ public class CreateSecurityHandler implements CommandHandler {
                 ? ddl.getOriginalText(ctx.bodyDefinition())
                 : ddl.getOriginalText(ctx.booleanExpr());
             PolicyBodyCheck.requireNumericLimits(body);
-            final DataType declaredReturnType = ctx.dataTypeName() != null
-                ? columnParser.parseRoutineDataType(ctx.dataTypeName(), ctx.typeParameters()) : null;
             PolicyObjectTagCalls.requireTagsIn(ctx.bodyDefinition() != null ? ctx.bodyDefinition()
                 : ctx.booleanExpr(), catalog);
             // The body is judged against RETURNS first; then the policy must hand back what it was given: live
@@ -334,7 +339,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addMaskingPolicy(policy);
             takeName(freshName, "MASKING_POLICY", schema, policyName);
             logger.trace("Created masking policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -357,6 +362,7 @@ public class CreateSecurityHandler implements CommandHandler {
             throw new RuntimeException(SqlCompilationError.inline(
                 "Property 'FUNCTION_RETURN_TYPE' cannot be changed in CREATE OR ALTER."));
         }
+        UntypedArguments.rejectInPolicy(ctx.parameterList());
         final List<Parameter> params = new ArrayList<>();
         for (final FrostlakeParser.ParameterDefContext p : ctx.parameterList().parameterDef()) {
             params.add(columnParser.parseParameterDef(p));
@@ -387,6 +393,7 @@ public class CreateSecurityHandler implements CommandHandler {
                                              final RowAccessPolicy policy, final String[] parts,
                                              final PolicyProperties properties) {
         queryExecutor.requireOwnership("ROW_ACCESS_POLICY", parts, null);
+        UntypedArguments.rejectInPolicy(ctx.parameterList());
         final List<Parameter> params = new ArrayList<>();
         for (final FrostlakeParser.ParameterDefContext p : ctx.parameterList().parameterDef()) {
             params.add(columnParser.parsePolicyParameterDef(p));
@@ -437,8 +444,8 @@ public class CreateSecurityHandler implements CommandHandler {
     }
 
     public Object handleCreateRowAccessPolicy(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         // CREATE OR ALTER takes no EXEMPT_OTHER_POLICIES for a row access policy (live-verified).
         final PolicyProperties properties =
@@ -460,9 +467,12 @@ public class CreateSecurityHandler implements CommandHandler {
             final List<Parameter> params = new ArrayList<>();
             if (ctx.parameterList() != null) {
                 for (final FrostlakeParser.ParameterDefContext p : ctx.parameterList().parameterDef()) {
-                    params.add(columnParser.parsePolicyParameterDef(p));
+                    if (p.dataTypeName() != null) {
+                        params.add(columnParser.parsePolicyParameterDef(p));
+                    }
                 }
             }
+            UntypedArguments.rejectInPolicy(ctx.parameterList());
             final String body = ctx.bodyDefinition() != null
                 ? ddl.getOriginalText(ctx.bodyDefinition())
                 : ddl.getOriginalText(ctx.booleanExpr());
@@ -495,7 +505,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addRowAccessPolicy(policy);
             takeName(freshName, "ROW_ACCESS_POLICY", schema, policyName);
             logger.trace("Created row access policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -505,9 +515,11 @@ public class CreateSecurityHandler implements CommandHandler {
      */
     public Object handleCreateJoinPolicy(final FrostlakeParser.CreateStatementContext ctx,
                                          final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
+        // An argument with no type is refused before the count is (live-verified).
+        UntypedArguments.reject(ctx.parameterList());
         if (ctx.parameterList() != null && !ctx.parameterList().parameterDef().isEmpty()) {
             throw new RuntimeException("Join policy must have exactly zero arguments, got "
                 + ctx.parameterList().parameterDef().size() + " arguments.");
@@ -548,7 +560,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addJoinPolicy(policy);
             takeName(freshName, "JOIN_POLICY", schema, policyName);
             logger.trace("Created join policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -564,9 +576,11 @@ public class CreateSecurityHandler implements CommandHandler {
      */
     public Object handleCreatePrivacyPolicy(final FrostlakeParser.CreateStatementContext ctx,
                                             final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
+        // An argument with no type is refused before the count is (live-verified).
+        UntypedArguments.reject(ctx.parameterList());
         if (ctx.parameterList() != null && !ctx.parameterList().parameterDef().isEmpty()) {
             throw new RuntimeException("Privacy policy must have exactly zero arguments, got "
                 + ctx.parameterList().parameterDef().size() + " arguments.");
@@ -618,7 +632,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addPrivacyPolicy(policy);
             takeName(freshName, "PRIVACY_POLICY", schema, policyName);
             logger.trace("Created privacy policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -634,8 +648,8 @@ public class CreateSecurityHandler implements CommandHandler {
      */
     public Object handleCreateStorageLifecyclePolicy(final FrostlakeParser.CreateStatementContext ctx,
                                                      final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = getText(ctx.qualifiedName());
+        final String[] parts = qualifiedNameParts(ctx.qualifiedName());
         final boolean orReplace = ctx.or_replace() != null;
         if (ctx.parameterList() == null || ctx.parameterList().parameterDef().isEmpty()) {
             throw new RuntimeException(SqlCompilationError.inline(
@@ -643,8 +657,11 @@ public class CreateSecurityHandler implements CommandHandler {
         }
         final List<Parameter> params = new ArrayList<>();
         for (final FrostlakeParser.ParameterDefContext p : ctx.parameterList().parameterDef()) {
-            params.add(columnParser.parsePolicyParameterDef(p));
+            if (p.dataTypeName() != null) {
+                params.add(columnParser.parsePolicyParameterDef(p));
+            }
         }
+        UntypedArguments.rejectInPolicy(ctx.parameterList());
         final String body = ctx.bodyDefinition() != null
             ? ddl.getOriginalText(ctx.bodyDefinition()) : ddl.getOriginalText(ctx.booleanExpr());
         try {
@@ -695,7 +712,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addStorageLifecyclePolicy(policy);
             takeName(freshName, StorageLifecycleProperties.KIND, schema, policyName);
             logger.trace("Created storage lifecycle policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName()); }
         return null;
     }
 
@@ -705,11 +722,13 @@ public class CreateSecurityHandler implements CommandHandler {
      */
     public Object handleCreateAggregationPolicy(final FrostlakeParser.CreateStatementContext ctx,
                                                 final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         final PolicyProperties properties =
             PolicyProperties.read(ddl, ctx.policyCreateProperty(), "AGGREGATION_POLICY", false);
+        // An argument with no type is refused before the count is (live-verified).
+        UntypedArguments.reject(ctx.parameterList());
         if (ctx.parameterList() != null && !ctx.parameterList().parameterDef().isEmpty()) {
             throw new RuntimeException("Aggregation policy must have exactly zero arguments, got "
                 + ctx.parameterList().parameterDef().size() + " arguments.");
@@ -755,7 +774,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addAggregationPolicy(policy);
             takeName(freshName, "AGGREGATION_POLICY", schema, policyName);
             logger.trace("Created aggregation policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -766,11 +785,13 @@ public class CreateSecurityHandler implements CommandHandler {
      */
     public Object handleCreateProjectionPolicy(final FrostlakeParser.CreateStatementContext ctx,
                                                final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         final PolicyProperties properties =
             PolicyProperties.read(ddl, ctx.policyCreateProperty(), "PROJECTION_POLICY", false);
+        // An argument with no type is refused before the count is (live-verified).
+        UntypedArguments.reject(ctx.parameterList());
         if (ctx.parameterList() != null && !ctx.parameterList().parameterDef().isEmpty()) {
             throw new RuntimeException("Projection policy must have exactly zero arguments, got "
                 + ctx.parameterList().parameterDef().size() + " arguments.");
@@ -815,7 +836,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addProjectionPolicy(policy);
             takeName(freshName, "PROJECTION_POLICY", schema, policyName);
             logger.trace("Created projection policy: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 
@@ -824,8 +845,8 @@ public class CreateSecurityHandler implements CommandHandler {
      * ContactProperties} judges them.
      */
     public Object handleCreateContact(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String qn = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String qn = queryExecutor.createdObjectName(ctx);
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final boolean orReplace = ctx.or_replace() != null;
         try {
             final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
@@ -850,7 +871,7 @@ public class CreateSecurityHandler implements CommandHandler {
             schema.addContact(contact);
             takeName(freshName, "CONTACT", schema, contactName);
             logger.trace("Created contact: {}", qn);
-        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0)); }
+        } catch (final RuntimeException e) { ddl.handleIfNotExists(ifNotExists, e, "object", parts); }
         return null;
     }
 

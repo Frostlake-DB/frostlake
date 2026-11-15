@@ -262,6 +262,10 @@ public final class DdlStatusMessage {
         if (node instanceof FrostlakeParser.ObjectNameContext) {
             return (FrostlakeParser.ObjectNameContext) node;
         }
+        if (node instanceof FrostlakeParser.SourceObjectNameContext) {
+            // A CLONE's or a LIKE's source names no object the statement makes.
+            return null;
+        }
         for (int i = 0; i < node.getChildCount(); i++) {
             final FrostlakeParser.ObjectNameContext found = firstObjectName(node.getChild(i));
             if (found != null) {

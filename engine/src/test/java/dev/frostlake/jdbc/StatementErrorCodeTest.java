@@ -200,4 +200,31 @@ public class StatementErrorCodeTest extends BaseJdbcTest {
             {"SELECT SYSTEM$TYPEOF()", "938 22023"},
         });
     }
+
+    @Test
+    public void signatureKeyAndTagFamilies() throws SQLException {
+        statement.execute("CREATE OR REPLACE TABLE ec680t (a INT, b INT)");
+        statement.execute("CREATE OR REPLACE TABLE ec680c (a INT, b INT)");
+        statement.execute("ALTER TABLE ec680c CLUSTER BY (a)");
+        statement.execute("CREATE OR REPLACE STAGE ec680s");
+        assertFamilies(new String[][] {
+            {"CREATE FUNCTION ec680f(a) RETURNS INT AS '1'", "90201 42601"},
+            {"CREATE MASKING POLICY ec680m AS (v) RETURNS STRING -> v", "90201 42601"},
+            {"CREATE FUNCTION ec680f(a INT, a INT) RETURNS INT AS '1'", "90200 42601"},
+            {"CREATE FUNCTION ec680f(a INT) RETURNS TABLE (c INT, c INT) AS 'SELECT 1, 2'", "90211 42601"},
+            {"CREATE FUNCTION ec680f(a INT) RETURNS TABLE (c INT DEFAULT 1, d INT) AS 'SELECT 1, 2'", "946 42601"},
+            {"CREATE FUNCTION ec680f(a INT DEFAULT 1, b INT) RETURNS INT AS '1'", "946 42601"},
+            {"CREATE EXTERNAL FUNCTION ec680e(a b) RETURNS INT API_INTEGRATION = nosuch_api AS "
+                + "'https://example.com/x'", "2176 42601"},
+            {"CREATE EXTERNAL FUNCTION ec680e(a INT) RETURNS b API_INTEGRATION = nosuch_api AS "
+                + "'https://example.com/x'", "2177 42601"},
+            {"ALTER TABLE ec680t DROP CONSTRAINT nosuch_c", "1450 42601"},
+            {"ALTER TABLE ec680t DROP PRIMARY KEY", "1450 42601"},
+            {"ALTER TABLE ec680t RENAME CONSTRAINT nosuch_c TO c2", "1450 42601"},
+            {"ALTER TABLE ec680c RENAME COLUMN a TO a2", "3320 42601"},
+            {"ALTER TABLE ec680c DROP COLUMN a", "3203 42601"},
+            {"ALTER STAGE ec680s SET TAG nosuch_tag680 = 'x'", "2003 02000"},
+            {"ALTER STAGE no_such_stage_680 SET TAG nosuch_tag680 = 'x'", "2003 02000"},
+        });
+    }
 }

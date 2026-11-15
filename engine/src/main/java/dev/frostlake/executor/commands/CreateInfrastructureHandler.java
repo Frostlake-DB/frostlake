@@ -99,7 +99,8 @@ public class CreateInfrastructureHandler implements CommandHandler {
     }
 
     public Object handleCreateTask(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String taskQualifiedName = getText(ctx.qualifiedName(0));
+        final String[] taskParts = queryExecutor.createdNameParts(ctx);
+        final String taskQualifiedName = QualifiedName.join(taskParts);
         final String taskName = ddl.extractObjectName(taskQualifiedName);
         final boolean orReplace = ctx.or_replace() != null;
         final boolean orAlter = ctx.or_alter() != null;
@@ -107,13 +108,12 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
         try {
             DDLCommandHandler.refuseTakenName(!orReplace && !orAlter && !ifNotExists,
-                hasTaskNamed(ddl.resolveSchemaFromQualifiedName(taskQualifiedName), taskName),
-                qualifiedNameParts(ctx.qualifiedName(0)));
+                hasTaskNamed(ddl.resolveSchemaFromQualifiedName(taskQualifiedName), taskName), taskParts);
             ddl.checkCreatePrivilege(Privilege.CREATE_TASK,
                 ddl.resolveSchemaFromQualifiedName(taskQualifiedName));
             final Schema schema = ddl.resolveSchemaFromQualifiedName(taskQualifiedName);
             if (orReplace || orAlter && hasTaskNamed(schema, taskName)) {
-                queryExecutor.requireOwnership("TASK", qualifiedNameParts(ctx.qualifiedName(0)), null);
+                queryExecutor.requireOwnership("TASK", taskParts, null);
             }
             if (orAlter && ctx.tagList() != null) {
                 InlineTags.refuseOnOrAlter(ctx.tagList(), queryExecutor);
@@ -229,7 +229,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             grantsOfNew.apply();
             logger.trace("Created task: {}", taskQualifiedName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", taskParts);
             logger.debug("Task already exists (IF NOT EXISTS): {}", taskName);
         }
         return null;
@@ -267,18 +267,18 @@ public class CreateInfrastructureHandler implements CommandHandler {
     }
 
     public Object handleCreatePipe(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String pipeQualifiedName = getText(ctx.qualifiedName(0));
+        final String pipeQualifiedName = getText(ctx.qualifiedName());
         final Schema pipeSchema = catalog.resolveOwningSchema(pipeQualifiedName);
         final String pipeName = QualifiedName.parse(pipeQualifiedName).last();
         if (ctx.or_replace() != null) {
-            queryExecutor.requireOwnership("PIPE", qualifiedNameParts(ctx.qualifiedName(0)), null);
+            queryExecutor.requireOwnership("PIPE", qualifiedNameParts(ctx.qualifiedName()), null);
             // Asked before the pipe a replacement drops is gone.
             ddl.checkCreatePrivilege(Privilege.CREATE_PIPE, pipeSchema);
             try { pipeSchema.dropPipe(pipeName); } catch (final RuntimeException ignored) {}
         }
         try {
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists,
-                hasPipeNamed(pipeSchema, pipeName), qualifiedNameParts(ctx.qualifiedName(0)));
+                hasPipeNamed(pipeSchema, pipeName), qualifiedNameParts(ctx.qualifiedName()));
             ddl.checkCreatePrivilege(Privilege.CREATE_PIPE, pipeSchema);
             // Extract COPY statement text
             final String copyStatement = ddl.getOriginalText(ctx.copyStatement());
@@ -366,7 +366,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             grantsOfNew.apply();
             logger.trace("Created pipe: {}", pipeName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName());
             logger.debug("Pipe already exists (IF NOT EXISTS): {}", pipeName);
         }
         return null;
@@ -553,15 +553,16 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
     public Object handleCreateSequence(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         CreatedObjectProperties.requireSequenceProperties(ctx);
-        final String sequenceQualifiedName = getText(ctx.qualifiedName(0));
+        final String[] sequenceParts = queryExecutor.createdNameParts(ctx);
+        final String sequenceQualifiedName = QualifiedName.join(sequenceParts);
         final String sequenceName = ddl.extractObjectName(sequenceQualifiedName);
         // A clone continues from where its source stands: the same next value, step, ordering and comment.
         final Sequence cloneSource = ctx.CLONE() == null ? null
-            : ddl.resolveSchemaFromQualifiedName(getText(ctx.qualifiedName(1)))
-                .getSequence(ddl.extractObjectName(getText(ctx.qualifiedName(1))));
+            : ddl.resolveSchemaFromQualifiedName(queryExecutor.copySourceName(ctx))
+                .getSequence(ddl.extractObjectName(queryExecutor.copySourceName(ctx)));
         final Schema sequenceSchema = ddl.resolveSchemaFromQualifiedName(sequenceQualifiedName);
         if (ctx.or_replace() != null) {
-            queryExecutor.requireOwnership("SEQUENCE", qualifiedNameParts(ctx.qualifiedName(0)), null);
+            queryExecutor.requireOwnership("SEQUENCE", sequenceParts, null);
         }
         // Asked before the sequence a replacement drops is gone; a plain CREATE of a name a sequence already
         // holds is refused for the name ahead of the privilege (live-verified).
@@ -632,7 +633,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             grantsOfNew.apply();
             logger.trace("Created sequence: {} with START={}, INCREMENT={}", sequenceQualifiedName, startValue, increment);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", sequenceParts);
             logger.debug("Sequence already exists (IF NOT EXISTS): {}", sequenceName);
         }
         return null;
@@ -848,7 +849,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
      * @return null, as every CREATE handler answers
      */
     public Object handleCreateGitRepository(final FrostlakeParser.CreateStatementContext ctx) {
-        final String repositoryName = getText(ctx.qualifiedName(0));
+        final String repositoryName = queryExecutor.createdObjectName(ctx);
         ddl.resolveSchemaFromQualifiedName(repositoryName);
         boolean origin = false;
         FrostlakeParser.QualifiedNameContext integration = null;
@@ -882,9 +883,10 @@ public class CreateInfrastructureHandler implements CommandHandler {
     }
 
     public Object handleCreateStage(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String stageName = getText(ctx.qualifiedName(0));
+        final String[] stageParts = queryExecutor.createdNameParts(ctx);
+        final String stageName = QualifiedName.join(stageParts);
         if (ctx.or_replace() != null) {
-            queryExecutor.requireOwnership("STAGE", qualifiedNameParts(ctx.qualifiedName(0)), null);
+            queryExecutor.requireOwnership("STAGE", stageParts, null);
             // Asked before the stage a replacement drops is gone.
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_STAGE, stageName);
         }
@@ -892,7 +894,12 @@ public class CreateInfrastructureHandler implements CommandHandler {
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists
                     && !TemporaryObjectStatements.isTemporary(ctx),
                 ddl.resolveSchemaFromQualifiedName(stageName).hasStageExact(ddl.extractObjectName(stageName)),
-                qualifiedNameParts(ctx.qualifiedName(0)));
+                stageParts);
+            // The tags are judged once the name is, IF NOT EXISTS over a stage there judging them too (live-verified).
+            if (ctx.tagList() != null) {
+                InlineTags.requireApplicable(ctx.tagList(), queryExecutor);
+                InlineTags.requireOneValueEach(ctx.tagList(), queryExecutor);
+            }
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_STAGE, stageName);
             // A URL-less CREATE STAGE makes an internal named stage (Snowflake's default when URL is omitted);
             // a URL (except file://) denotes an external stage.
@@ -1045,6 +1052,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
             }
 
             final Stage created = catalog.getStage(stageName);
+            if (ctx.tagList() != null) {
+                InlineTags.apply(created, ctx.tagList(), queryExecutor);
+            }
             created.getFileFormatOptions().putAll(formatOptions);
             created.getCopyOptions().putAll(copyOptions);
             created.setEncryptionType(judgedEncryption == null ? null : judgedEncryption.type());
@@ -1072,7 +1082,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
             logger.trace("Created stage: {}", stageName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", stageParts);
             logger.debug("Stage already exists (IF NOT EXISTS): {}", stageName);
         }
         return null;
@@ -1089,7 +1099,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
      */
     public Object handleCreateCortexSearchService(final FrostlakeParser.CreateStatementContext ctx,
                                                   final boolean ifNotExists) {
-        final String serviceName = getText(ctx.qualifiedName(0));
+        final String serviceName = getText(ctx.qualifiedName());
         final String searchColumn = SqlIdentifiers.canonical(ctx.identifier(0));
         final List<String> attributeColumns = new ArrayList<>();
         if (ctx.identifierList() != null) {
@@ -1123,7 +1133,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
         ddl.checkCreatePrivilege(Privilege.CREATE_CORTEX_SEARCH_SERVICE, ddl.resolveSchemaFromQualifiedName(serviceName));
 
         // The name's parts off the parse tree: a quoted name keeps its case, and is that service alone.
-        final String[] serviceParts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String[] serviceParts = qualifiedNameParts(ctx.qualifiedName());
         final Schema serviceSchema = catalog.requireOwningSchema(QualifiedName.of(serviceParts));
         final String ownName = serviceParts[serviceParts.length - 1];
         if (ctx.or_replace() != null && serviceSchema.hasCortexSearchServiceExact(ownName)) {
@@ -1188,11 +1198,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
         final String kind = ctx.TASK() != null ? "TASK" : ctx.STAGE() != null ? "STAGE" : "FILE_FORMAT";
         // A temporary clone is its session's own, as a temporary stage or file format is (live-verified).
         final boolean temporary = TemporaryObjectStatements.isTemporary(ctx);
-        final String written = getText(ctx.qualifiedName(0));
-        final String[] parts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String[] parts = queryExecutor.createdNameParts(ctx);
+        final String written = QualifiedName.join(parts);
         final String name = parts[parts.length - 1];
-        final String[] sourceParts = qualifiedNameParts(ctx.qualifiedName(1));
-        final Schema sourceSchema = ddl.resolveSchemaFromQualifiedName(getText(ctx.qualifiedName(1)));
+        final String[] sourceParts = queryExecutor.copySourceParts(ctx);
+        final Schema sourceSchema = ddl.resolveSchemaFromQualifiedName(QualifiedName.join(sourceParts));
         final String sourceName = sourceParts[sourceParts.length - 1];
         final Schema schema = ddl.resolveSchemaFromQualifiedName(written);
         final Privilege create = "TASK".equals(kind) ? Privilege.CREATE_TASK
@@ -1206,8 +1216,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
             final FileFormat sourceFormat = "FILE_FORMAT".equals(kind) ? sourceSchema.getFileFormatExact(sourceName)
                 : null;
             if ("FILE_FORMAT".equals(kind) && sourceFormat == null) {
-                throw new RuntimeException(SqlCompilationError.doesNotExist("File format",
-                    sourceSchema.qualifiedName(sourceName)));
+                // A source written bare is named bare, one written by a path in full (live-verified).
+                throw new RuntimeException(SqlCompilationError.doesNotExist("File format", sourceParts.length == 1
+                    ? QualifiedName.join(sourceParts) : sourceSchema.qualifiedName(sourceName)));
             }
             final String[] sourceFull = QualifiedName.parse(sourceSchema.qualifiedName(sourceName)).parts();
             if (sourceTask != null) {
@@ -1220,6 +1231,18 @@ public class CreateInfrastructureHandler implements CommandHandler {
                 throw new RuntimeException("Unsupported feature 'Cloning internal and temporary stages'.");
             }
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists, taken, parts);
+            if (!temporary && sourceStage != null) {
+                // A permanent stage is cloned from no internal stage, a temporary one among them, and from no
+                // temporary stage: refused once a plain create's name is judged, and before IF NOT EXISTS or OR
+                // REPLACE could pass over the name (live-verified).
+                if (sourceStage.getType() == StageType.INTERNAL) {
+                    throw new RuntimeException("Unsupported feature 'Cloning internal and temporary stages'.");
+                }
+                if (sourceStage.isTemporary()) {
+                    throw new RuntimeException(SqlCompilationError.inline(
+                        "Temp stage cannot be cloned to a permanent stage."));
+                }
+            }
             if (ctx.or_replace() != null && taken && !temporary) {
                 queryExecutor.requireOwnership(kind, parts, null);
             }
@@ -1271,17 +1294,17 @@ public class CreateInfrastructureHandler implements CommandHandler {
             }
             logger.trace("Cloned {} {} from {}", kind, written, sourceName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", parts);
         }
         return null;
     }
 
     public Object handleCreateFileFormat(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         requireFormatOption(ctx);
-        final String name = getText(ctx.qualifiedName(0));
         // The simple name is the parse tree's last identifier part — never a re-split of the
         // flattened text, which breaks a quoted name containing a dot.
-        final String[] nameParts = qualifiedNameParts(ctx.qualifiedName(0));
+        final String[] nameParts = queryExecutor.createdNameParts(ctx);
+        final String name = QualifiedName.join(nameParts);
         final String simpleName = nameParts[nameParts.length - 1];
         if (ctx.or_replace() != null) {
             queryExecutor.requireOwnership("FILE_FORMAT", nameParts, null);
@@ -1333,7 +1356,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             }
             logger.trace("Created file format: {}", simpleName);
         } catch (final RuntimeException e) {
-            ddl.handleIfNotExists(ifNotExists, e, "object", ctx.qualifiedName(0));
+            ddl.handleIfNotExists(ifNotExists, e, "object", nameParts);
         }
         return null;
     }

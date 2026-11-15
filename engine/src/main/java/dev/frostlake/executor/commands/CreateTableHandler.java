@@ -19,6 +19,7 @@ package dev.frostlake.executor.commands;
 import dev.frostlake.executor.ClusteringKeySpelling;
 import dev.frostlake.executor.ColumnTypeFamilies;
 import dev.frostlake.executor.ConditionalDdlOutcome;
+import dev.frostlake.executor.DdlRowCounts;
 import dev.frostlake.executor.DeferredFault;
 import dev.frostlake.executor.DmlWriteTarget;
 import dev.frostlake.executor.LeadingCommentOffset;
@@ -261,7 +262,7 @@ public class CreateTableHandler implements CommandHandler {
             // CLONE and LIKE read their source before anything changes, so a temporary table that takes
             // its source's name copies the permanent table it is about to hide (live-verified).
             final String copySourceName = ctx.CLONE() != null || ctx.LIKE() != null
-                ? queryExecutor.searchPathQualified(getText(ctx.qualifiedName(0))) : null;
+                ? queryExecutor.searchPathQualified(queryExecutor.copySourceName(ctx)) : null;
             final Table copySource = copySourceName == null ? null
                 : catalog.resolveTableAsWritten(copySourceName, "Object", ctx.CLONE() != null ? "CLONE" : "DUPLICATE");
             if (copySource != null) {
@@ -647,6 +648,7 @@ public class CreateTableHandler implements CommandHandler {
                 // The statement wrote the table, a query that held no row too (live-verified: its change token is
                 // no longer 0).
                 table.markDmlRan(StatementClock.commitInstant());
+                DdlRowCounts.record(resultSet.getRows().size(), 0);
 
                 // Table created + populated: now consume any stream the source SELECT read.
                 queryExecutor.consumeCtasStreams();

@@ -23,9 +23,10 @@ import org.junit.jupiter.api.Test;
  * feature, and its text and every bind are strings. A stored procedure called in a FROM clause runs its
  * statements as child jobs of the query: one that reads runs - a SELECT, a SHOW, a DESCRIBE, a CALL of a
  * procedure that reads, NEXTVAL - and one that writes is refused where it stands in the body, by its type and,
- * for a DML, a CREATE and a DROP, its object; the text an EXECUTE IMMEDIATE runs and a procedure the body calls
- * are child jobs too. An owner's-rights procedure may not SET or UNSET a session variable, a caller's-rights one
- * may. An EXPLAIN carries nothing out. Every answer is live-verified.
+ * for a DML, a CREATE and a DROP, its object, a name given through IDENTIFIER() by the name it gives; the text an
+ * EXECUTE IMMEDIATE runs and a procedure the body calls are child jobs too. An owner's-rights procedure may not SET
+ * or UNSET a session variable, a caller's-rights one may. An EXPLAIN carries nothing out. Every answer is
+ * live-verified.
  */
 public class ToQueryAndFromProceduresTest extends MeasuredCellsTestSupport {
 
@@ -1065,6 +1066,40 @@ public class ToQueryAndFromProceduresTest extends MeasuredCellsTestSupport {
                 "DROP VIEW IF EXISTS vw4");
             answer(
                 "DROP VIEW IF EXISTS vw9");
+        }
+    }
+
+    @Test
+    public void aChildJobNamesWhatItMakesOrChanges() {
+        engine.execute("CREATE OR REPLACE TABLE tq (a INT)");
+        engine.execute("INSERT INTO tq VALUES (1)");
+        final String[][] bodies = {
+            {"p_cdb", "CREATE OR REPLACE DATABASE made_db", "'CREATE'", "DATABASE 'MADE_DB'"},
+            {"p_cdb2", "CREATE DATABASE IF NOT EXISTS IDENTIFIER('made_db2')", "'CREATE'", "DATABASE 'MADE_DB2'"},
+            {"p_csc", "CREATE OR REPLACE SCHEMA made_sc", "'CREATE'", "SCHEMA 'MADE_SC'"},
+            {"p_cst2", "CREATE OR REPLACE STAGE IDENTIFIER('made_st2')", "'CREATE'", "STAGE 'MADE_ST2'"},
+            {"p_ctb", "CREATE TABLE IDENTIFIER('made_t') (a INT)", "'CREATE'", "TABLE 'MADE_T'"},
+            {"p_ctc", "CREATE TABLE IDENTIFIER('made_t2') CLONE tq", "'CREATE'", "TABLE 'MADE_T2'"},
+            {"p_ins", "INSERT INTO IDENTIFIER('tq') VALUES (2)", "'INSERT'", "TABLE 'TQ'"},
+            {"p_upd", "UPDATE IDENTIFIER('tq') SET a = 3", "'UPDATE'", "TABLE 'TQ'"},
+            {"p_drp", "DROP TABLE IF EXISTS IDENTIFIER('nosuch_t')", "'DROP'", "TABLE 'NOSUCH_T'"},
+            {"p_dsc", "DROP SCHEMA IF EXISTS IDENTIFIER('nosuch_sc')", "'DROP'", "SCHEMA 'NOSUCH_SC'"},
+        };
+        try {
+            for (final String[] body : bodies) {
+                engine.execute("CREATE OR REPLACE PROCEDURE " + body[0] + "() RETURNS TABLE (a INT) LANGUAGE SQL AS $$ "
+                    + "DECLARE r RESULTSET DEFAULT (SELECT a FROM tq ORDER BY a); BEGIN " + body[1] + "; RETURN "
+                    + "TABLE(r); END $$");
+                assertAnswer("REFUSED Stored procedure execution error on line 1 position 20: Uncaught exception of "
+                    + "type 'STATEMENT_ERROR' on line 1 at position 66 : SQL compilation error: Invalid statement type "
+                    + body[2] + " for child job from stored procedure in FROM clause on " + body[3] + ".",
+                    "SELECT * FROM TABLE(" + body[0] + "()) ORDER BY a");
+            }
+            assertAnswer("1", "SELECT * FROM tq");
+        } finally {
+            answer("USE SCHEMA test_db.test_schema");
+            answer("DROP DATABASE IF EXISTS made_db");
+            answer("DROP DATABASE IF EXISTS made_db2");
         }
     }
 

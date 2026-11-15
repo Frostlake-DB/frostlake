@@ -462,11 +462,12 @@ public class DropCommandHandler implements CommandHandler {
 
         try {
             if (ctx.DATABASE() != null) {
-                final String dbName = dropNameText(ctx);
+                // A name of several parts is refused whatever IF EXISTS says (see DatabaseNames).
+                final String dbName = DatabaseNames.of(dropNameParts(ctx), catalog);
                 // Refused before IF EXISTS could forgive it: the SNOWFLAKE database is always there.
                 SystemDatabase.refuseChange(dbName);
                 try {
-                    queryExecutor.requireOwnership("DATABASE", dropNameParts(ctx), null);
+                    queryExecutor.requireOwnership("DATABASE", new String[] {dbName}, null);
                     final Database droppedDb = catalog.databaseExact(dbName);
                     // A database holding a table another table references stays under RESTRICT. Otherwise the
                     // foreign keys tables of other databases hold on its tables go with it.

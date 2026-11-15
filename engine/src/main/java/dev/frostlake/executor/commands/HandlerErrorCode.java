@@ -40,7 +40,11 @@ import dev.frostlake.transaction.TransactionManager;
  * statement that failed 711 / 02000 and a text that is no JSON 100069 / 22P02; an OPEN of an open cursor 92215 / P0000
  * and a CLOSE of one that is not open 92201 / P0000; a RESULTSET read before anything was given to it 92212 / P0000;
  * the report of an exception a Java or a Scala procedure's handler raised, a statement it ran that failed included,
- * 100315 / P0000, and of one a Python handler raised 100357 / P0000. A refusal of no known family reads 100351 / P0000.
+ * 100315 / P0000, and of one a Python handler raised 100357 / P0000. A routine's or a policy's signature refused is
+ * 42601, by what it got wrong: a required argument after an optional one 946, a repeated argument name 90200, a
+ * repeated column name 90211, an argument with no type 90201, an external function's type 2176 for an argument and
+ * 2177 for its result. A constraint that is not there is 1450 / 42601, and a column of the clustering key renamed
+ * 3320 and dropped 3203 / 42601. A refusal of no known family reads 100351 / P0000.
  * A hybrid table's primary key already held is 200001 / 22000 and a foreign key it breaks 200009 / 22000, and a
  * privilege refusal - an access-control error, {@code Insufficient privileges to operate on …} - 3001 / 42501
  * (documented).
@@ -150,6 +154,38 @@ final class HandlerErrorCode {
     }
 
     /**
+     * The families a routine's or a policy's signature and a table's key or clustering columns are refused with
+     * (live-verified, by a handler and a client's driver alike): see the class's own list.
+     *
+     * @param message the refusal's sentence
+     * @return the pair, or null for a sentence of none of these families
+     */
+    private static HandlerErrorCode signatureRefusal(final String message) {
+        if (message.contains(" cannot follow optional argument ")) {
+            return new HandlerErrorCode(946, "42601");
+        }
+        if (message.contains("' repeats in the function signature.")) {
+            return new HandlerErrorCode(90200, "42601");
+        }
+        if (message.contains("Return signature contains a duplicate column name '")) {
+            return new HandlerErrorCode(90211, "42601");
+        }
+        if (message.startsWith("Missing data type for argument '")) {
+            return new HandlerErrorCode(90201, "42601");
+        }
+        if (message.contains("External functions may not have datatype '")) {
+            return new HandlerErrorCode(message.endsWith("' as arguments") ? 2176 : 2177, "42601");
+        }
+        if (message.contains("constraint '") && message.endsWith("' does not exist")) {
+            return new HandlerErrorCode(1450, "42601");
+        }
+        if (message.contains("' which belongs to a clustering key")) {
+            return new HandlerErrorCode(message.startsWith("Cannot rename column '") ? 3320 : 3203, "42601");
+        }
+        return null;
+    }
+
+    /**
      * The code and state of a refusal's sentence, or null for a sentence of no known family.
      *
      * @param message the refusal's sentence
@@ -196,6 +232,10 @@ final class HandlerErrorCode {
         final HandlerErrorCode stateRefusal = stateRefusal(message);
         if (stateRefusal != null) {
             return stateRefusal;
+        }
+        final HandlerErrorCode signature = signatureRefusal(message);
+        if (signature != null) {
+            return signature;
         }
         if (message.contains("This session does not have a current schema.")) {
             // Every statement refused for want of a current schema (live-verified).

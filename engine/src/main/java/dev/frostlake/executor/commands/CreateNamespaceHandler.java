@@ -110,11 +110,14 @@ public class CreateNamespaceHandler implements CommandHandler {
     }
 
     public Object handleCreateDatabase(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String dbName = getText(ctx.identifier(0));
+        final String dbName = DatabaseNames.of(queryExecutor.createdNameParts(ctx), catalog);
+        // A CLONE's source is named by the rule the new database's name follows.
+        final String cloneSourceDb = ctx.CLONE() != null
+            ? DatabaseNames.of(queryExecutor.copySourceParts(ctx), catalog) : null;
         // The SNOWFLAKE database is neither cloned nor replaced (SystemDatabase).
         if (ctx.CLONE() != null) {
-            SystemDatabase.refuseChange(getText(ctx.identifier(1)));
-            final Database source = catalog.databaseExact(getText(ctx.identifier(1)));
+            SystemDatabase.refuseChange(cloneSourceDb);
+            final Database source = catalog.databaseExact(cloneSourceDb);
             requireCloneSourceUsage("DATABASE", source.getName(), source.getOwner(),
                 SqlCompilationError.doesNotExist("Database", source.getName()));
         }
@@ -126,9 +129,9 @@ public class CreateNamespaceHandler implements CommandHandler {
         // AT | BEFORE is resolved, and the source required to have existed then, before anything changes, so a
         // refused point leaves even a database it would replace in place.
         final ClonePoint point = ctx.CLONE() != null && ctx.timeTravelClause() != null
-            ? clonePoint(ctx, catalog.databaseExact(getText(ctx.identifier(1)))) : null;
+            ? clonePoint(ctx, catalog.databaseExact(cloneSourceDb)) : null;
         if (ctx.CLONE() != null) {
-            requireCloneableTransience(catalog.databaseExact(getText(ctx.identifier(1))).isTransientObject(),
+            requireCloneableTransience(catalog.databaseExact(cloneSourceDb).isTransientObject(),
                 ctx.TRANSIENT() != null);
         }
         if (ctx.or_replace() != null) {
@@ -150,7 +153,7 @@ public class CreateNamespaceHandler implements CommandHandler {
         boolean made = false;
         try {
             if (ctx.CLONE() != null) {
-                final String sourceDbName = getText(ctx.identifier(1));
+                final String sourceDbName = cloneSourceDb;
                 catalog.cloneDatabase(sourceDbName, dbName, cloneContent(ctx));
                 made = true;
                 ddl.cloneDatabaseData(sourceDbName, dbName, point);
@@ -201,6 +204,11 @@ public class CreateNamespaceHandler implements CommandHandler {
             logger.debug("Database already exists (IF NOT EXISTS): {}", dbName);
         }
         return null;
+    }
+
+    /** The parts of the schema a CREATE SCHEMA ... CLONE copies, a leading locator of this account dropped. */
+    private String[] cloneSourceParts(final FrostlakeParser.CreateStatementContext ctx) {
+        return catalog.withoutAccount(queryExecutor.copySourceParts(ctx), 2);
     }
 
     /** What a CLONE clause asks a database or schema clone to copy beyond its own objects (see CloneContent). */
@@ -269,9 +277,12 @@ public class CreateNamespaceHandler implements CommandHandler {
         queryExecutor.requirePrivilege(Privilege.USAGE, kind, recorded);
     }
 
-    /** The schema a CREATE SCHEMA ... CLONE copies: a bare name in the session's database. */
+    /**
+     * The schema a CREATE SCHEMA ... CLONE copies: a bare name in the session's database. A source of more parts than a
+     * schema's two names nothing, unless its first is this account's locator (live-verified).
+     */
     private Schema cloneSourceSchema(final FrostlakeParser.CreateStatementContext ctx) {
-        final String[] sourceParts = qualifiedNameParts(ctx.qualifiedName(1));
+        final String[] sourceParts = cloneSourceParts(ctx);
         final String database = sourceParts.length == 2 ? sourceParts[0] : catalog.getCurrentDatabase();
         if (database == null) {
             throw NoCurrentDatabaseRefusal.forStatement();
@@ -349,10 +360,11 @@ public class CreateNamespaceHandler implements CommandHandler {
         }
         final NamespaceProperties properties = NamespaceProperties.ofSchema(ctx.schemaProperty());
         properties.requireCatalogParameter(catalog);
-        final String schemaName = getText(ctx.qualifiedName(0));
+        final String[] writtenParts = queryExecutor.createdNameParts(ctx);
+        final String schemaName = QualifiedName.join(writtenParts);
         // A schema name has at most two parts (db..s counts three): live refuses a longer one with its
         // generic sentence, IF NOT EXISTS or not, and reads a leading locator of this account.
-        final String[] parts = catalog.withoutAccount(qualifiedNameParts(ctx.qualifiedName(0)), 2);
+        final String[] parts = catalog.withoutAccount(writtenParts, 2);
         if (ctx.CLONE() != null) {
             final Schema source = cloneSourceSchema(ctx);
             final String sourceName = QualifiedName.join(source.getDatabaseName(), source.getName());
@@ -413,8 +425,8 @@ public class CreateNamespaceHandler implements CommandHandler {
             final Schema schema;
 
             if (ctx.CLONE() != null) {
-                final String sourceSchemaName = getText(ctx.qualifiedName(1));
-                final String[] sourceParts = qualifiedNameParts(ctx.qualifiedName(1));
+                final String[] sourceParts = cloneSourceParts(ctx);
+                final String sourceSchemaName = QualifiedName.join(sourceParts);
 
                 final String sourceDbName;
                 final String sourceSchema;
@@ -584,7 +596,7 @@ public class CreateNamespaceHandler implements CommandHandler {
         if (!properties.tags().isEmpty()) {
             throw new RuntimeException(SqlCompilationError.of("options CREATE OR ALTER and TAG are incompatible."));
         }
-        final String[] parts = catalog.withoutAccount(qualifiedNameParts(ctx.qualifiedName(0)), 2);
+        final String[] parts = catalog.withoutAccount(queryExecutor.createdNameParts(ctx), 2);
         final String containerName = parts.length == 2 ? parts[0] : catalog.getCurrentDatabase();
         if (containerName == null) {
             return false;

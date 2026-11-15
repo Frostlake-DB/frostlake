@@ -84,4 +84,26 @@ public class HandlerErrorFamilyTest extends MeasuredCellsTestSupport {
             "EXECUTE IMMEDIATE $$ BEGIN SELECT 1 UNION SELECT 1, 2; RETURN 'none'; EXCEPTION WHEN OTHER THEN RETURN "
                 + "SQLCODE || ' ' || SQLSTATE; END $$");
     }
+
+    @Test
+    public void aHandlerReadsASignaturesAKeysAndATagsFamily() {
+        engine.execute("CREATE OR REPLACE TABLE hc680 (a INT, b INT)");
+        engine.execute("ALTER TABLE hc680 CLUSTER BY (a)");
+        engine.execute("CREATE OR REPLACE STAGE hc680s");
+        assertCells(new String[][] {
+            {handled("ALTER TABLE hc680 DROP CONSTRAINT nosuch_c"), "1450 42601"},
+            {handled("ALTER TABLE hc680 DROP PRIMARY KEY"), "1450 42601"},
+            {handled("ALTER TABLE hc680 RENAME COLUMN a TO a2"), "3320 42601"},
+            {handled("ALTER TABLE hc680 DROP COLUMN a"), "3203 42601"},
+            {handled("CREATE FUNCTION hc680f(a) RETURNS INT AS '1'"), "90201 42601"},
+            {handled("CREATE FUNCTION hc680f(a INT, a INT) RETURNS INT AS '1'"), "90200 42601"},
+            {handled("ALTER STAGE hc680s SET TAG nosuch_tag680 = 'x'"), "2003 02000"},
+        });
+    }
+
+    /** A block that runs the statement and answers the code and the state its handler reads. */
+    private static String handled(final String statement) {
+        return "EXECUTE IMMEDIATE $$BEGIN " + statement + "; RETURN 'none'; EXCEPTION WHEN OTHER THEN RETURN "
+            + "SQLCODE || ' ' || SQLSTATE; END$$";
+    }
 }

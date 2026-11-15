@@ -51,6 +51,9 @@ import org.slf4j.LoggerFactory;
  *   SET URL | CREDENTIALS | ENCRYPTION on an internal stage
  *                               Cannot set URL, credentials, or encryption key of an internal or temporary stage.
  *   SET DIRECTORY = ( … )       see {@link StageDirectoryOptions}
+ *   SET TAG t1 = 'v' [, …]      sets the tags, judged whole first: a missing tag or a value the tag does not allow
+ *                               leaves every tag as it was (see AlteredTags)
+ *   UNSET TAG t1 [, …]          takes the tags off, each of which has to exist
  *   UNSET …                     Unsupported feature 'UNSET'.
  *   REFRESH [SUBPATH = '…']     registers the stage's files in its directory table and answers what changed;
  *                               see {@link StageDirectoryRefresh}
@@ -104,6 +107,16 @@ final class AlterStageHandler {
         }
         if (action.REFRESH() != null) {
             return refresh(stage, stageName, action);
+        }
+        if (action.tagSet() != null) {
+            new AlteredTags(queryExecutor, visitor).set(stage, action.tagSet());
+            altered = stage;
+            return null;
+        }
+        if (action.tagUnset() != null) {
+            new AlteredTags(queryExecutor, visitor).unset(stage, action.tagUnset());
+            altered = stage;
+            return null;
         }
         if (action.UNSET() != null) {
             // Live's own refusal — UNSET simply is not a stage action there.

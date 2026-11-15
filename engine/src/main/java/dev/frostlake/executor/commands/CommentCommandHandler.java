@@ -117,8 +117,10 @@ public class CommentCommandHandler implements CommandHandler {
                 // Refused whatever the name, before it is looked up (live-verified).
                 throw new RuntimeException("Unsupported feature 'SECRET'.");
             } else if (ctx.DATABASE() != null) {
-                // COMMENT ON DATABASE
-                final String dbName = visitor.getText(ctx.identifier());
+                // COMMENT ON DATABASE; a name of several parts is refused whatever IF EXISTS says (see
+                // DatabaseNames).
+                final String dbName = DatabaseNames.of(
+                    queryExecutor.resolveObjectNameParts(ctx.containerName().objectName()), catalog);
                 final Database db;
                 try {
                     db = catalog.getDatabase(dbName);

@@ -19,10 +19,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Which name a refusal gives an object that is not there. A stream's source table, a clone's source and the
- * table of a RENAME COLUMN are named as written when written bare; a DESCRIBE of a pipe, a file format, a
- * masking policy or a row access policy by the full path, and of a stream as written; SHOW COLUMNS IN SCHEMA
- * refuses a missing database before its schema; a DROP names the kind it was asked for - an Iceberg table, an
- * event table. Every answer is live-verified.
+ * table of a RENAME COLUMN or a RENAME CONSTRAINT are named as written when written bare; a DESCRIBE of a pipe, a
+ * file format, a masking policy or a row access policy by the full path, and of a stream as written; SHOW COLUMNS
+ * IN SCHEMA refuses a missing database before its schema; a DROP names the kind it was asked for - an Iceberg
+ * table, an event table. Every answer is live-verified.
  */
 public class MissingObjectNameSpellingTest extends MeasuredCellsTestSupport {
 
@@ -67,6 +67,15 @@ public class MissingObjectNameSpellingTest extends MeasuredCellsTestSupport {
             "REFUSED SQL compilation error: | Table 'NOSUCH_T' does not exist or not authorized. Your primary "
                 + "role <ROLE> must have at least one privilege granted on TABLE NOSUCH_T.",
             "ALTER TABLE nosuch_t RENAME COLUMN a TO b");
+        assertAnswer(
+            "REFUSED SQL compilation error: | Table 'NOSUCH_T' does not exist or not authorized. Your primary "
+                + "role <ROLE> must have at least one privilege granted on TABLE NOSUCH_T.",
+            "ALTER TABLE nosuch_t RENAME CONSTRAINT nosuch_c TO c2");
+        assertAnswer(
+            "REFUSED SQL compilation error: | Table 'TEST_DB.TEST_SCHEMA.NOSUCH_T' does not exist or not "
+                + "authorized. Your primary role <ROLE> must have at least one privilege granted on TABLE "
+                + "TEST_DB.TEST_SCHEMA.NOSUCH_T.",
+            "ALTER TABLE nosuch_t DROP CONSTRAINT nosuch_c");
         assertAnswer(
             "REFUSED SQL compilation error: | Table 'TEST_DB.TEST_SCHEMA.NOSUCH_T' does not exist or not "
                 + "authorized. Your primary role <ROLE> must have at least one privilege granted on TABLE "

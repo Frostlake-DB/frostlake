@@ -2334,6 +2334,13 @@ public class SyntaxErrorListener extends BaseErrorListener {
             if (structured != null) {
                 return structured;
             }
+            // ★ A STAGE'S TAG ACTION THAT DOES NOT READ WHOLE is read as properties are, TAG their first — see
+            // StageTagLines.
+            final List<String> stageTags = offendingIndexes.isEmpty() ? null
+                : StageTagLines.lines(sql, opening, offendingIndexes.get(0).intValue(), firstOnly);
+            if (stageTags != null) {
+                return stageTags;
+            }
         }
         final String leading = leadingIdentifierRefusal();
         if (leading != null) {
@@ -4308,7 +4315,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
                 break;
             }
         }
-        if (at < 0 || !isIdentifierToken(all.get(at))) {
+        if (at < 0 || !isIdentifierToken(all.get(at)) || UnknownTypeWords.isEscapeWord(all.get(at).getText())) {
             return null;
         }
         // The written name may be a dotted chain; live keeps only its LAST part.
@@ -4464,6 +4471,21 @@ public class SyntaxErrorListener extends BaseErrorListener {
      * @param candidate a text
      * @return its tree, or null
      */
+    /**
+     * The tree a quiet parse of {@code candidate} builds, faults or none: a tree that is the clean parse's up to its
+     * first fault.
+     *
+     * @param candidate the text to parse
+     * @return the tree
+     */
+    static FrostlakeParser.SqlScriptContext anyParse(final String candidate) {
+        final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(candidate));
+        lexer.removeErrorListeners();
+        final FrostlakeParser parser = new FrostlakeParser(new CommonTokenStream(lexer));
+        parser.removeErrorListeners();
+        return parser.sqlScript();
+    }
+
     public static FrostlakeParser.SqlScriptContext cleanParse(final String candidate) {
         final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(candidate));
         lexer.removeErrorListeners();

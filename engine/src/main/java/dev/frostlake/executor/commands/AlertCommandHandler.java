@@ -84,7 +84,7 @@ public final class AlertCommandHandler {
 
     /** CREATE [OR REPLACE | OR ALTER] ALERT [IF NOT EXISTS] name … */
     public Object create(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
-        final String[] parts = ParseTreeText.qualifiedNameParts(ctx.qualifiedName(0));
+        final String[] parts = queryExecutor.createdNameParts(ctx);
         final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
         schema.requireCreatable(Privilege.CREATE_ALERT);
         final String name = parts[parts.length - 1];
@@ -124,7 +124,7 @@ public final class AlertCommandHandler {
         }
         final Alert alert;
         if (definition.CLONE() != null) {
-            final String[] sourceParts = ParseTreeText.qualifiedNameParts(definition.qualifiedName());
+            final String[] sourceParts = queryExecutor.resolveObjectNameParts(definition.sourceObjectName().objectName());
             final Schema sourceSchema = catalog.requireOwningSchema(QualifiedName.of(sourceParts));
             alert = sourceSchema.getAlertExact(sourceParts[sourceParts.length - 1]).copy(name);
         } else {

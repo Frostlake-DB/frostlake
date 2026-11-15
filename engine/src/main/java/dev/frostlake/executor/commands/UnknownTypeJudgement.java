@@ -36,7 +36,8 @@ import java.util.List;
  * {@code CREATE TABLE t (n nosuch, v VARCHAR(0))} is refused for the length. An Iceberg table's column list is
  * read column by column instead, the word and every earlier column's own refusal in the order written:
  * {@code (v VARCHAR(10), n nosuch)} is refused for the length the format does not take, {@code (n nosuch, v
- * VARCHAR(10))} for the word (live-verified).
+ * VARCHAR(10))} for the word (live-verified). An external function refuses a word written bare in a sentence of its
+ * own (see {@link #externalFunctionRefusal}).
  */
 public final class UnknownTypeJudgement {
 
@@ -74,7 +75,45 @@ public final class UnknownTypeJudgement {
                 || ahead.getMessage() != null && ahead.getMessage().startsWith("SQL Compilation error:")
                 ? ahead : refused;
         }
-        return refused;
+        final RuntimeException external = externalFunctionRefusal(tree, reading);
+        return external != null ? external : refused;
+    }
+
+    /**
+     * The refusal of an external function's word that names no type, written bare: an argument's first, {@code
+     * External functions may not have datatype 'B' as arguments}, then the return type's, {@code ... as its return
+     * type}, one line under the compilation-error prefix, the word named as any type's refusal names it. A word written
+     * with parameters anywhere in the statement is refused as it is elsewhere (all live-verified).
+     *
+     * @return the refusal, or null when the statement is no external function or its word is written with parameters
+     */
+    private static RuntimeException externalFunctionRefusal(final ParseTree tree, final UnknownTypeReading reading) {
+        if (reading.refused().isParameterized()) {
+            return null;
+        }
+        final List<FrostlakeParser.CreateStatementContext> creates = new ArrayList<>();
+        collect(tree, FrostlakeParser.CreateStatementContext.class, creates, true);
+        if (creates.size() != 1 || creates.get(0).EXTERNAL() == null || creates.get(0).FUNCTION() == null) {
+            return null;
+        }
+        final FrostlakeParser.CreateStatementContext create = creates.get(0);
+        if (create.parameterList() != null) {
+            for (final FrostlakeParser.ParameterDefContext parameter : create.parameterList().parameterDef()) {
+                final UnknownTypeWord word = parameter.dataTypeName() == null ? null : wordIn(reading,
+                    parameter.dataTypeName().getStart().getStartIndex(),
+                    parameter.dataTypeName().getStop().getStopIndex());
+                if (word != null) {
+                    return new RuntimeException(SqlCompilationError.inline("External functions may not have datatype '"
+                        + word.spelledName() + "' as arguments"));
+                }
+            }
+        }
+        final FrostlakeParser.DataTypeNameContext returned = create.returnType() == null ? null
+            : create.returnType().dataTypeName();
+        final UnknownTypeWord word = returned == null ? null
+            : wordIn(reading, returned.getStart().getStartIndex(), returned.getStop().getStopIndex());
+        return word == null ? null : new RuntimeException(SqlCompilationError.inline(
+            "External functions may not have datatype '" + word.spelledName() + "' as its return type"));
     }
 
     /**
