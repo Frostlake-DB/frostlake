@@ -166,6 +166,8 @@ enum ShowListing {
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     SEMANTIC_VIEWS("SEMANTIC VIEW", "SEMANTIC_VIEWS", ShowTailGrammar.FULL, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    DBT_PROJECTS("DBT PROJECT", "DBT_PROJECTS", ShowTailGrammar.FULL, false,
+        ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     /** The session and the authentication policies read no WITH PRIVILEGES. */
     SESSION_POLICIES("SESSION POLICY", null, ShowTailGrammar.NO_PRIVILEGES, false,
         ShowScopeAnswer.MISSING_APPLICATION, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
@@ -309,6 +311,7 @@ enum ShowListing {
             case SNAPSHOTS:
             case GIT_REPOSITORIES:
             case SEMANTIC_VIEWS:
+            case DBT_PROJECTS:
             case AUTHENTICATION_POLICIES:
             case PACKAGES_POLICIES:
             case EXTERNAL_FUNCTIONS:
@@ -510,6 +513,9 @@ enum ShowListing {
         }
         if (kind.SNAPSHOTS() != null) {
             return SNAPSHOTS;
+        }
+        if (kind.DBT() != null) {
+            return DBT_PROJECTS;
         }
         return kind.REPOSITORIES() != null ? GIT_REPOSITORIES : SEMANTIC_VIEWS;
     }

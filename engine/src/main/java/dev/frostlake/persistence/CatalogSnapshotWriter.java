@@ -416,6 +416,9 @@ final class CatalogSnapshotWriter {
             viewSnapshot.aggregationEntityKey = view.hasAggregationPolicy()
                 ? new ArrayList<>(view.getAggregationEntityKey()) : null;
             viewSnapshot.joinPolicyName = view.getJoinPolicyName();
+            viewSnapshot.privacyPolicyName = view.getPrivacyPolicyName();
+            viewSnapshot.privacyEntityKey = view.hasPrivacyPolicy()
+                ? new ArrayList<>(view.getPrivacyEntityKey()) : null;
             viewSnapshot.contacts = view.getContacts().isEmpty() ? null : view.getContacts();
             viewSnapshot.dataMetrics = DataMetricSnapshots.of(view.dataMetricAttachments());
             viewSnapshot.dataMetricSchedule = view.dataMetricAttachments().getSchedule();

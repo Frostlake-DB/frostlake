@@ -218,4 +218,62 @@ public class StorageLifecyclePolicyTest extends MeasuredCellsTestSupport {
         assertAnswer("KT958D successfully dropped.", "DROP TABLE kt958d");
         assertAnswer("SL958 successfully dropped.", "DROP STORAGE LIFECYCLE POLICY sl958");
     }
+
+    @Test
+    public void tagsAreSetAtCreationAndReadByTheirDomain() {
+        engine.execute("CREATE OR REPLACE TAG tg958");
+        assertAnswer("Storage lifecycle policy 'SL957' created successfully.",
+            "CREATE OR REPLACE STORAGE LIFECYCLE POLICY sl957 AS (a INT) RETURNS BOOLEAN -> a > 0 "
+                + "WITH TAG (tg958 = 'v')");
+        assertAnswer("Storage lifecycle policy 'SL957B' created successfully.",
+            "CREATE OR REPLACE STORAGE LIFECYCLE POLICY sl957b AS (a INT) RETURNS BOOLEAN -> a > 0 TAG (tg958 = 'v2')");
+        assertAnswer("Storage lifecycle policy 'SL957C' created successfully.",
+            "CREATE OR REPLACE STORAGE LIFECYCLE POLICY sl957c AS (a INT) RETURNS BOOLEAN -> a > 0 ARCHIVE_TIER = COOL "
+                + "ARCHIVE_FOR_DAYS = 100 COMMENT = 'c' WITH TAG (tg958 = 'v3')");
+        assertAnswer("REFUSED SQL compilation error: | Tag 'NOSUCH_TAG958' does not exist or not authorized. Your "
+            + "primary role <ROLE> must have at least one privilege granted on TAG NOSUCH_TAG958.",
+            "CREATE OR REPLACE STORAGE LIFECYCLE POLICY sl957d AS (a INT) RETURNS BOOLEAN -> a > 0 "
+                + "WITH TAG (nosuch_tag958 = 'v')");
+        assertAnswer("v", "SELECT SYSTEM$GET_TAG('tg958', 'sl957', 'STORAGE LIFECYCLE POLICY')");
+        assertAnswer("v3", "SELECT SYSTEM$GET_TAG('tg958', 'sl957c', 'storage_lifecycle_policy')");
+        assertDescribed("SL957C|(A NUMBER)|BOOLEAN|a > 0|100|COOL", "sl957c");
+        assertShape("name:VARCHAR(16777216), signature:VARCHAR(16777216), return_type:VARCHAR(16777216), "
+            + "body:VARCHAR(16777216), archive_for_days:NUMBER(9,0), archive_tier:VARCHAR(16777216)",
+            "DESCRIBE STORAGE LIFECYCLE POLICY sl957c");
+    }
+
+    @Test
+    public void historyListsThePoliciesThere() {
+        engine.execute(SL);
+        engine.execute("SHOW STORAGE LIFECYCLE POLICIES HISTORY");
+        assertAnswer("SL959|TEST_DB|TEST_SCHEMA|STORAGE_LIFECYCLE_POLICY||ROLE|{\"ARCHIVE_FOR_DAYS\":null,"
+            + "\"ARCHIVE_TIER\":\"NULL\"}", LISTED);
+        engine.execute("SHOW STORAGE LIFECYCLE POLICIES HISTORY LIKE 'SL%'");
+        assertAnswer("SL959|TEST_DB|TEST_SCHEMA|STORAGE_LIFECYCLE_POLICY||ROLE|{\"ARCHIVE_FOR_DAYS\":null,"
+            + "\"ARCHIVE_TIER\":\"NULL\"}", LISTED);
+    }
+
+    @Test
+    public void aNamePolicyOfTheOtherKindHoldsIsRefusedAsThatKind() {
+        engine.execute(SL);
+        engine.execute("CREATE OR REPLACE PRIVACY POLICY pv958 AS () RETURNS PRIVACY_BUDGET -> NO_PRIVACY_POLICY()");
+        final String privacyFound = "REFUSED SQL compilation error: Object found is of type 'PRIVACY_POLICY', not "
+            + "specified type 'STORAGE_LIFECYCLE_POLICY'.";
+        final String storageFound = "REFUSED SQL compilation error: Object found is of type "
+            + "'STORAGE_LIFECYCLE_POLICY', not specified type 'PRIVACY_POLICY'.";
+        assertAnswer(privacyFound, "ALTER STORAGE LIFECYCLE POLICY pv958 SET COMMENT = 'x'");
+        assertAnswer(storageFound, "ALTER PRIVACY POLICY sl959 SET COMMENT = 'x'");
+        assertAnswer(privacyFound, "DROP STORAGE LIFECYCLE POLICY IF EXISTS pv958");
+        assertAnswer(storageFound, "DROP PRIVACY POLICY IF EXISTS sl959");
+        assertAnswer(privacyFound, "DROP STORAGE LIFECYCLE POLICY pv958");
+        assertAnswer(privacyFound, "DESCRIBE STORAGE LIFECYCLE POLICY pv958");
+        assertAnswer(storageFound, "DESCRIBE PRIVACY POLICY sl959");
+        // A view takes no storage lifecycle policy, refused at its first word alone.
+        engine.execute("CREATE OR REPLACE TABLE kt957 (a INT, b INT)");
+        engine.execute("CREATE OR REPLACE VIEW kv957 AS SELECT a, b FROM kt957");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 21 unexpected 'STORAGE'.",
+            "ALTER VIEW kv957 ADD STORAGE LIFECYCLE POLICY sl959 ON (b)");
+        assertAnswer("PV958 successfully dropped.", "DROP PRIVACY POLICY pv958");
+        assertAnswer("SL959 successfully dropped.", "DROP STORAGE LIFECYCLE POLICY sl959");
+    }
 }

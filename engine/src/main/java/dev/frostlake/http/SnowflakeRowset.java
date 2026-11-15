@@ -18,6 +18,7 @@ package dev.frostlake.http;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
+import dev.frostlake.storage.Row;
 import dev.frostlake.types.ArrayType;
 import dev.frostlake.types.BinaryType;
 import dev.frostlake.types.BooleanType;
@@ -84,6 +85,47 @@ final class SnowflakeRowset {
      */
     static void write(final ResultSet rs, final ObjectNode data) {
         write(rs, data, false);
+    }
+
+    /**
+     * Writes a DML statement's {@code stats}: the rows it inserted, deleted and updated, read off its count columns,
+     * with no duplicates counted; none where nothing changed, as the account answers (live-verified).
+     *
+     * @param rs   the statement's result
+     * @param data the answer's {@code data}
+     */
+    static void writeStats(final ResultSet rs, final ObjectNode data) {
+        if (rs.getRows().isEmpty()) {
+            return;
+        }
+        long inserted = 0;
+        long deleted = 0;
+        long updated = 0;
+        final List<ResultSetColumn> columns = rs.getColumns();
+        final Row counts = rs.getRows().get(0);
+        for (int i = 0; i < columns.size(); i++) {
+            final Object value = counts.getValue(i);
+            if (!(value instanceof Number)) {
+                continue;
+            }
+            final String name = columns.get(i).getName().toLowerCase(Locale.ROOT);
+            final long count = ((Number) value).longValue();
+            if (name.startsWith("number of rows inserted")) {
+                inserted += count;
+            } else if ("number of rows deleted".equals(name)) {
+                deleted += count;
+            } else if ("number of rows updated".equals(name)) {
+                updated += count;
+            }
+        }
+        if (inserted == 0 && deleted == 0 && updated == 0) {
+            return;
+        }
+        final ObjectNode stats = data.putObject("stats");
+        stats.put("numRowsInserted", inserted);
+        stats.put("numRowsDeleted", deleted);
+        stats.put("numRowsUpdated", updated);
+        stats.put("numDmlDuplicates", 0);
     }
 
     /**

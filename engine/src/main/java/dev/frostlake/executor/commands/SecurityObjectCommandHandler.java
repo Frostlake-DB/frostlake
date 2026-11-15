@@ -1015,6 +1015,34 @@ public final class SecurityObjectCommandHandler {
         }
     }
 
+    /**
+     * COMMENT ON a schema's security object, answered as its ALTER … SET COMMENT is: a policy of another kind holding
+     * the name is refused as that kind, and a missing object unless IF EXISTS forgives it.
+     *
+     * @param kind     the object's kind, one a schema holds
+     * @param name     the object's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing object
+     */
+    public void comment(final SecurityObjectKind kind, final FrostlakeParser.QualifiedNameContext name,
+                        final String comment, final boolean ifExists) {
+        final Schema schema = owningSchema(name);
+        final String objectName = lastPart(name);
+        final SecurityObject target = schema.getSecurityObjects().get(kind, objectName);
+        if (target == null) {
+            final String otherPolicy = sharesPolicyNames(kind) ? schema.policyKindHolding(objectName) : null;
+            if (otherPolicy != null) {
+                throw new RuntimeException(SqlCompilationError.objectOfOtherType(otherPolicy, kind.name()));
+            }
+            if (ifExists) {
+                return;
+            }
+            throw missing(kind, schema, objectName);
+        }
+        target.setProperty("COMMENT", comment);
+        target.setComment(comment);
+    }
+
     private Object alter(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObjectKind kind) {
         final Schema schema = kind.isSchemaObject() ? owningSchema(ctx.qualifiedName(0)) : null;
         final String name = kind.isSchemaObject() ? lastPart(ctx.qualifiedName(0))

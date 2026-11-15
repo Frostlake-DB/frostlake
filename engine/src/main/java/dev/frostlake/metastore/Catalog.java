@@ -2111,8 +2111,8 @@ public class Catalog {
     }
 
     /**
-     * True when a privacy policy (or, with {@code storage}, a storage lifecycle policy) is attached to a table: live
-     * refuses to drop or replace one then.
+     * True when a privacy policy (or, with {@code storage}, a storage lifecycle policy) is attached to a table, or a
+     * privacy policy to a view: live refuses to drop or replace one then.
      *
      * @param home       the policy's schema
      * @param policyName the policy's own name
@@ -2127,6 +2127,13 @@ public class Catalog {
                     if (holds(storage ? table.getStorageLifecyclePolicyName() : table.getPrivacyPolicyName(),
                             schema, home, policyName)) {
                         return true;
+                    }
+                }
+                if (!storage) {
+                    for (final View view : schema.getViews()) {
+                        if (holds(view.getPrivacyPolicyName(), schema, home, policyName)) {
+                            return true;
+                        }
                     }
                 }
             }

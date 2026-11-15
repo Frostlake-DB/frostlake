@@ -238,6 +238,9 @@ public class DDLCommandHandler implements CommandHandler {
             if (ctx.ALERT() != null) {
                 return new AlertCommandHandler(queryExecutor).create(ctx, ifNotExists);
             }
+            if (ctx.DBT() != null) {
+                return new DbtProjects(catalog, queryExecutor).create(ctx);
+            }
             if (ctx.DATABASE() != null) {
                 return namespaceHandler.handleCreateDatabase(ctx, ifNotExists);
             } else if (ctx.SCHEMA() != null && ctx.STREAM() == null) {

@@ -368,7 +368,8 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         } catch (final RuntimeException refused) {
             return refusal(refused.getMessage(), null);
         }
-        final List<Long> types = SnowflakeStatementTypes.of(sql);
+        final List<Boolean> queries = new ArrayList<>();
+        final List<Long> types = SnowflakeStatementTypes.of(sql, queries);
         final ExecutionResult result;
         final Integer displacedCount = DynamicStatementCount.beginRequest(desired, actual);
         final StatementCancellation token = new StatementCancellation(0);
@@ -389,7 +390,7 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         session.followStatementCount(sql);
         engine.bindJsonIndent(session);
         try {
-            return answer(session, capped(result, rowsAtMost(body.path("parameters"))), types, written);
+            return answer(session, capped(result, rowsAtMost(body.path("parameters"))), types, queries, written);
         } finally {
             VariantJsonFormat.clearSessionScope();
         }
@@ -438,10 +439,12 @@ final class SnowflakeProtocolHandler implements HttpHandler {
     /**
      * A successful run's answer: its one result, or for several - a text of several statements, or one EXECUTE
      * IMMEDIATE of several, which hands back each statement's answer - the ids of each result. Each result is typed
-     * as its statement reads (see {@link SnowflakeStatementTypes#answered}).
+     * as its statement reads (see {@link SnowflakeStatementTypes#answered}); only a query's rows go back as Arrow, and
+     * each result of several goes back as JSON, a query's too (live-verified). A DML statement's answer carries its
+     * counts beside its rows (see {@link SnowflakeRowset#writeStats}).
      */
     private ObjectNode answer(final SessionContext session, final ExecutionResult result, final List<Long> types,
-                              final String written) {
+                              final List<Boolean> queries, final String written) {
         final List<ResultSet> results = result.getResultSets() == null ? new ArrayList<ResultSet>()
             : result.getResultSets();
         final String queryId = result.getQueryId() == null ? UUID.randomUUID().toString() : result.getQueryId();
@@ -453,7 +456,12 @@ final class SnowflakeProtocolHandler implements HttpHandler {
                 data.put("total", 0);
                 data.put("returned", 0);
             } else {
-                SnowflakeRowset.write(results.get(0), data, arrow(session));
+                final long type = SnowflakeStatementTypes.answered(types.get(0).longValue(), results.get(0));
+                SnowflakeRowset.write(results.get(0), data, arrow(session)
+                    && SnowflakeStatementTypes.answersInArrow(type, queries.get(0).booleanValue(), results.get(0)));
+                if (SnowflakeStatementTypes.isDml(type)) {
+                    SnowflakeRowset.writeStats(results.get(0), data);
+                }
             }
             describe(data, session, queryId, SnowflakeStatementTypes.answered(types.get(0).longValue(),
                 results.isEmpty() ? null : results.get(0)), written);
@@ -466,9 +474,12 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         for (int i = 0; i < results.size(); i++) {
             final String id = UUID.randomUUID().toString();
             final ObjectNode data = JsonNodeFactory.instance.objectNode();
-            SnowflakeRowset.write(results.get(i), data, arrow(session));
+            SnowflakeRowset.write(results.get(i), data, false);
             final long type = SnowflakeStatementTypes.answered(eachStatements ? types.get(i).longValue()
                 : SnowflakeStatementTypes.SELECT, results.get(i));
+            if (SnowflakeStatementTypes.isDml(type)) {
+                SnowflakeRowset.writeStats(results.get(i), data);
+            }
             describe(data, session, id, type, written);
             keptResults.put(id, success(data));
             ids.add(id);

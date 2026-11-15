@@ -69,22 +69,79 @@ final class SnowflakeStatementTypes {
      * @return the ids
      */
     static List<Long> of(final String sql) {
+        return of(sql, new ArrayList<Boolean>());
+    }
+
+    /**
+     * {@link #of(String)}, filling {@code queries} beside the ids with whether each statement's rows are a query's:
+     * every statement but a CALL, an EXPLAIN and a block (see {@link #answersInArrow}).
+     *
+     * @param sql     the text
+     * @param queries filled, one flag for each id
+     * @return the ids
+     */
+    static List<Long> of(final String sql, final List<Boolean> queries) {
         final List<Long> types = new ArrayList<>();
+        queries.clear();
         try {
             final FrostlakeParser.SqlScriptContext script = QueryExecutor.parsedScriptQuietly(sql);
             for (final FrostlakeParser.FlowChainContext chain : script.flowChain()) {
                 final List<FrostlakeParser.StatementContext> stages = chain.statement();
                 if (!stages.isEmpty()) {
-                    types.add(Long.valueOf(typeOf(stages.get(stages.size() - 1))));
+                    final FrostlakeParser.StatementContext last = stages.get(stages.size() - 1);
+                    types.add(Long.valueOf(typeOf(last)));
+                    queries.add(Boolean.valueOf(readsAsQuery(last)));
                 }
             }
         } catch (final RuntimeException unparsed) {
             types.clear();
+            queries.clear();
         }
         if (types.isEmpty()) {
             types.add(Long.valueOf(SELECT));
+            queries.add(Boolean.TRUE);
         }
         return types;
+    }
+
+    /**
+     * Whether a result goes back as Arrow where the session takes Arrow results. The account sends a query's rows that
+     * way - a SELECT, a RESULT_SCAN, an EXECUTE IMMEDIATE of a query - and every other answer as JSON: a status, a DML
+     * statement's counts, a listing, a description, a plan, and the answer of a CALL or a block (live-verified).
+     *
+     * @param type   the type id the result is answered with
+     * @param query  whether the statement's rows are a query's (see {@link #of(String, List)})
+     * @param result the result
+     * @return whether it goes back as Arrow
+     */
+    static boolean answersInArrow(final long type, final boolean query, final ResultSet result) {
+        return type == SELECT && query && (result == null || !result.isScriptingAnswer());
+    }
+
+    /**
+     * Whether a type id is a DML statement's, whose answer carries its counts (see SnowflakeRowset#writeStats).
+     *
+     * @param type the type id
+     * @return whether it is INSERT, UPDATE, DELETE, MERGE or a multi-table INSERT
+     */
+    static boolean isDml(final long type) {
+        return type == INSERT || type == UPDATE || type == DELETE || type == MERGE || type == MULTI_INSERT;
+    }
+
+    /**
+     * Whether a statement's rows are a query's: every statement but a CALL, an EXPLAIN and a block. An EXECUTE
+     * IMMEDIATE is a query's when its text is one; a block it runs answers as a block's (see {@link #answersInArrow}).
+     */
+    private static boolean readsAsQuery(final FrostlakeParser.StatementContext statement) {
+        final ParseTree kind = statement.getChildCount() == 0 ? null : statement.getChild(0);
+        if (kind instanceof FrostlakeParser.ProceduralStatementContext) {
+            return ((FrostlakeParser.ProceduralStatementContext) kind).executeImmediateStatement() != null;
+        }
+        if (kind instanceof FrostlakeParser.ExplainStatementContext) {
+            return false;
+        }
+        final List<Integer> words = leadingWords(statement, 1);
+        return words.isEmpty() || words.get(0).intValue() != FrostlakeParser.CALL;
     }
 
     /**

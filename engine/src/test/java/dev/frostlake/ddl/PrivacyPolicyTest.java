@@ -176,4 +176,39 @@ public class PrivacyPolicyTest extends MeasuredCellsTestSupport {
         assertAnswer("PV959 successfully dropped.", "DROP PRIVACY POLICY pv959");
         assertAnswer("SL959 successfully dropped.", "DROP STORAGE LIFECYCLE POLICY sl959");
     }
+
+    @Test
+    public void theBodysNamesAreCompiledAtCreation() {
+        assertAnswer("REFUSED SQL compilation error: error line 1 at position 1 | invalid identifier 'SOME_COLUMN'",
+            "CREATE OR REPLACE PRIVACY POLICY pv955 AS () RETURNS PRIVACY_BUDGET -> some_column");
+        assertAnswer("REFUSED SQL compilation error: error line 1 at position 1 | invalid identifier 'SOME_COLUMN'",
+            "CREATE OR REPLACE PRIVACY POLICY pv955 AS () RETURNS PRIVACY_BUDGET ->   some_column");
+        assertAnswer("REFUSED SQL compilation error: error line 1 at position 31 | invalid identifier 'NOSUCH_COL'",
+            "CREATE OR REPLACE PRIVACY POLICY pv955 AS () RETURNS PRIVACY_BUDGET -> "
+                + "PRIVACY_BUDGET(BUDGET_NAME => nosuch_col)");
+        assertAnswer("REFUSED Declared return type 'SYSTEM$PRIVACY_BUDGET' is incompatible with actual return type "
+            + "'VARCHAR(3)'", "CREATE OR REPLACE PRIVACY POLICY pv955 AS () RETURNS PRIVACY_BUDGET -> UPPER('x')");
+        assertAnswer("Privacy policy 'PV955' successfully created.",
+            "CREATE OR REPLACE PRIVACY POLICY pv955 AS () RETURNS PRIVACY_BUDGET -> "
+                + "PRIVACY_BUDGET(BUDGET_NAME => 'b')");
+        assertAnswer("PV955 successfully dropped.", "DROP PRIVACY POLICY pv955");
+    }
+
+    @Test
+    public void aViewHoldsAPolicyWithItsEntityKey() {
+        engine.execute("CREATE OR REPLACE TABLE kt954 (a INT, b VARCHAR)");
+        engine.execute("CREATE OR REPLACE VIEW kv954 AS SELECT a, b FROM kt954");
+        engine.execute("CREATE OR REPLACE PRIVACY POLICY pv954 AS () RETURNS PRIVACY_BUDGET -> NO_PRIVACY_POLICY()");
+        assertAnswer("Statement executed successfully.", "ALTER VIEW kv954 ADD PRIVACY POLICY pv954 ENTITY KEY (b)");
+        assertAnswer("PV954|PRIVACY_POLICY|KV954|VIEW|[ \"B\" ]", "SELECT POLICY_NAME, POLICY_KIND, "
+            + "REF_ENTITY_NAME, REF_ENTITY_DOMAIN, REF_ARG_COLUMN_NAMES FROM TABLE("
+            + "INFORMATION_SCHEMA.POLICY_REFERENCES(REF_ENTITY_NAME => 'TEST_DB.TEST_SCHEMA.KV954', "
+            + "REF_ENTITY_DOMAIN => 'VIEW'))");
+        assertAnswer("Statement executed successfully.", "ALTER VIEW kv954 DROP PRIVACY POLICY pv954");
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 41 unexpected '<EOF>'.",
+            "ALTER VIEW kv954 ADD PRIVACY POLICY pv954");
+        assertAnswer("REFUSED SQL compilation error: error line 1 at position 54 | invalid identifier 'NOSUCH'",
+            "ALTER VIEW kv954 ADD PRIVACY POLICY pv954 ENTITY KEY (nosuch)");
+        assertAnswer("PV954 successfully dropped.", "DROP PRIVACY POLICY pv954");
+    }
 }

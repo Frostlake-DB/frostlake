@@ -56,6 +56,9 @@ public class View extends SqlObject implements SessionScoped, ContactHolder {
     private List<String> aggregationEntityKey = new ArrayList<>();
     /** The join policy the view is read under, by its qualified name; or null. */
     private String joinPolicyName;
+    /** The privacy policy the view is read under, by its qualified name, with its ENTITY KEY; or null. */
+    private String privacyPolicyName;
+    private List<String> privacyEntityKey = new ArrayList<>();
     /** The DATA METRIC FUNCTIONS attached to the view and their DATA_METRIC_SCHEDULE, as a table's are. */
     private final DataMetricAttachments dataMetrics = new DataMetricAttachments();
     /** The contacts attached to the view, by purpose, each by its full name. */
@@ -224,6 +227,14 @@ public class View extends SqlObject implements SessionScoped, ContactHolder {
     public void setJoinPolicyName(final String name) { this.joinPolicyName = name; }
     public boolean hasJoinPolicy() { return joinPolicyName != null && !joinPolicyName.isEmpty(); }
 
+    public String getPrivacyPolicyName() { return privacyPolicyName; }
+    public void setPrivacyPolicyName(final String name) { this.privacyPolicyName = name; }
+    public List<String> getPrivacyEntityKey() { return privacyEntityKey; }
+    public void setPrivacyEntityKey(final List<String> key) {
+        this.privacyEntityKey = key == null ? new ArrayList<String>() : new ArrayList<>(key);
+    }
+    public boolean hasPrivacyPolicy() { return privacyPolicyName != null && !privacyPolicyName.isEmpty(); }
+
     /** The data metric functions attached to this view and their schedule. */
     public DataMetricAttachments dataMetricAttachments() { return dataMetrics; }
 
@@ -274,6 +285,8 @@ public class View extends SqlObject implements SessionScoped, ContactHolder {
         clone.aggregationPolicyName = aggregationPolicyName;
         clone.aggregationEntityKey = new ArrayList<>(aggregationEntityKey);
         clone.joinPolicyName = joinPolicyName;
+        clone.privacyPolicyName = privacyPolicyName;
+        clone.privacyEntityKey = new ArrayList<>(privacyEntityKey);
         dataMetrics.copyInto(clone.dataMetrics);
         clone.contacts.putAll(contacts);
         return clone;

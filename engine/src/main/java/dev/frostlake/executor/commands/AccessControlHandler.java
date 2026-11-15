@@ -728,21 +728,25 @@ public final class AccessControlHandler {
             }
             createAccount(ctx, directory, name);
         } else if (first == FrostlakeParser.DROP) {
-            final int grace = Integer.parseInt(ctx.INTEGER_LITERAL().getText());
-            if (grace < MIN_GRACE_DAYS || grace > MAX_GRACE_DAYS) {
-                throw new RuntimeException(SqlCompilationError.of("GRACE_PERIOD_IN_DAYS must be between "
-                    + MIN_GRACE_DAYS + " and " + MAX_GRACE_DAYS + "."));
+            final Integer written = ctx.INTEGER_LITERAL() == null ? null
+                : Integer.valueOf(ctx.INTEGER_LITERAL().getText());
+            if (written != null) {
+                requireGracePeriod(written.intValue());
             }
             if (isCurrentAccount(name)) {
                 throw new RuntimeException(SqlCompilationError.of("Cannot drop the current account."));
             }
             if (existing == null || existing.isDropped()) {
+                // Looked for whether the grace period is written or not (live-verified).
                 if (ctx.if_exists() != null) {
                     ConditionalDdlOutcome.dropSkipped();
                     return null;
                 }
                 throw new RuntimeException(SqlCompilationError.doesNotExist("Account", name));
             }
+            // An account that is there wants its grace period, which the statement left out.
+            final int grace = written == null ? 0 : written.intValue();
+            requireGracePeriod(grace);
             existing.drop(grace);
         } else {
             if (existing == null) {
@@ -759,15 +763,26 @@ public final class AccessControlHandler {
         return null;
     }
 
+    /** Refuses a grace period out of the range a dropped account may be restored within. */
+    private static void requireGracePeriod(final int grace) {
+        if (grace < MIN_GRACE_DAYS || grace > MAX_GRACE_DAYS) {
+            throw new RuntimeException(SqlCompilationError.of("GRACE_PERIOD_IN_DAYS must be between "
+                + MIN_GRACE_DAYS + " and " + MAX_GRACE_DAYS + "."));
+        }
+    }
+
     /** Whether the session acts as its organization's administrator; a session with no security model does. */
     private boolean actsAsOrganizationAdministrator() {
         final SecurityManager security = queryExecutor.getSecurityManager();
         return security == null || security.actsAsOrganizationAdministrator();
     }
 
-    /** The account an UNDROP names: one part, a qualifier being refused in the account's words (live-verified). */
-    private static String undroppedAccount(final FrostlakeParser.AccessControlStatementContext ctx) {
-        final String[] parts = ParseTreeText.qualifiedNameParts(ctx.qualifiedName());
+    /**
+     * The account an UNDROP names, directly or through IDENTIFIER(): one part, a qualifier being refused in the
+     * account's words (live-verified).
+     */
+    private String undroppedAccount(final FrostlakeParser.AccessControlStatementContext ctx) {
+        final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
         if (parts.length > 1) {
             throw new RuntimeException("Cannot specify qualifier for account.");
         }

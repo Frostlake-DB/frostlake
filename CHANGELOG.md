@@ -14,6 +14,14 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Now refused (SQL that earlier versions accepted)
 
+- **A privacy policy's body is compiled when the policy is created** (live-verified): an unknown name is refused in the
+  body's own frame, `CREATE PRIVACY POLICY p AS () RETURNS PRIVACY_BUDGET -> some_column` being `error line 1 at
+  position 1 invalid identifier 'SOME_COLUMN'` and a name inside `PRIVACY_BUDGET(BUDGET_NAME => nosuch_col)` placed
+  where it stands; such a policy was created. A function the engine does not know is still taken, as in the bodies
+  of the other policies.
+- **DROP PRIVACY POLICY IF EXISTS and DROP STORAGE LIFECYCLE POLICY IF EXISTS refuse a name a policy of the other
+  kind holds** (live-verified): `Object found is of type 'STORAGE_LIFECYCLE_POLICY', not specified type
+  'PRIVACY_POLICY'.`, where IF EXISTS forgave it.
 - **A database the role does not see is, to the statements that name it, one that does not exist** (live-verified): to
   a role holding no privilege on `d` and no MANAGE GRANTS, `SHOW TABLES IN DATABASE d` is `Object does not exist, or
   operation cannot be performed.` and `SHOW TASKS IN DATABASE d` is `Database 'D' does not exist or not authorized.
@@ -334,6 +342,35 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Added
 
+- **COMMENT ON reads eighteen more kinds of object, answered as each kind's ALTER ... SET COMMENT** (live-verified):
+  ALERT, NETWORK RULE, STREAMLIT, NOTEBOOK, the AUTHENTICATION, PASSWORD, SESSION, PACKAGES, AGGREGATION, PROJECTION,
+  JOIN and PRIVACY POLICY, IMAGE REPOSITORY, SERVICE, CORTEX SEARCH SERVICE, MODEL, GIT REPOSITORY, SEMANTIC VIEW and
+  DBT PROJECT. A missing object is refused in its kind's sentence, IF EXISTS forgives it, a missing database or schema
+  is refused first, and an object that is there lists the comment in SHOW; with no current database the statement is
+  refused as the ALTER it stands for. ALTER MODEL, ALTER GIT REPOSITORY, ALTER SEMANTIC VIEW and ALTER DBT PROJECT
+  read SET COMMENT and UNSET COMMENT, the object never there to change, and IF EXISTS forgiving that.
+- **A view's column takes a comment** (live-verified): `ALTER VIEW v ALTER COLUMN a COMMENT 'x'`, `... MODIFY b UNSET
+  COMMENT`, COLUMN optional and several in one statement, `ALTER COLUMN a COMMENT 'x', b UNSET COMMENT`; DESCRIBE VIEW
+  shows them, an unknown column is refused as an invalid identifier where it stands, and a missing view is refused
+  even under IF EXISTS.
+- **The account statements' less common forms**: DROP ACCOUNT without GRACE_PERIOD_IN_DAYS looks the account up as
+  the full form does, and IF EXISTS forgives a missing one (live-verified); an account that is there is refused for the
+  grace period it lacks. UNDROP ACCOUNT names its account through IDENTIFIER() too, and `ALTER ACCOUNT a RENAME TO b`
+  refuses a missing account naming the privilege on it (both live-verified) and renames one that is there. SHOW TERSE
+  ACCOUNTS is refused, `Operation not available`, and SHOW ORGANIZATION ACCOUNTS HISTORY lists SHOW ACCOUNTS HISTORY's
+  columns (live-verified).
+- **DBT PROJECT statements** (live-verified): CREATE DBT PROJECT judges where the project's files are read from, in the
+  account's order and words: a FROM is wanted, its text must name a stage, the stage must be there, and a
+  dbt_project.yml must be at the place named; a project that would then be created is an unsupported feature, as dbt
+  never runs here. SHOW [TERSE] DBT PROJECTS lists the account's twenty columns and no row, and EXECUTE DBT PROJECT
+  finds no project.
+- **A storage lifecycle policy takes tags when it is created** (live-verified): `... [WITH] TAG (t = 'v')` after its
+  properties, a missing tag refused before anything is created, and SYSTEM$GET_TAG reads them under the domain
+  `STORAGE LIFECYCLE POLICY` or `storage_lifecycle_policy`. SHOW STORAGE LIFECYCLE POLICIES reads HISTORY, listing the
+  policies there.
+- **A view takes a privacy policy** (live-verified): `ALTER VIEW v ADD PRIVACY POLICY p ENTITY KEY (b)` and `ALTER VIEW
+  v DROP PRIVACY POLICY p`, as a table's, POLICY_REFERENCES listing the view under the domain VIEW; the entity key is
+  required, and a column the view lacks is refused where it stands.
 - **Snowflake's own JDBC driver connects to the HTTP server**: `net.snowflake:snowflake-jdbc` logs in at
   `jdbc:snowflake://127.0.0.1:18082/?account=frostlake&ssl=off`, any account name, user and password taken, and runs
   statements, bound statements and texts of several statements through the endpoints that driver calls: login, query, a
@@ -459,6 +496,22 @@ Changes since 0.4.0 accumulate here as they land.
 
 ### Fixed
 
+- **Snowflake's Python connector reads a DML statement's row count** (live-verified): the driver endpoints send only
+  a query's rows as Arrow, and every other answer as a JSON rowset, as the account does: a status, a DML statement's
+  counts, SHOW, DESCRIBE, EXPLAIN, a CALL's or a block's answer, and each result of a text of several. A DML answer
+  that changed rows carries `stats` beside them. `cursor.rowcount` after INSERT, UPDATE, DELETE, MERGE and
+  `executemany` was `None`, as every answer went as Arrow and the connector counts DML rows off the JSON rowset alone.
+- **ALTER FILE FORMAT ... UNSET is an unsupported feature** (live-verified): `Unsupported feature 'UNSET'.` once the
+  format is there or IF EXISTS forgives its absence, a missing one refused as missing; it was a syntax error.
+- **ALTER of a privacy or storage lifecycle policy under a name the other kind holds is refused as that kind**
+  (live-verified): `Object found is of type 'PRIVACY_POLICY', not specified type 'STORAGE_LIFECYCLE_POLICY'.`, where
+  the policy was missing.
+- **DESCRIBE STORAGE LIFECYCLE POLICY's archive_for_days is a NUMBER(9,0)** (live-verified); it was text.
+- **ALTER VIEW ... ADD STORAGE LIFECYCLE POLICY is refused at STORAGE alone** (live-verified); a second line named the
+  column list.
+- **`ALTER ACCOUNT a SET COMMENT = 'x'` over another account that is not there is refused as the organization's**
+  (live-verified): `Object does not exist, or operation cannot be performed.`, where COMMENT was refused as no property
+  of an account.
 - **AS_DECIMAL and AS_NUMBER read a precision or scale written with a fraction as the call does** (live-verified):
   `AS_DECIMAL(v, 10, 2.0)` and `AS_DECIMAL(v, 10.0, 2.0)` declare NUMBER(10,2), the type of the value they hand back;
   they declared NUMBER(38,0) over a value of two places.

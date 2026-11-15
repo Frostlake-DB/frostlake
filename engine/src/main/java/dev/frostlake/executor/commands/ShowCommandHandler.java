@@ -35,6 +35,7 @@ import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.SystemSchema;
+import dev.frostlake.metastore.model.Account;
 import dev.frostlake.metastore.model.AppObjectKind;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.Privilege;
@@ -833,8 +834,15 @@ public class ShowCommandHandler implements CommandHandler {
             if (!actsAsOrganizationAdministrator()) {
                 throw new PrivilegeRefusal(SqlAccessControlError.organizationListingRefused());
             }
-            return new ResultSet(showExecutor.showAccounts().getColumns(), new ArrayList<Row>());
+            // HISTORY reads SHOW ACCOUNTS HISTORY's columns, with no row either (live-verified).
+            final ResultSet shape = ctx.HISTORY() != null
+                ? showExecutor.showAccounts(true, new ArrayList<Account>(), 0) : showExecutor.showAccounts();
+            return new ResultSet(shape.getColumns(), new ArrayList<Row>());
         } else if (ctx.ACCOUNTS() != null) {
+            if (ctx.TERSE() != null) {
+                // A terse listing of the accounts parses and is refused, as a compilation's fault (live-verified).
+                throw new RuntimeException(SqlCompilationError.of("Operation not available"));
+            }
             if (ctx.showAccountsScope() != null) {
                 // The listing takes no scope: an IN with nothing after it is unfinished, any other is refused whole.
                 if (ctx.showAccountsScope().getChildCount() == 1) {

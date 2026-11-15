@@ -103,7 +103,7 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The domains {@link #rows} reads beside {@link #DOMAINS}: the objects of a schema it finds by kind. */
     private static final Set<String> SCHEMA_OBJECT_DOMAINS = new HashSet<String>(Arrays.asList("PASSWORD POLICY",
-        "SESSION POLICY"));
+        "SESSION POLICY", "STORAGE LIFECYCLE POLICY"));
 
     /** The domains that name one kind of table-like object, refused in favour of TABLE. */
     private static final Set<String> TABLE_LIKE_DOMAINS = new HashSet<String>(Arrays.asList("VIEW", "MATERIALIZED VIEW"));
@@ -118,7 +118,7 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The schema objects a miss names by the full path, however the name was written. */
     private static final Set<String> FULL_PATH_DOMAINS = new HashSet<String>(Arrays.asList("STAGE", "PIPE",
-        "PASSWORD POLICY", "SESSION POLICY", "SERVICE", "IMAGE REPOSITORY"));
+        "PASSWORD POLICY", "SESSION POLICY", "STORAGE LIFECYCLE POLICY", "SERVICE", "IMAGE REPOSITORY"));
 
     /** The schema objects of the container services, whose rows spell the domain with an underscore (live-verified). */
     private static final Set<String> CONTAINER_DOMAINS = new HashSet<String>(Arrays.asList("SERVICE",
@@ -141,7 +141,8 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The objects of a schema this function looks up by kind. */
     private static final Set<String> LOOKED_UP_SCHEMA_OBJECTS = new HashSet<String>(Arrays.asList("ALERT", "STAGE",
-        "STREAM", "TASK", "PIPE", "PASSWORD POLICY", "SESSION POLICY", "SERVICE", "IMAGE REPOSITORY"));
+        "STREAM", "TASK", "PIPE", "PASSWORD POLICY", "SESSION POLICY", "STORAGE LIFECYCLE POLICY", "SERVICE",
+        "IMAGE REPOSITORY"));
 
     /** How many parts a role's name may have before the name itself is refused. */
     private static final int ROLE_QUALIFIER_LIMIT = 4;
@@ -881,6 +882,9 @@ public class TagReferencesFunction extends TableFunction {
             }
             if ("SESSION POLICY".equals(domain)) {
                 return schema.getSecurityObjects().get(SecurityObjectKind.SESSION_POLICY, name);
+            }
+            if ("STORAGE LIFECYCLE POLICY".equals(domain)) {
+                return schema.hasStorageLifecyclePolicy(name) ? schema.getStorageLifecyclePolicy(name) : null;
             }
             if ("SERVICE".equals(domain)) {
                 return schema.getContainerObjects().getService(name);

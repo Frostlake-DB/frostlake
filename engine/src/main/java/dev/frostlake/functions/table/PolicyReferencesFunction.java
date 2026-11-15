@@ -480,6 +480,10 @@ public class PolicyReferencesFunction extends TableFunction {
             listed(byPolicy, attachment(schema, view.getJoinPolicyName(), "JOIN_POLICY", view.getName(), "VIEW",
                 null, null));
         }
+        if (view.hasPrivacyPolicy()) {
+            listed(byPolicy, attachment(schema, view.getPrivacyPolicyName(), "PRIVACY_POLICY", view.getName(),
+                "VIEW", null, view.getPrivacyEntityKey()));
+        }
         for (final List<Row> attachments : byPolicy.values()) {
             rows.addAll(attachments);
         }

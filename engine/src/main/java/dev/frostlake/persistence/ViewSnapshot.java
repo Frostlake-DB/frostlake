@@ -58,6 +58,9 @@ public class ViewSnapshot implements Serializable {
     public String aggregationPolicyName;
     public List<String> aggregationEntityKey;
     public String joinPolicyName;
+    // The privacy policy with its ENTITY KEY the view is read under. Null on old snapshots.
+    public String privacyPolicyName;
+    public List<String> privacyEntityKey;
     // The contacts attached, purpose to the contact's full name. Null on old snapshots.
     public Map<String, String> contacts;
     // Attached data metric functions and their DATA_METRIC_SCHEDULE as written. Null on old snapshots.

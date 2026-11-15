@@ -24,6 +24,7 @@ import dev.frostlake.metastore.model.PrivacyPolicy;
 import dev.frostlake.metastore.model.StorageLifecyclePolicy;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
+import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeParser;
 
 import java.util.ArrayList;
@@ -79,6 +80,35 @@ final class PrivacyLifecycleAttachments {
             table.setPrivacyPolicyName(null);
             table.setPrivacyEntityKey(null);
         }
+    }
+
+    /**
+     * ALTER VIEW ... ADD or DROP PRIVACY POLICY, as a table's: the policy looked up first, then the entity key's
+     * column among the view's, then a second privacy policy refused (live-verified for the first two).
+     *
+     * @param view    the view altered
+     * @param columns the view's columns, as a relation
+     * @param action  the action
+     */
+    void alterView(final View view, final Table columns, final FrostlakeParser.ViewActionContext action) {
+        final String written = ParseTreeText.getQualifiedName(action.qualifiedName());
+        final PrivacyPolicy policy = requirePrivacyPolicy(written);
+        if (action.ADD() != null) {
+            final String column = column(columns, action.identifier(), false);
+            if (view.hasPrivacyPolicy()) {
+                throw new RuntimeException("Object " + view.getName().toUpperCase(Locale.ROOT)
+                    + " already has a PRIVACY_POLICY. Only one PRIVACY_POLICY is allowed at a time.");
+            }
+            view.setPrivacyPolicyName(catalog.qualifiedExactName(written));
+            view.setPrivacyEntityKey(Collections.singletonList(column));
+            return;
+        }
+        if (!view.hasPrivacyPolicy() || !view.getPrivacyPolicyName().equals(catalog.qualifiedExactName(written))) {
+            throw new RuntimeException("Policy " + policy.getName() + " is not attached to VIEW "
+                + view.getName().toUpperCase(Locale.ROOT) + ".");
+        }
+        view.setPrivacyPolicyName(null);
+        view.setPrivacyEntityKey(null);
     }
 
     /**

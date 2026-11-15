@@ -45,6 +45,7 @@ import dev.frostlake.executor.expressions.IntervalCasts;
 import dev.frostlake.executor.expressions.PolicyObjectTagCalls;
 import dev.frostlake.executor.expressions.StructuredCast;
 import dev.frostlake.executor.procedural.ProceduralException;
+import dev.frostlake.metastore.AccountDirectory;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.ColumnRenames;
 import dev.frostlake.metastore.DataMetricFunctions;
@@ -60,6 +61,7 @@ import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.TableShadows;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.Taggable;
+import dev.frostlake.metastore.model.Account;
 import dev.frostlake.metastore.model.AggregationPolicy;
 import dev.frostlake.metastore.model.ComputePool;
 import dev.frostlake.metastore.model.ComputePoolState;
@@ -215,6 +217,13 @@ public class AlterCommandHandler implements CommandHandler {
         // The sentence the statement answers in place of the plain status line, or null.
         String answered = null;
         try {
+            if (ctx.unmodelledCommentKind() != null) {
+                // A missing database or schema is refused, IF EXISTS or not.
+                branchHandlesIfExists = true;
+                new KindComments(catalog, queryExecutor, visitor).refuseUnmodelled(ctx.unmodelledCommentKind(),
+                    ctx.qualifiedName(), ifExists);
+                return null;
+            }
             if (ctx.ALERT() != null) {
                 final AlertCommandHandler alerts = new AlertCommandHandler(queryExecutor);
                 final FrostlakeParser.AlertActionContext action = ctx.alertAction();
@@ -498,6 +507,11 @@ public class AlterCommandHandler implements CommandHandler {
                 PolicyPropertyList.validate(action, kind,
                     storage ? StorageLifecycleProperties.ARCHIVE_PROPERTIES : Collections.<String>emptyList());
                 branchHandlesIfExists = true;
+                final String otherKind = otherPolicyHolding(qualifiedNameParts(ctx.qualifiedName()), kind);
+                if (otherKind != null) {
+                    // A policy of another kind holds the name (live-verified).
+                    throw new RuntimeException(SqlCompilationError.objectOfOtherType(otherKind, kind));
+                }
                 final SqlObject policy;
                 try {
                     policy = existingPolicy(storage ? catalog.findStorageLifecyclePolicy(policyName)
@@ -655,6 +669,16 @@ public class AlterCommandHandler implements CommandHandler {
                 logger.trace("Altered row access policy {}", policyName);
 
             } else if (ctx.FILE() != null && ctx.FORMAT() != null) {
+                if (ctx.fileFormatAction().UNSET() != null) {
+                    // Refused once the format is there or IF EXISTS forgives its absence (live-verified).
+                    branchHandlesIfExists = true;
+                    final String formatName = visitor.getText(ctx.qualifiedName());
+                    if (!ifExists && catalog.getFileFormatExact(formatName) == null) {
+                        throw new RuntimeException(SqlCompilationError.doesNotExist("File format",
+                            catalog.qualifiedExactName(formatName)));
+                    }
+                    throw new RuntimeException("Unsupported feature 'UNSET'.");
+                }
                 return ddlHandler.handleAlterStatement(ctx);
             } else if (ctx.FUNCTION() != null || ctx.PROCEDURE() != null) {
                 // IF EXISTS forgives only the routine's absence: a malformed signature or a taken new name
@@ -1562,7 +1586,8 @@ public class AlterCommandHandler implements CommandHandler {
                 branchHandlesIfExists = true;
                 judgeViewProperties(ctx.viewAction().viewSetItem(), ctx.viewAction().propertyName(),
                     ctx.viewAction().COMMA(), false, queryExecutor.alterTargetNameParts(ctx), ctx);
-                branchHandlesIfExists = false;
+                // IF EXISTS does not forgive a missing view whose columns' comments change (live-verified).
+                branchHandlesIfExists = !ctx.viewAction().viewColumnComment().isEmpty();
                 if (ctx.viewAction().SECURE() != null) {
                     if (ifExists) {
                         // Refused whether or not the view is there (live-verified).
@@ -1638,6 +1663,8 @@ public class AlterCommandHandler implements CommandHandler {
                     setViewJoinPolicy(view, ctx.viewAction().joinPolicyClause(), ctx.viewAction().FORCE() != null);
                 } else if (ctx.viewAction().UNSET() != null && ctx.viewAction().JOIN() != null) {
                     unsetViewJoinPolicy(view);
+                } else if (ctx.viewAction().PRIVACY() != null) {
+                    new PrivacyLifecycleAttachments(catalog).alterView(view, viewColumns(view), ctx.viewAction());
                 } else if (ctx.viewAction().CONTACT() != null && !ctx.viewAction().contactAssignment().isEmpty()) {
                     setContacts(view, ctx.viewAction().contactAssignment());
                 } else if (ctx.viewAction().CONTACT() != null) {
@@ -1698,6 +1725,16 @@ public class AlterCommandHandler implements CommandHandler {
                     logger.trace("Set/unset a projection policy on a column of view {}", viewName);
                 } else if (ctx.viewAction().columnTagAction() != null) {
                     viewColumnTag(view, ctx.viewAction().columnTagAction());
+                } else if (!ctx.viewAction().viewColumnComment().isEmpty()) {
+                    // The first missing column is refused at its place (live-verified), before any comment changes.
+                    final Table columns = viewColumns(view);
+                    for (final FrostlakeParser.ViewColumnCommentContext item : ctx.viewAction().viewColumnComment()) {
+                        requireColumn(columns, visitor.getText(item.identifier()), item.identifier());
+                    }
+                    for (final FrostlakeParser.ViewColumnCommentContext item : ctx.viewAction().viewColumnComment()) {
+                        columns.getColumn(visitor.getText(item.identifier())).setComment(item.UNSET() != null ? null
+                            : visitor.extractStringLiteral(item.STRING_LITERAL()));
+                    }
                 }
 
             } else if (ctx.STREAM() != null) {
@@ -2020,6 +2057,10 @@ public class AlterCommandHandler implements CommandHandler {
                     role.setComment(comment);
                     logger.trace("Set comment on role: {}", roleName);
                 }
+
+            } else if (ctx.ACCOUNT() != null && ctx.RENAME() != null) {
+                branchHandlesIfExists = true;
+                renameAccount(ctx, ifExists);
 
             } else if (ctx.ACCOUNT() != null && (ctx.sessionAction() != null || ctx.tagSet() != null
                     || ctx.tagUnset() != null)) {
@@ -3684,6 +3725,18 @@ public class AlterCommandHandler implements CommandHandler {
         return !properties.isEmpty();
     }
 
+    /** The kind of another policy that holds the name an ALTER of a privacy or storage policy writes, or null. */
+    private String otherPolicyHolding(final String[] parts, final String kind) {
+        final Schema schema;
+        try {
+            schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        } catch (final RuntimeException unresolved) {
+            return null;
+        }
+        final String holder = schema.policyKindHolding(parts[parts.length - 1]);
+        return holder == null || holder.equals(kind) ? null : holder;
+    }
+
     /** The policy an ALTER found, its absence refused in live's sentence. */
     private <P extends SqlObject> P existingPolicy(final P found, final String kind, final String policyName) {
         if (found == null) {
@@ -3798,6 +3851,15 @@ public class AlterCommandHandler implements CommandHandler {
         if (action.SET() != null) {
             final List<SessionParameterSetting> settings =
                 LeveledParameterSettings.assignments(action.sessionAssignment());
+            if (named != null && setsCommentAlone(settings) && !namesThisAccount(named)) {
+                // Another account's comment is looked for as the organization's, and one that is not there is
+                // refused in a sentence of its own (live-verified).
+                if (ifExists) {
+                    return;
+                }
+                throw new RuntimeException(SqlCompilationError.of(
+                    "Object does not exist, or operation cannot be performed."));
+            }
             LeveledParameterSettings.requireNames(settings, "ACCOUNT");
             LeveledParameterSettings.requireKind(settings, "NUMBER", queryExecutor);
             LeveledParameterSettings.requireKind(settings, "STRING", queryExecutor);
@@ -3825,18 +3887,53 @@ public class AlterCommandHandler implements CommandHandler {
         LeveledParameterSettings.unset(catalog.getAccountParameters(), settings);
     }
 
+    /** Whether a name after ALTER ACCOUNT is this engine's own account's. */
+    private boolean namesThisAccount(final FrostlakeParser.AlteredAccountContext named) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(named.qualifiedName());
+        final String own = queryExecutor.getEngineConfig() == null ? null
+            : queryExecutor.getEngineConfig().getAccountId();
+        return parts.length == 1 && own != null && own.equalsIgnoreCase(parts[0]);
+    }
+
+    /** Whether a SET's list names the COMMENT alone, written without quotes. */
+    private static boolean setsCommentAlone(final List<SessionParameterSetting> settings) {
+        for (final SessionParameterSetting setting : settings) {
+            if (!"COMMENT".equalsIgnoreCase(setting.written())) {
+                return false;
+            }
+        }
+        return !settings.isEmpty();
+    }
+
+    /**
+     * ALTER ACCOUNT … RENAME TO: another account of the organization, looked for as DROP ACCOUNT looks for it — a
+     * missing one is refused naming the privilege on it, which IF EXISTS forgives (live-verified) — and one that is
+     * there takes a name no other account has.
+     */
+    private void renameAccount(final FrostlakeParser.AlterStatementContext ctx, final boolean ifExists) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(ctx.alteredAccount().qualifiedName());
+        final AccountDirectory directory = catalog.getAccountDirectory();
+        final Account existing = parts.length == 1 ? directory.account(parts[0]) : null;
+        if (existing == null || existing.isDropped()) {
+            if (ifExists) {
+                return;
+            }
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Account",
+                parts.length == 1 ? parts[0] : visitor.getText(ctx.alteredAccount().qualifiedName())));
+        }
+        final String newName = visitor.getText(ctx.identifier());
+        if (directory.account(newName) != null) {
+            throw new RuntimeException(SqlCompilationError.of("Object '" + newName + "' already exists."));
+        }
+        directory.renameAccount(existing, newName);
+    }
+
     /**
      * Whether an ALTER ACCOUNT alters this engine's account: one written without a name, or under the account's
      * own. Another name is an account that is not there, which IF EXISTS forgives.
      */
     private boolean isThisAccount(final FrostlakeParser.AlteredAccountContext named, final boolean ifExists) {
-        if (named == null) {
-            return true;
-        }
-        final String[] parts = ParseTreeText.qualifiedNameParts(named.qualifiedName());
-        final String own = queryExecutor.getEngineConfig() == null ? null
-            : queryExecutor.getEngineConfig().getAccountId();
-        if (parts.length == 1 && own != null && own.equalsIgnoreCase(parts[0])) {
+        if (named == null || namesThisAccount(named)) {
             return true;
         }
         if (ifExists) {

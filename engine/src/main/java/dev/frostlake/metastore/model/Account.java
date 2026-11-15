@@ -142,6 +142,19 @@ public class Account {
         this.restoredOn = restored;
     }
 
+    /**
+     * The account under another name, everything else kept.
+     *
+     * @param newName the new name
+     * @return the renamed account
+     */
+    public Account renamed(final String newName) {
+        final Account renamed = new Account(newName, edition, region, regionGroup, comment, adminName, email, locator,
+            createdOn);
+        renamed.restoreLifecycle(droppedOn, scheduledDeletionTime, restoredOn);
+        return renamed;
+    }
+
     /** Restores the dropped account. */
     public void restore() {
         droppedOn = null;

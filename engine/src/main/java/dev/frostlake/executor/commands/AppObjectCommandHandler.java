@@ -460,6 +460,23 @@ public class AppObjectCommandHandler {
         schema.getAppObjects().put(object);
     }
 
+    /**
+     * COMMENT ON a notebook or a Streamlit app, answered as its ALTER … SET COMMENT is: a missing object is refused
+     * unless IF EXISTS forgives it.
+     *
+     * @param kind     the object's kind
+     * @param nameCtx  the object's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing object
+     */
+    public void comment(final AppObjectKind kind, final FrostlakeParser.QualifiedNameContext nameCtx,
+                        final String comment, final boolean ifExists) {
+        final AppObject object = existing(kind, nameCtx, ifExists);
+        if (object != null) {
+            object.setComment(comment);
+        }
+    }
+
     /** The object an ALTER names, or null when it is absent and IF EXISTS forgives that. */
     private AppObject existing(final AppObjectKind kind, final FrostlakeParser.QualifiedNameContext nameCtx,
                                final boolean ifExists) {

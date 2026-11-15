@@ -235,6 +235,9 @@ final class StatementKindText {
     }
 
     private static String alterKind(final FrostlakeParser.AlterStatementContext alter) {
+        if (alter.unmodelledCommentKind() != null) {
+            return commentOnlyAlter(alter.unmodelledCommentKind());
+        }
         final ParserRuleContext action = actionOf(alter);
         if (action == null) {
             return "ALTER";
@@ -276,6 +279,13 @@ final class StatementKindText {
         if (comment.COLUMN() != null) {
             return "ALTER COLUMN COMMENT";
         }
+        if (comment.commentedKind() != null) {
+            final FrostlakeParser.CommentedKindContext kind = comment.commentedKind();
+            if (kind.CORTEX() != null) {
+                return "ALTER CORTEX SEARCH SERVICE OPERATE";
+            }
+            return commentOnlyAlter(kind.unmodelledCommentKind());
+        }
         for (int i = 0; i + 1 < comment.getChildCount(); i++) {
             if (comment.getChild(i) instanceof TerminalNode
                     && ((TerminalNode) comment.getChild(i)).getSymbol().getType() == FrostlakeParser.ON) {
@@ -283,6 +293,11 @@ final class StatementKindText {
             }
         }
         return "ALTER";
+    }
+
+    /** A comment's change on a kind named by its own words: a semantic view's is an ALTER OBJECT COMMENT. */
+    private static String commentOnlyAlter(final FrostlakeParser.UnmodelledCommentKindContext kind) {
+        return kind != null && kind.SEMANTIC() != null ? "ALTER OBJECT COMMENT" : "ALTER";
     }
 
     /**
@@ -299,7 +314,9 @@ final class StatementKindText {
         if (first == FrostlakeParser.ALTER || first == FrostlakeParser.MODIFY) {
             boolean any = false;
             for (int i = 1; i < action.getChildCount(); i++) {
-                if (action.getChild(i) instanceof FrostlakeParser.AlterColumnItemContext) {
+                if (action.getChild(i) instanceof FrostlakeParser.ViewColumnCommentContext) {
+                    any = true;
+                } else if (action.getChild(i) instanceof FrostlakeParser.AlterColumnItemContext) {
                     if (((FrostlakeParser.AlterColumnItemContext) action.getChild(i)).alterColumnItemAction().COMMENT()
                             == null) {
                         return null;

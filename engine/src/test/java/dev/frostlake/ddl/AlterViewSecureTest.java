@@ -71,6 +71,9 @@ public class AlterViewSecureTest extends BaseDatabaseTest {
     @Test
     public void theActionStandsAloneAndTakesNoIfExists() {
         assertEquals(SYNTAX + "25 unexpected 'COMMENT'.", refusalOf("ALTER VIEW nv SET SECURE COMMENT = 'x'"));
+        assertEquals(SYNTAX + "38 unexpected 'COMMENT'.",
+            refusalOf("ALTER MATERIALIZED VIEW nv SET SECURE COMMENT = 'x'"));
+        assertEquals(SYNTAX + "18 unexpected 'COMMENT'.", refusalOf("ALTER VIEW nv SET COMMENT = 'x' SECURE"));
         assertEquals(SYNTAX + "26 unexpected ','.", refusalOf("ALTER VIEW nv UNSET SECURE, COMMENT"));
         assertEquals("Unsupported feature 'IF EXISTS in ALTER VIEW SET/UNSET SECURE'.",
             refusalOf("ALTER VIEW IF EXISTS nosuch_v SET SECURE"));

@@ -128,7 +128,8 @@ public class AccountRecordTest extends BaseDatabaseTest {
             CREATE ACCOUNT acc_two ADMIN_NAME = a ADMIN_RSA_PUBLIC_KEY = 'MIIB' EMAIL = 'e' EDITION = STANDARD""");
         assertTrue(refusal("DROP ACCOUNT acc_two GRACE_PERIOD_IN_DAYS = 2").contains("GRACE_PERIOD_IN_DAYS"));
         assertTrue(refusal("DROP ACCOUNT acc_two GRACE_PERIOD_IN_DAYS = 91").contains("GRACE_PERIOD_IN_DAYS"));
-        assertTrue(refusal("DROP ACCOUNT acc_two").contains("syntax error"), "the grace period is required");
+        assertTrue(refusal("DROP ACCOUNT acc_two").contains("GRACE_PERIOD_IN_DAYS"),
+            "an account that is there wants its grace period");
     }
 
     /**

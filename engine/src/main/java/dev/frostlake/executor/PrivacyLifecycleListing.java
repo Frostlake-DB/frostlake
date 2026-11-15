@@ -169,11 +169,11 @@ final class PrivacyLifecycleListing {
             return new ResultSet(columns, rows);
         }
         final StorageLifecyclePolicy lifecycle = (StorageLifecyclePolicy) policy;
-        columns.add(new ResultSetColumn("archive_for_days", StringType.VARCHAR));
+        columns.add(new ResultSetColumn("archive_for_days", ShowResultHelpers.COUNT));
         columns.add(new ResultSetColumn("archive_tier", StringType.VARCHAR));
         rows.add(new Row(Arrays.asList(lifecycle.getName(),
             ShowRoutineExecutor.describedSignature(lifecycle.getParameters()), "BOOLEAN", lifecycle.getBody(),
-            lifecycle.getArchiveForDays() == null ? null : lifecycle.getArchiveForDays().toString(),
+            lifecycle.getArchiveForDays() == null ? null : Long.valueOf(lifecycle.getArchiveForDays().longValue()),
             lifecycle.getArchiveTier() == null ? NONE : lifecycle.getArchiveTier())));
         return new ResultSet(columns, rows);
     }

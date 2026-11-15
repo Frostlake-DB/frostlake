@@ -367,7 +367,7 @@ ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its c
 | Endpoint | What it does |
 |---|---|
 | `POST /session/v1/login-request` | Opens a session; its token is the session's id. Answers the session parameters the driver renders values by: the output formats and the zone - the session's own, else the account's (UTC here) - the account's flags for reading dates and timestamps in that zone, and its result size limits (128 MB), which `getMaxCharLiteralLength` and `getMaxFieldSize` answer. |
-| `POST /queries/v1/query-request` | Runs a statement in the session the token names, its bindings written in, and answers its result: each column's type, and the rows as an Arrow stream or as JSON cells in the driver's internal form. A refusal carries its SQLSTATE and vendor code. |
+| `POST /queries/v1/query-request` | Runs a statement in the session the token names, its bindings written in, and answers its result: each column's type, and the rows as an Arrow stream (a query's) or as JSON cells in the driver's internal form. A refusal carries its SQLSTATE and vendor code. |
 | `GET /queries/{id}/result` | One statement's result of a text of several (the driver asks for those with `MULTI_STATEMENT_COUNT`). |
 | `GET /monitoring/queries/{id}` | A query's status, read from the query history: RUNNING, SUCCESS, or FAILED_WITH_ERROR with its error (the driver's `getQueryStatus`, and what an asynchronous statement and a statement of several are followed by). |
 | `POST /queries/v1/abort-request` | Cancels the session's running statement (`Statement.cancel()`). |
@@ -375,8 +375,12 @@ ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its c
 | `POST /session/heartbeat`, `POST /session/token-request` | Keep the session and renew its token. |
 | `POST /telemetry/send` | Accepted and dropped. |
 
-Results come as Arrow (`rowsetBase64`), the account's default, unless the session sets
-`JDBC_QUERY_RESULT_FORMAT = 'JSON'`; then as JSON. Each Arrow column is the vector the driver's reader takes for its
+A query's rows come as Arrow (`rowsetBase64`), the account's default, unless the session sets
+`JDBC_QUERY_RESULT_FORMAT = 'JSON'`; then as JSON. Every other answer comes as a JSON `rowset`, as the account sends
+it: a status, a DML statement's counts, a SHOW, a DESCRIBE, an EXPLAIN, a CALL's or a block's answer, and each
+result of a text of several. A DML answer that changed rows carries them in `stats` (`numRowsInserted`,
+`numRowsDeleted`, `numRowsUpdated`, `numDmlDuplicates`); Snowflake's Python connector reads a DML statement's
+`rowcount` from that JSON rowset. Each Arrow column is the vector the driver's reader takes for its
 type - a whole or fixed-point number as 64-bit integers, or 128-bit decimals for a batch holding a number past them
 (so every whole number of that batch reads as a `BigDecimal`, as on the account), a TIMESTAMP as seconds and
 nanoseconds, a DECFLOAT as its significand and exponent - so the driver's getters answer as against the account: a

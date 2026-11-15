@@ -32,6 +32,7 @@ import dev.frostlake.executor.commands.CreateNamespaceHandler;
 import dev.frostlake.executor.commands.DDLCommandHandler;
 import dev.frostlake.executor.commands.DMLCommandHandler;
 import dev.frostlake.executor.commands.DataTypeParser;
+import dev.frostlake.executor.commands.DbtProjects;
 import dev.frostlake.executor.commands.DynamicTableProperties;
 import dev.frostlake.executor.commands.ExternalVolumeCommandHandler;
 import dev.frostlake.executor.commands.GrantRevokeHandler;
@@ -820,6 +821,13 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
     public Object visitTaskStatement(final FrostlakeParser.TaskStatementContext ctx) {
         if (ctx.ALERT() != null) {
             return new AlertCommandHandler(queryExecutor).execute(ctx.qualifiedName());
+        }
+        if (ctx.DBT() != null) {
+            try {
+                return new DbtProjects(catalog, queryExecutor).execute(ctx.qualifiedName());
+            } catch (final RuntimeException refused) {
+                throw StatementErrors.propagate(refused);
+            }
         }
         try {
             // EXECUTE TASK task_name

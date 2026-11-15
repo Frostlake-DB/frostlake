@@ -666,6 +666,8 @@ final class CatalogSnapshotReader {
                     view.setAggregationPolicyName(viewSnapshot.aggregationPolicyName);
                     view.setAggregationEntityKey(viewSnapshot.aggregationEntityKey);
                     view.setJoinPolicyName(viewSnapshot.joinPolicyName);
+                    view.setPrivacyPolicyName(viewSnapshot.privacyPolicyName);
+                    view.setPrivacyEntityKey(viewSnapshot.privacyEntityKey);
                     if (viewSnapshot.contacts != null) {
                         for (final Map.Entry<String, String> attached : viewSnapshot.contacts.entrySet()) {
                             view.setContact(attached.getKey(), attached.getValue());

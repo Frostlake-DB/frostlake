@@ -102,6 +102,9 @@ public final class PolicyReferences {
                 if (covers(kind, PolicyKind.JOIN)) {
                     view.setJoinPolicyName(repointed(view.getJoinPolicyName(), from, to));
                 }
+                if (covers(kind, PolicyKind.PRIVACY)) {
+                    view.setPrivacyPolicyName(repointed(view.getPrivacyPolicyName(), from, to));
+                }
                 if (view.hasResolvedColumns()) {
                     for (final TableColumn column : view.getResolvedColumns()) {
                         if (covers(kind, PolicyKind.MASKING)) {
@@ -138,6 +141,7 @@ public final class PolicyReferences {
             }
             for (final View view : schema.getViews()) {
                 view.setRowAccessPolicyName(completed(view.getRowAccessPolicyName(), schema));
+                view.setPrivacyPolicyName(completed(view.getPrivacyPolicyName(), schema));
             }
         }
     }

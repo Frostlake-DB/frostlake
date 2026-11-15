@@ -576,6 +576,8 @@ public class CreateSecurityHandler implements CommandHandler {
         final String returns = (ctx.dataTypeName() != null ? ctx.dataTypeName().getText()
             : getText(ctx.identifier(0))).toUpperCase(Locale.ROOT);
         if (PRIVACY_BUDGET.equals(returns)) {
+            // The body's names are compiled before what it answers is judged (live-verified).
+            PolicyBodyCheck.compileNames(queryExecutor, catalog, parts[parts.length - 1], body);
             RoutineReturnTypeChecker.checkConstraintBody(queryExecutor, catalog, "SYSTEM$" + PRIVACY_BUDGET, body);
         } else {
             final DataType declared = ctx.dataTypeName() != null
@@ -663,6 +665,10 @@ public class CreateSecurityHandler implements CommandHandler {
             }
             final StorageLifecycleProperties properties =
                 StorageLifecycleProperties.read(ddl, ctx.storageLifecycleProperty());
+            if (ctx.tagList() != null) {
+                // Every tag must be there, or nothing is created.
+                InlineTags.resolveAll(ctx.tagList(), queryExecutor);
+            }
             requirePolicyKind(schema, policyName, StorageLifecycleProperties.KIND, parts, orReplace);
             final boolean freshName = !schema.hasStorageLifecyclePolicy(policyName);
             if (orReplace) {
@@ -683,6 +689,9 @@ public class CreateSecurityHandler implements CommandHandler {
             policy.setArchiveTier(properties.tier());
             policy.setArchiveForDays(properties.days());
             policy.setOwner(catalog.currentRoleForOwner());
+            if (ctx.tagList() != null) {
+                InlineTags.apply(policy, ctx.tagList(), queryExecutor);
+            }
             schema.addStorageLifecyclePolicy(policy);
             takeName(freshName, StorageLifecycleProperties.KIND, schema, policyName);
             logger.trace("Created storage lifecycle policy: {}", qn);

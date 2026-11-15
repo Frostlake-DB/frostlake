@@ -55,6 +55,26 @@ public final class AccountDirectory {
         accounts.put(key(account.getName()), account);
     }
 
+    /**
+     * Gives an account another name, in its place in creation order.
+     *
+     * @param account the account
+     * @param newName the new name, free
+     */
+    public synchronized void renameAccount(final Account account, final String newName) {
+        final Map<String, Account> reordered = new LinkedHashMap<>();
+        for (final Map.Entry<String, Account> entry : accounts.entrySet()) {
+            if (entry.getValue() == account) {
+                final Account renamed = account.renamed(newName);
+                reordered.put(key(newName), renamed);
+            } else {
+                reordered.put(entry.getKey(), entry.getValue());
+            }
+        }
+        accounts.clear();
+        accounts.putAll(reordered);
+    }
+
     /** The managed account of that name, or null. */
     public synchronized ManagedAccount managedAccount(final String name) {
         return managedAccounts.get(key(name));

@@ -34,6 +34,7 @@ import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -288,6 +289,11 @@ public class FrostlakeJdbcEngine extends DatabaseEngine {
         if (value instanceof Timestamp || value instanceof Date || value instanceof Time) {
             return engineTemporal(value, engineValue);
         }
+        if (value instanceof Number && engineValue instanceof Number
+                && sameNumber((Number) value, (Number) engineValue)) {
+            // The driver widens a whole number to the Long its getObject answers: the engine's own carrier comes back.
+            return engineValue;
+        }
         if (semiStructured && value instanceof String) {
             final String text = (String) value;
             if (engineValue instanceof String && VariantJsonText.unwrappedStringText((String) engineValue).equals(text)) {
@@ -313,6 +319,26 @@ public class FrostlakeJdbcEngine extends DatabaseEngine {
             }
         }
         return value;
+    }
+
+    /**
+     * Whether the driver's number is the engine's: the same double for an approximate one, the same decimal value
+     * otherwise, whatever the class carrying it.
+     *
+     * @param driver the driver's number
+     * @param engine the engine's cell
+     * @return whether they are the same number
+     */
+    private static boolean sameNumber(final Number driver, final Number engine) {
+        if (driver instanceof Double || driver instanceof Float || engine instanceof Double
+                || engine instanceof Float) {
+            return Double.compare(driver.doubleValue(), engine.doubleValue()) == 0;
+        }
+        try {
+            return new BigDecimal(driver.toString()).compareTo(new BigDecimal(engine.toString())) == 0;
+        } catch (final NumberFormatException notDecimal) {
+            return false;
+        }
     }
 
     /**

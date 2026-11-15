@@ -163,7 +163,8 @@ public class DropCommandHandler implements CommandHandler {
             }
             logger.trace("Dropped {}: {}", kind, dropNameText(ctx));
         } catch (final RuntimeException e) {
-            if (!forgiven(ifExists, e)) {
+            // IF EXISTS does not forgive a name a policy of another kind holds (live-verified).
+            if (!forgiven(ifExists, e) || SqlCompilationError.isWrongObjectType(e.getMessage())) {
                 throw e;
             }
             ConditionalDdlOutcome.dropSkipped();

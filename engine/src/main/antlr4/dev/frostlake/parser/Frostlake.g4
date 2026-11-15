@@ -1133,6 +1133,11 @@ import java.util.List;
         }
     }
 
+    /** Refuses a word where the account's parser reads none of its kind, at the word and alone. */
+    private void refuseWordAlone(final ParserRuleContext node, final Token word) {
+        notifyErrorListeners(word, "unexpected '" + word.getText() + "'", new RefusedWordFault(this, node, true));
+    }
+
     /** Refuses the word CLASS after SHOW, at the word and alone, as the account's parser does. */
     private void refuseClassWord(final ParserRuleContext listing, final Token word) {
         notifyErrorListeners(word, "unexpected '" + word.getText() + "'", new RefusedWordFault(this, listing, true));
@@ -1976,7 +1981,16 @@ createStatement
     | CREATE or_replace? AGGREGATION POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) policyCreateProperty* SEMI?
     | CREATE or_replace? JOIN POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
     | CREATE or_replace? PRIVACY POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) commentClause? SEMI?
-    | CREATE or_replace? STORAGE lifecycle=IDENTIFIER {refuseKindWord($ctx, $lifecycle, "LIFECYCLE");} POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) storageLifecycleProperty* SEMI?
+    // A storage lifecycle policy takes its tags after its properties (live-verified).
+    | CREATE or_replace? STORAGE lifecycle=IDENTIFIER {refuseKindWord($ctx, $lifecycle, "LIFECYCLE");} POLICY if_not_exists? qualifiedName AS LPAREN parameterList? RPAREN RETURNS (dataTypeName | identifier) THIN_ARROW (bodyDefinition | booleanExpr) storageLifecycleProperty* tagList? SEMI?
+    // A DBT project, which is never created here: its location is judged (DbtProjects) and the project refused.
+    | CREATE or_replace? DBT project=IDENTIFIER {refuseKindWord($ctx, $project, "PROJECT");} if_not_exists? qualifiedName
+        dbtProjectSource? SEMI?
+    ;
+
+// Where a DBT project's files are read from.
+dbtProjectSource
+    : FROM stringText
     ;
 
 // Integrations: account objects holding a third-party service's configuration. Frostlake stores them and never
@@ -2419,6 +2433,7 @@ alterStatement
     | ALTER FILE FORMAT if_exists? qualifiedName fileFormatAction SEMI?
     | ALTER TAG if_exists? qualifiedName tagAction SEMI?
     | ALTER ALERT if_exists? qualifiedName alertAction SEMI?
+    | ALTER unmodelledCommentKind if_exists? qualifiedName (SET COMMENT EQ stringText | UNSET COMMENT) SEMI?
     | ALTER MASKING POLICY if_exists? qualifiedName policyAction SEMI?
     | ALTER CONTACT if_exists? qualifiedName contactAction SEMI?
     | ALTER PROJECTION POLICY if_exists? qualifiedName policyAction SEMI?
@@ -2441,6 +2456,8 @@ alterStatement
     // Its tags take IF EXISTS only before a name: ALTER ACCOUNT IF EXISTS SET TAG … is refused at the SET, which
     // the handler does so that one alternative reads every form and a fault keeps the statement's context.
     | ALTER ACCOUNT if_exists? alteredAccount? (sessionAction | tagSet | tagUnset) SEMI?
+    // Another account renamed, which is looked for as a DROP ACCOUNT looks for it (live-verified).
+    | ALTER ACCOUNT if_exists? alteredAccount RENAME TO identifier SEMI?
     ;
 
 alteredAccount
@@ -2613,6 +2630,31 @@ commentStatement
     | COMMENT if_exists? ON FILE FORMAT qualifiedName IS stringText SEMI?
     // A secret takes its comment from ALTER SECRET alone: COMMENT ON SECRET is an unsupported feature (live-verified).
     | COMMENT if_exists? ON SECRET qualifiedName IS stringText SEMI?
+    // The kinds whose COMMENT ON is answered exactly as their ALTER ... SET COMMENT (live-verified).
+    | COMMENT if_exists? ON commentedKind qualifiedName IS stringText SEMI?
+    ;
+
+// A kind COMMENT ON names by words its other alternatives do not read. MODEL and DBT's PROJECT are plain words,
+// refused where another word stands.
+commentedKind
+    : ALERT
+    | NETWORK RULE
+    | STREAMLIT
+    | NOTEBOOK
+    | (AUTHENTICATION | PASSWORD | SESSION | PACKAGES | AGGREGATION | PROJECTION | JOIN | PRIVACY) POLICY
+    | IMAGE REPOSITORY
+    | SERVICE
+    | CORTEX SEARCH SERVICE
+    | unmodelledCommentKind
+    ;
+
+// The kinds an ALTER or a COMMENT ON names for a comment that Frostlake models no object of: the name resolves the
+// way any schema object's does and the object is then missing, which IF EXISTS forgives (live-verified).
+unmodelledCommentKind
+    : model=IDENTIFIER {refuseKindWord($ctx, $model, "MODEL");}
+    | GIT REPOSITORY
+    | SEMANTIC VIEW
+    | DBT project=IDENTIFIER {refuseKindWord($ctx, $project, "PROJECT");}
     ;
 
 truncateStatement
@@ -2629,6 +2671,8 @@ securityStatement
 taskStatement
     : EXECUTE TASK qualifiedName taskExecuteOption? SEMI?
     | EXECUTE ALERT qualifiedName SEMI?
+    // No DBT project is ever there to run (DbtProjects).
+    | EXECUTE DBT project=IDENTIFIER {refuseKindWord($ctx, $project, "PROJECT");} qualifiedName SEMI?
     ;
 
 // A retry of the last failed graph run or of a named one, or a run with a configuration merged over the
@@ -3981,7 +4025,20 @@ viewAction
     | (ALTER | MODIFY) viewColumnMasking (COMMA viewColumnMasking)*
     | (ALTER | MODIFY) COLUMN? identifier SET PROJECTION POLICY qualifiedName FORCE?
     | (ALTER | MODIFY) COLUMN? identifier UNSET PROJECTION POLICY
+    // A view's column comments, set or unset, several after one ALTER or MODIFY (live-verified).
+    | (ALTER | MODIFY) viewColumnComment (COMMA viewColumnComment)*
+    // A view takes a privacy policy as a table does, its entity key named; a storage lifecycle policy it does not,
+    // refused at STORAGE alone (live-verified).
+    | ADD PRIVACY POLICY qualifiedName ENTITY KEY LPAREN identifier RPAREN
+    | DROP PRIVACY POLICY qualifiedName
+    | ADD storage=STORAGE {refuseWordAlone($ctx, $storage);} IDENTIFIER POLICY qualifiedName ON LPAREN identifierList
+        RPAREN
     | columnTagAction
+    ;
+
+// A view column's comment, set or unset.
+viewColumnComment
+    : COLUMN? identifier (COMMENT STRING_LITERAL | UNSET COMMENT)
     ;
 
 // A view column's masking policy, set — with the columns a conditional policy reads after USING — or unset.
@@ -4243,6 +4300,8 @@ policyScalarValue
 fileFormatAction
     : RENAME TO qualifiedName
     | SET? copyFormatOption+
+    // An UNSET reads a list of names, refused by the statement whatever they are (live-verified).
+    | UNSET propertyName (COMMA propertyName)*
     ;
 
 routineAlterAction
@@ -4390,9 +4449,10 @@ accessControlStatement
     | SHOW FUTURE GRANTS TO ROLE principalName showTail SEMI?
     | SHOW FUTURE GRANTS TO DATABASE ROLE referencedName SEMI?
     | CREATE ACCOUNT identifier accountProperty* SEMI?
-    | DROP ACCOUNT if_exists? identifier GRACE_PERIOD_IN_DAYS EQ INTEGER_LITERAL SEMI?
-    // A qualified name is read so that it is refused in the account's own words.
-    | UNDROP ACCOUNT qualifiedName SEMI?
+    // The grace period may be left out: the account is looked for first (live-verified).
+    | DROP ACCOUNT if_exists? identifier (GRACE_PERIOD_IN_DAYS EQ INTEGER_LITERAL)? SEMI?
+    // A qualified name is read so that it is refused in the account's own words; IDENTIFIER() names one too.
+    | UNDROP ACCOUNT objectName SEMI?
     | CREATE MANAGED ACCOUNT identifier managedAccountProperty (COMMA managedAccountProperty)* SEMI?
     | DROP MANAGED ACCOUNT identifier SEMI?
     | SHOW MANAGED ACCOUNTS (LIKE stringText)? SEMI?
@@ -5733,17 +5793,18 @@ showStatement
     | SHOW TERSE? PROJECTION POLICIES (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
     | SHOW TERSE? AGGREGATION POLICIES (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
     | SHOW TERSE? JOIN POLICIES (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
-    // A privacy policy listing reads HISTORY after its kind, which lists the policies there (live-verified).
+    // A privacy or a storage lifecycle policy listing reads HISTORY after its kind, which lists the policies there
+    // (live-verified).
     | SHOW TERSE? PRIVACY POLICIES HISTORY? (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
-    | SHOW TERSE? STORAGE lifecycle=IDENTIFIER {refuseKindWord($ctx, $lifecycle, "LIFECYCLE");} POLICIES (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
+    | SHOW TERSE? STORAGE lifecycle=IDENTIFIER {refuseKindWord($ctx, $lifecycle, "LIFECYCLE");} POLICIES HISTORY? (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
     | SHOW TERSE? ROW ACCESS POLICIES (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
     // FOR reads as IN does, and a table, a stream and a task are named bare, qualified or through IDENTIFIER()
     // (live-verified).
     | SHOW PARAMETERS (LIKE stringText)? ((IN | FOR) showParametersScope?)? showTail SEMI?
     | SHOW TERSE? OBJECTS (LIKE stringText)? (IN (ACCOUNT (objectName objectSignature? | openedValueReference)? | (DATABASE | SCHEMA | TABLE) (objectName objectSignature? | openedValueReference)? | objectName ({scopeNameTakesSignature()}? objectSignature | showInstanceName ({scopeObjectTakesSignature($ctx)}? objectSignature)?)? | openedValueReference))? showTail SEMI?
-    | SHOW ORGANIZATION ACCOUNTS (LIKE stringText)? showTail SEMI?
-    // A scope parses and is refused whole: the listing takes none (live-verified).
-    | SHOW ACCOUNTS HISTORY? (LIKE stringText)? showAccountsScope? showTail SEMI?
+    | SHOW ORGANIZATION ACCOUNTS HISTORY? (LIKE stringText)? showTail SEMI?
+    // A scope parses and is refused whole: the listing takes none (live-verified). TERSE parses and is refused.
+    | SHOW TERSE? ACCOUNTS HISTORY? (LIKE stringText)? showAccountsScope? showTail SEMI?
     | SHOW TERSE? LOCKS (IN ACCOUNT (objectName | openedIdentifierReference)?)? showTail SEMI?
     | SHOW TERSE? TRANSACTIONS (IN ACCOUNT (objectName | openedIdentifierReference)?)? showTail SEMI?   // no LIKE (live-verified)
     | SHOW VARIABLES (LIKE stringText)? showTail SEMI?
@@ -5765,6 +5826,7 @@ unmodelledListingKind
     | SNAPSHOTS
     | GIT REPOSITORIES
     | SEMANTIC VIEWS
+    | DBT projects=IDENTIFIER {refuseKindWord($ctx, $projects, "PROJECTS");}
     | (SESSION | AUTHENTICATION | PACKAGES) POLICIES
     | (EXTERNAL | DATA METRIC) FUNCTIONS
     ;

@@ -323,6 +323,28 @@ public final class AlertCommandHandler {
         return schema.getAlertExact(alertName);
     }
 
+    /**
+     * COMMENT ON ALERT, answered as ALTER ALERT … SET COMMENT is: a missing alert is refused unless IF EXISTS
+     * forgives it, the change asks MODIFY, and a running alert must be suspended first.
+     *
+     * @param name     the alert's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing alert
+     */
+    public void comment(final FrostlakeParser.QualifiedNameContext name, final String comment, final boolean ifExists) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(name);
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        if (ifExists && !schema.hasAlertExact(parts[parts.length - 1])) {
+            return;
+        }
+        final Alert alert = require(name);
+        queryExecutor.requirePrivilege(Privilege.MODIFY, "ALERT", parts, null);
+        if (alert.getState() == AlertState.STARTED) {
+            throw notSuspended(alert);
+        }
+        alert.setComment(comment);
+    }
+
     /** ALTER ALERT … RESUME | SUSPEND | SET | UNSET | MODIFY CONDITION | MODIFY ACTION (tags are the caller's). */
     public void alter(final FrostlakeParser.QualifiedNameContext name, final FrostlakeParser.AlertActionContext action) {
         final String[] parts = ParseTreeText.qualifiedNameParts(name);

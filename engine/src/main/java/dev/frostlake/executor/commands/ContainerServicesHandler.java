@@ -278,6 +278,39 @@ public final class ContainerServicesHandler {
         return null;
     }
 
+    /**
+     * COMMENT ON IMAGE REPOSITORY, answered as its ALTER … SET COMMENT is: a missing repository is refused unless IF
+     * EXISTS forgives it.
+     *
+     * @param name     the repository's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing repository
+     */
+    public void commentImageRepository(final FrostlakeParser.QualifiedNameContext name, final String comment,
+                                       final boolean ifExists) {
+        final ImageRepository repository = imageRepository(name, !ifExists);
+        if (repository != null) {
+            repository.setComment(comment);
+        }
+    }
+
+    /**
+     * COMMENT ON SERVICE, answered as its ALTER … SET COMMENT is: a missing service is refused unless IF EXISTS
+     * forgives it.
+     *
+     * @param name     the service's name
+     * @param comment  the comment
+     * @param ifExists whether IF EXISTS forgives a missing service
+     */
+    public void commentService(final FrostlakeParser.QualifiedNameContext name, final String comment,
+                               final boolean ifExists) {
+        final ContainerService service = service(name, !ifExists);
+        if (service != null) {
+            service.setComment(comment);
+            service.touch();
+        }
+    }
+
     private Object alterImageRepository(final FrostlakeParser.ContainerServicesStatementContext ctx) {
         final ImageRepository repository = imageRepository(ctx.qualifiedName(), ctx.if_exists() == null);
         if (repository == null) {
