@@ -18,7 +18,10 @@ package dev.frostlake.executor.copy;
 
 import dev.frostlake.functions.scalar.JsonNumberNotation;
 import dev.frostlake.functions.scalar.JsonNumberRange;
+import dev.frostlake.functions.scalar.JsonTypeHelper;
+import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.cfg.JsonNodeFeature;
@@ -72,7 +75,7 @@ public class JsonStageReader implements StageFileReader {
      */
     public List<JsonNode> readRecords(final Path file, final boolean stripOuterArray, final boolean replaceInvalid,
                                       final String shownName) throws IOException {
-        return readRecords(file, stripOuterArray, replaceInvalid, shownName, true);
+        return readRecords(file, stripOuterArray, replaceInvalid, shownName, true, false);
     }
 
     /**
@@ -89,13 +92,34 @@ public class JsonStageReader implements StageFileReader {
      */
     public List<JsonNode> readRecords(final Path file, final boolean stripOuterArray, final boolean replaceInvalid,
                                       final String shownName, final boolean namesColumn) throws IOException {
+        return readRecords(file, stripOuterArray, replaceInvalid, shownName, namesColumn, true);
+    }
+
+    /**
+     * {@link #readRecords(Path, boolean, boolean, String, boolean)}, a malformed record refused in the account's
+     * words - {@code Error parsing JSON: unknown keyword "tru"}, the file, the line and the character, and the row
+     * (see {@link JsonRecordFault}) - where {@code namesFault} asks for them, as a staged-file query does.
+     */
+    private List<JsonNode> readRecords(final Path file, final boolean stripOuterArray, final boolean replaceInvalid,
+                                       final String shownName, final boolean namesColumn, final boolean namesFault)
+            throws IOException {
         final String marked = StagedFileIo.readMarked(file, StandardCharsets.UTF_8);
         final int unreadable = StagedFileIo.firstUnreadable(marked);
         if (unreadable >= 0 && !replaceInvalid) {
             throw StagedFileIo.unreadableRefusal("JSON", marked, unreadable, shownName, namesColumn);
         }
-        return records(StagedFileIo.withoutByteOrderMark(StagedFileIo.unreadableReplaced(marked)).trim(),
-            stripOuterArray, file);
+        final String text = StagedFileIo.withoutByteOrderMark(StagedFileIo.unreadableReplaced(marked));
+        try {
+            return records(text.trim(), stripOuterArray, file);
+        } catch (final RuntimeException malformed) {
+            // A staged-file query names the fault as the account's reader does, where that reader finds one.
+            final JsonRecordFault fault = namesFault ? JsonRecordFault.first(text, stripOuterArray, false) : null;
+            if (fault == null) {
+                throw malformed;
+            }
+            throw new RuntimeException("Error parsing JSON: " + fault.sentence()
+                + fault.placeLines(shownName, namesColumn), malformed);
+        }
     }
 
     private static List<JsonNode> records(final String text, final boolean stripOuterArray, final Path file) {
@@ -130,8 +154,19 @@ public class JsonStageReader implements StageFileReader {
      * {@link JsonNumberRange}), so a staged file types a document as the function does.
      */
     private static JsonNode readTree(final String text) {
-        return JsonNumberRange.applyDoubleRange(text,
-            JsonNumberNotation.applyExponentNotation(MAPPER, text, MAPPER.readTree(text)));
+        final JsonNode strict;
+        try {
+            strict = MAPPER.readTree(text);
+        } catch (final JacksonException malformed) {
+            // What strict JSON refuses and the account reads - an unquoted key, a single-quoted string, a
+            // trailing comma - is read as PARSE_JSON reads it.
+            final JsonNode lenient = JsonTypeHelper.parseLenient(text);
+            if (lenient == null || JsonRecordFault.breaksALine(text)) {
+                throw malformed;
+            }
+            return lenient;
+        }
+        return JsonNumberRange.applyDoubleRange(text, JsonNumberNotation.applyExponentNotation(MAPPER, text, strict));
     }
 
     @Override

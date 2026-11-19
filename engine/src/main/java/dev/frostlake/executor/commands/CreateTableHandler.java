@@ -314,6 +314,9 @@ public class CreateTableHandler implements CommandHandler {
                 }
             }
 
+            // Key properties the account refuses are refused before a table of the name is replaced.
+            KeyConstraintProperties.judge(ctx.columnList());
+
             // A temporary table may take a permanent table's name, and a permanent table may be created
             // under a temporary one's; each create meets only the tables of its own persistence.
             createdIn = schema;
@@ -1105,6 +1108,11 @@ public class CreateTableHandler implements CommandHandler {
         }
         PropertyDuplicates.reject(keys);
         for (final FrostlakeParser.TableTailOptionContext tail : ctx.tableTailOption()) {
+            if (writesComment(tail) && tail.parenOptionList() != null
+                    && !tail.parenOptionList().parenOption().isEmpty()) {
+                // A comment written as a list of properties is the parser's word for the list (live-verified).
+                table.setComment(ListValues.PROPERTY_LIST);
+            }
             if (tail.propertyName() == null || tail.copyOptionValue() == null) {
                 continue;
             }

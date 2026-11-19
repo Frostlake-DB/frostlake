@@ -452,7 +452,7 @@ final class CallArgumentTypes {
                                                 final String name) {
         for (final FrostlakeParser.CallArgumentContext argument : arguments) {
             final FrostlakeParser.VariableNameContext written = nameOf(argument);
-            if (written != null && written.getText().equalsIgnoreCase(name)) {
+            if (written != null && SqlIdentifiers.canonical(written).equals(name)) {
                 return namedValueOf(argument);
             }
         }

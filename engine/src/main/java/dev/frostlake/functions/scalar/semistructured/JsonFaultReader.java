@@ -42,6 +42,7 @@ import java.util.Set;
  *   missing comma, pos 8       missing colon, pos 6   two members, or a key and its value, run on
  *   invalid character outside of a string: '#', pos 1
  *   stray minus sign, pos 2    no number after a sign, pos 2
+ *   stray minus sign, pos 7    stray plus sign, pos 7 a sign with nothing to sign, {"a":-}, at what follows it
  *   missing decimal exponent digits: '1e+', pos 4
  *   garbage in the numeric literal: 1a , pos 3        the literal runs through letters, points and
  *                                                     signs (2024-01-01), then the character after
@@ -49,6 +50,12 @@ import java.util.Set;
  *   garbage after valid input document                these two carry NO position
  *   more than one document in the input
  * </pre>
+ *
+ * <p>A STAGED FILE'S records are read by the same vocabulary ({@link #recordFaultOf}), placed by line and
+ * character, with three sentences of their own: {@code not a number: '.'} for a point without a digit inside a
+ * record, and after a stripped outer array {@code misplaced [} for another array and {@code garbage after outer ]}
+ * for anything else. A comma may part two records, the records of a stripped outer array need none, and a keyword
+ * reads in any case.
  *
  * <p>THE POSITION IS 1-BASED and falls in one of two places. A fault about a TOKEN that was read
  * reports the index just PAST it — a five-character keyword is pos 6, and a document that simply ran
@@ -68,6 +75,20 @@ final class JsonFaultReader {
 
     private final String text;
     private int at;
+    /** Where the fault found stands, and the bytes of the faulty character past its first; -1 before any. */
+    private int faultAt = -1;
+    private int faultExtraBytes;
+    /** Whether an object may name a key twice. */
+    private boolean duplicatesAllowed;
+    /** Whether a top-level array's elements are records of their own. */
+    private boolean outerArrayStripped;
+    /** Whether a staged file's records are read, which takes a keyword in any case. */
+    private boolean readsRecords;
+    /** The objects and arrays open around the value being read. */
+    private int depth;
+    /** The records read whole, and the line the next one starts on. */
+    private int records;
+    private int recordLine = 1;
 
     private JsonFaultReader(final String document) {
         this.text = document;
@@ -123,6 +144,102 @@ final class JsonFaultReader {
         return "bad escape sequence in the string, " + positionOf(text, at + 2);
     }
 
+    /**
+     * The first fault among the records of a staged file's text: every top-level value is a record, and under
+     * STRIP_OUTER_ARRAY every element of a top-level array is.
+     *
+     * @param document          the file's text
+     * @param stripOuterArray   whether a top-level array's elements are records of their own
+     * @param duplicatesAllowed whether an object may name a key twice
+     * @return the fault and where it stands, or null when this reader finds none
+     */
+    static JsonRecordFault recordFaultOf(final String document, final boolean stripOuterArray,
+                                         final boolean duplicatesAllowed) {
+        final JsonFaultReader reader = new JsonFaultReader(document);
+        reader.duplicatesAllowed = duplicatesAllowed;
+        reader.readsRecords = true;
+        reader.skipWhitespace();
+        final boolean stripped = stripOuterArray && !reader.atEnd() && reader.text.charAt(reader.at) == '[';
+        reader.outerArrayStripped = stripped;
+        while (!reader.atEnd()) {
+            final String fault = reader.value();
+            if (fault != null) {
+                return reader.recordFault(fault);
+            }
+            if (!stripped) {
+                reader.recordRead();
+            }
+            reader.skipWhitespace();
+            if (stripped && !reader.atEnd()) {
+                // Nothing follows the outer array: another array is misplaced, anything else garbage.
+                return reader.recordFault(reader.text.charAt(reader.at) == '['
+                    ? reader.misplaced('[') : "garbage after outer ], " + reader.placed(reader.at));
+            }
+            if (!reader.atEnd() && reader.text.charAt(reader.at) == ',') {
+                // A comma may part two records.
+                reader.at++;
+                reader.skipWhitespace();
+            }
+        }
+        return null;
+    }
+
+    /** A record is read: the next one starts where it ended. */
+    private void recordRead() {
+        records++;
+        recordLine = lineOf(at);
+    }
+
+    /** The line an offset stands on, the first being 1. */
+    private int lineOf(final int offset) {
+        int line = 1;
+        for (int i = 0; i < offset && i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                line++;
+            }
+        }
+        return line;
+    }
+
+    /**
+     * A fault as a staged file's refusal places it: the sentence without its place, the line, and the character
+     * within it - a place at a line's end is the next line's character 0.
+     */
+    private JsonRecordFault recordFault(final String fault) {
+        final int cut = fault.lastIndexOf(", pos ");
+        String sentence = cut < 0 ? fault : fault.substring(0, cut);
+        if (faultAt < 0) {
+            return new JsonRecordFault(sentence, -1, -1, records, recordLine);
+        }
+        final int line = lineOf(faultAt);
+        final boolean atLineEnd = faultAt < text.length() && text.charAt(faultAt) == '\n';
+        // PARSE_JSON's place names its line past the first; a string a line feed cuts names the line after.
+        if (sentence.endsWith(", line " + line)) {
+            sentence = sentence.substring(0, sentence.length() - (", line " + line).length());
+        } else if (atLineEnd && sentence.endsWith(", line " + (line + 1))) {
+            sentence = sentence.substring(0, sentence.length() - (", line " + (line + 1)).length());
+        }
+        if (atLineEnd) {
+            return new JsonRecordFault(sentence, line + 1, 0, records, recordLine);
+        }
+        int bytes = 0;
+        for (int i = text.lastIndexOf('\n', faultAt - 1) + 1; i < faultAt && i < text.length(); i++) {
+            bytes += utf8Length(text.charAt(i));
+        }
+        return new JsonRecordFault(sentence, line, bytes + 1 + faultExtraBytes, records, recordLine);
+    }
+
+    /** Where a fault stands, as {@link #positionOf(String, int)} words it, the place kept for a file's refusal. */
+    private String placed(final int offset) {
+        return placed(offset, 0);
+    }
+
+    private String placed(final int offset, final int extraBytes) {
+        faultAt = offset;
+        faultExtraBytes = extraBytes;
+        return positionOf(text, offset, extraBytes);
+    }
+
     /** The fault Snowflake names in {@code document}, or null when this reader finds none. */
     static String faultOf(final String document) {
         final JsonFaultReader reader = new JsonFaultReader(document);
@@ -154,11 +271,13 @@ final class JsonFaultReader {
             return null;
         }
         final char c = text.charAt(at);
-        if (c == '{') {
-            return object();
-        }
-        if (c == '[') {
-            return array();
+        if (c == '{' || c == '[') {
+            depth++;
+            try {
+                return c == '{' ? object() : array();
+            } finally {
+                depth--;
+            }
         }
         if (c == '"') {
             return string();
@@ -167,7 +286,7 @@ final class JsonFaultReader {
             return misplaced(c);
         }
         if (c == ',') {
-            return "misplaced comma, " + positionOf(text, at);
+            return "misplaced comma, " + placed(at);
         }
         if (c == '-' || c == '+' || c == '.' || c >= '0' && c <= '9') {
             return number();
@@ -199,7 +318,7 @@ final class JsonFaultReader {
                 return misplaced(start);
             }
             if (start == ',') {
-                return "misplaced comma, " + positionOf(text, at);
+                return "misplaced comma, " + placed(at);
             }
             final int keyStart = at;
             if (start == '"') {
@@ -210,7 +329,7 @@ final class JsonFaultReader {
             } else if (isDigit(start)) {
                 // ★ A NUMBER IS NOT A NAME, and live says so in its own sentence rather than through
                 // the character rule — {@code {1:1}} and {@code {1a:1}} both report it, at the digit.
-                return "object attribute name cannot be a number, " + positionOf(text, at);
+                return "object attribute name cannot be a number, " + placed(at);
             } else if (isWordCharacter(start)) {
                 // An UNQUOTED key is legal, so the keyword check that a value position would apply
                 // must not run here: {a:1} is an object with one attribute.
@@ -222,8 +341,8 @@ final class JsonFaultReader {
             }
             final String key = start == '"'
                 ? text.substring(keyStart + 1, at - 1) : text.substring(keyStart, at);
-            if (!keys.add(key)) {
-                return "duplicate object attribute \"" + key + "\", " + positionOf(text, at - 1);
+            if (!keys.add(key) && !duplicatesAllowed) {
+                return "duplicate object attribute \"" + key + "\", " + placed(at - 1);
             }
             final String separated = afterKey();
             if (separated != null) {
@@ -246,7 +365,7 @@ final class JsonFaultReader {
                 return misplaced(after);
             }
             if (after != ',') {
-                return "missing comma, " + positionOf(text, at);
+                return "missing comma, " + placed(at);
             }
             at++;
             skipWhitespace();
@@ -254,7 +373,7 @@ final class JsonFaultReader {
                 return incomplete("object");
             }
             if (text.charAt(at) == ',') {
-                return "misplaced comma, " + positionOf(text, at);
+                return "misplaced comma, " + placed(at);
             }
             if (text.charAt(at) == '}') {
                 at++;
@@ -274,7 +393,7 @@ final class JsonFaultReader {
             return misplaced(c);
         }
         if (c == ',') {
-            return "misplaced comma, " + positionOf(text, at);
+            return "misplaced comma, " + placed(at);
         }
         if (c != ':') {
             // ★ TWO CLASSES, and the split is "could this character begin a VALUE here". A sign or a
@@ -282,7 +401,7 @@ final class JsonFaultReader {
             // anything else is legal nowhere outside a string and is reported where it stands. The
             // whitespace case reads as the first kind because the skip above has already passed it,
             // so the report lands on the next real character rather than on the space.
-            return startsAValue(c) ? "missing colon, " + positionOf(text, at)
+            return startsAValue(c) ? "missing colon, " + placed(at)
                 : invalidCharacter(c);
         }
         at++;
@@ -294,6 +413,7 @@ final class JsonFaultReader {
     }
 
     private String array() {
+        final boolean elementsAreRecords = outerArrayStripped && depth == 1;
         at++;
         skipWhitespace();
         if (atEnd()) {
@@ -321,6 +441,9 @@ final class JsonFaultReader {
                 if (element != null) {
                     return element;
                 }
+                if (elementsAreRecords) {
+                    recordRead();
+                }
             }
             skipWhitespace();
             if (atEnd()) {
@@ -334,8 +457,12 @@ final class JsonFaultReader {
             if (after == '}') {
                 return misplaced(after);
             }
+            if (after != ',' && elementsAreRecords) {
+                // The outer array's records need no comma between them.
+                continue;
+            }
             if (after != ',') {
-                return "missing comma, " + positionOf(text, at);
+                return "missing comma, " + placed(at);
             }
             at++;
         }
@@ -347,12 +474,14 @@ final class JsonFaultReader {
             final char c = text.charAt(at);
             if (c == '\\') {
                 if (at + 1 < text.length() && text.charAt(at + 1) == '\r') {
+                    faultAt = at + 2;
                     return badEscape(text, at);
                 }
                 at += 2;
                 continue;
             }
             if (c == '\n' || c == '\r') {
+                faultAt = at;
                 return unterminated(text, at);
             }
             at++;
@@ -360,7 +489,7 @@ final class JsonFaultReader {
                 return null;
             }
         }
-        return "unfinished string, " + positionOf(text, at);
+        return "unfinished string, " + placed(at);
     }
 
     private String number() {
@@ -368,16 +497,26 @@ final class JsonFaultReader {
         final char sign = text.charAt(at);
         if (sign == '-' || sign == '+') {
             at++;
+            // Blanks may part a sign from what it signs.
+            final int afterSign = at;
+            skipWhitespace();
             if (atEnd()) {
-                return "no number after a sign, " + positionOf(text, at);
+                return "no number after a sign, " + placed(at);
             }
             final char next = text.charAt(at);
             if (next == '-' || next == '+') {
-                return "stray minus sign, " + positionOf(text, at);
+                return "stray minus sign, " + placed(at);
+            }
+            if (!isDigit(next) && next != '.' && isWordCharacter(next)) {
+                // A word straight after its sign is one word with it; past a blank it is a word of its own.
+                if (at == afterSign) {
+                    at = start;
+                }
+                return keyword();
             }
             if (!isDigit(next) && next != '.') {
-                at = start;
-                return keyword();
+                // A sign with nothing to sign, reported at what stands after it.
+                return "stray " + (sign == '-' ? "minus" : "plus") + " sign, " + placed(at);
             }
         }
         final String hex = hexNumber(start);
@@ -388,6 +527,10 @@ final class JsonFaultReader {
         if (!atEnd() && text.charAt(at) == '.') {
             at++;
             skipDigits();
+            if (at == start + 1 && readsRecords && depth > 0) {
+                // A staged file's reader takes no point without a digit, where a document's reads zero.
+                return "not a number: '.', " + placed(at);
+            }
         }
         if (!atEnd() && (text.charAt(at) == 'e' || text.charAt(at) == 'E')) {
             at++;
@@ -396,7 +539,7 @@ final class JsonFaultReader {
             }
             if (atEnd() || !isDigit(text.charAt(at))) {
                 return "missing decimal exponent digits: '" + text.substring(start, at)
-                    + "', " + positionOf(text, at);
+                    + "', " + placed(at);
             }
             skipDigits();
         }
@@ -405,7 +548,7 @@ final class JsonFaultReader {
                 at++;
             }
             return "garbage in the numeric literal: " + text.substring(start, at)
-                + (atEnd() ? " " : String.valueOf(text.charAt(at))) + ", " + positionOf(text, at);
+                + (atEnd() ? " " : String.valueOf(text.charAt(at))) + ", " + placed(at);
         }
         return null;
     }
@@ -447,7 +590,7 @@ final class JsonFaultReader {
             }
             if (atEnd() || !isDigit(text.charAt(at))) {
                 return "missing hexadecimal exponent digits: '" + text.substring(start, at)
-                    + "', " + positionOf(text, at);
+                    + "', " + placed(at);
             }
             skipDigits();
         }
@@ -456,16 +599,16 @@ final class JsonFaultReader {
                 at++;
             }
             return "garbage in the numeric literal: " + text.substring(start, at)
-                + (atEnd() ? " " : String.valueOf(text.charAt(at))) + ", " + positionOf(text, at);
+                + (atEnd() ? " " : String.valueOf(text.charAt(at))) + ", " + placed(at);
         }
         if (!floating && integerEnd == integerAt) {
             return "hexadecimal integer number conversion error: " + text.substring(start, at)
-                + ", " + positionOf(text, at);
+                + ", " + placed(at);
         }
         if (!floating && new BigInteger(text.substring(integerAt, integerEnd), 16)
                 .compareTo(LARGEST_HEX_INTEGER) > 0) {
             return "hexadecimal integer number conversion error: " + text.substring(start, at)
-                + ", " + positionOf(text, at);
+                + ", " + placed(at);
         }
         return "";
     }
@@ -488,14 +631,22 @@ final class JsonFaultReader {
         }
         final String word = text.substring(start, at);
         if (word.equals("true") || word.equals("false") || word.equals("null")
-                || word.equals("undefined")) {
+                || word.equals("undefined") || readsRecords && isLenientKeyword(word)) {
             return null;
         }
-        return "unknown keyword \"" + word + "\", " + positionOf(text, at);
+        return "unknown keyword \"" + word + "\", " + placed(at);
+    }
+
+    /** A keyword in any case, or a number no JSON spells: what a file's reader takes where a document's is strict. */
+    private static boolean isLenientKeyword(final String word) {
+        final String lower = word.toLowerCase(Locale.ROOT);
+        final String unsigned = lower.startsWith("-") || lower.startsWith("+") ? lower.substring(1) : lower;
+        return lower.equals("true") || lower.equals("false") || lower.equals("null") || lower.equals("undefined")
+            || unsigned.equals("nan") || unsigned.equals("inf") || unsigned.equals("infinity");
     }
 
     private String incomplete(final String container) {
-        return "incomplete " + container + " value, " + positionOf(text, at);
+        return "incomplete " + container + " value, " + placed(at);
     }
 
     /** Whether a character carries a numeric literal on: a letter, a digit, a point or a sign. */
@@ -521,7 +672,7 @@ final class JsonFaultReader {
         if (c >= 0x80) {
             shown = String.format(Locale.ROOT, "U+%04X", (int) c);
             return "invalid character outside of a string: " + shown + ", "
-                + positionOf(text, at, utf8Length(c) - 1);
+                + placed(at, utf8Length(c) - 1);
         } else if (c == '\\') {
             // The one character the message ESCAPES rather than showing as written (live-measured).
             shown = "\\\\";
@@ -532,7 +683,7 @@ final class JsonFaultReader {
         // multi-byte one is reported at its END: measured, U+00E4 at byte 2 reads pos 3 and U+20AC
         // at byte 2 reads pos 4 — the width of the character, not its start, decides the number.
         return "invalid character outside of a string: '" + shown + "', "
-            + positionOf(text, at, utf8Length(c) - 1);
+            + placed(at, utf8Length(c) - 1);
     }
 
     /** How many bytes a character occupies once the document is UTF-8, which is how live counts. */
@@ -544,7 +695,7 @@ final class JsonFaultReader {
     }
 
     private String misplaced(final char closer) {
-        return "misplaced " + closer + ", " + positionOf(text, at);
+        return "misplaced " + closer + ", " + placed(at);
     }
 
     private void skipWhitespace() {

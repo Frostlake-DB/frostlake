@@ -179,6 +179,10 @@ public final class FileFormatClause {
         if (option.LPAREN() != null) {
             return new WrittenFormatOption(name, spelled, null, null, false, listed(option.stringLiteralList()));
         }
+        if (option.NULL() != null) {
+            // A NULL, which a table's list reads: no value of any option.
+            return new WrittenFormatOption(name, spelled, option.NULL().getText(), null, false, null);
+        }
         return scalar(name, spelled, option.copyOptionValue());
     }
 
@@ -219,6 +223,16 @@ public final class FileFormatClause {
         for (final WrittenFormatOption option : options) {
             if (!seen.add(option.name)) {
                 throw new RuntimeException(SqlCompilationError.conflictingFileFormatParameter(option.name));
+            }
+            if (option.value == null && option.listed == null) {
+                // A NULL is no value of an option the list knows, and an unknown name is refused first
+                // (live-verified).
+                if (!"TYPE".equals(option.name) && !"FORMAT_NAME".equals(option.name)
+                        && !"COMMENT".equals(option.name) && !FileFormatSurfaces.isKnownOption(option.name)) {
+                    throw new RuntimeException(SqlCompilationError.of("invalid parameter '" + option.spelled + "'"));
+                }
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(option.written,
+                    option.name));
             }
             if ("TYPE".equals(option.name) && option.value != null) {
                 FileFormatSurfaces.requireLegalValue("TYPE", option.value, option.written);

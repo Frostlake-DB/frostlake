@@ -25,18 +25,17 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * SHOW EXTERNAL TABLES: the listing's nineteen columns, and no rows.
+ * SHOW EXTERNAL TABLES: the listing's nineteen columns.
  *
- * <p>An external table reads files a cloud location holds, which this engine has no way to reach, so there
- * are never any to list. What the statement still has to answer for is its SHAPE — the columns come back
- * even when nothing does, and a client reading the listing reads them.
+ * <p>The rows are the external tables declared ({@link ExternalTableCommandHandler#rows}); the columns come back
+ * even when there is none, and a client reading the listing reads them.
  */
 final class ExternalTableListing {
 
     private ExternalTableListing() {
     }
 
-    /** The empty listing, with the columns the account declares for it. */
+    /** The listing with no rows, with the columns the account declares for it. */
     static ResultSet listing() {
         final List<ResultSetColumn> columns = new ArrayList<>();
         columns.add(new ResultSetColumn("created_on", ShowResultHelpers.CREATED_ON));

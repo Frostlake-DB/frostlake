@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.ShowResultHelpers;
@@ -373,6 +374,9 @@ public final class IntegrationCommandHandler {
         if (integration.getKind() == IntegrationKind.SECURITY) {
             // The client's secret is never told, masked or not.
             shown.add("OAUTH_CLIENT_SECRET");
+            if (SecurityIntegrationDescription.covers(integration)) {
+                shown.addAll(SecurityIntegrationDescription.unlisted(integration));
+            }
         }
         if (inboundPubSub(integration)) {
             // An inbound Pub/Sub queue lists its subscription and its service account, not its provider.
@@ -475,13 +479,12 @@ public final class IntegrationCommandHandler {
     }
 
     /**
-     * A security integration's rows: an AWS role's, or an OAuth client's. A Snowflake OAuth, External OAuth, SAML2 or
-     * SCIM integration shows ENABLED, then what it was written with.
+     * A security integration's rows: an AWS role's, or an OAuth client's; a Snowflake OAuth, External OAuth, SAML2
+     * or SCIM integration's are its type's own (see {@link SecurityIntegrationDescription}).
      */
     private static String[][] securityLayout(final Integration integration, final String[] enabled) {
-        final String type = String.valueOf(integration.text("TYPE"));
-        if ("OAUTH".equals(type) || "EXTERNAL_OAUTH".equals(type) || "SAML2".equals(type) || "SCIM".equals(type)) {
-            return new String[][] {enabled};
+        if (SecurityIntegrationDescription.covers(integration)) {
+            return SecurityIntegrationDescription.layout(integration);
         }
         if ("AWS_IAM".equals(integration.text("AUTH_TYPE"))) {
             return new String[][] {enabled, {"PARENT_INTEGRATION", "String", ""},
@@ -619,6 +622,13 @@ public final class IntegrationCommandHandler {
      * list, and the identity the account generates for an AWS role is derived from the integration's name.
      */
     private String securityValue(final Integration integration, final String key, final PropertyValue value) {
+        if (SecurityIntegrationDescription.covers(integration)) {
+            final AccountIdentity account = AccountIdentity.of(queryExecutor.getEngineConfig());
+            final String blocks = catalog.getAccountParameters().get(key.startsWith("EXTERNAL_OAUTH_")
+                ? "EXTERNAL_OAUTH_ADD_PRIVILEGED_ROLES_TO_BLOCKED_LIST" : "OAUTH_ADD_PRIVILEGED_ROLES_TO_BLOCKED_LIST");
+            return SecurityIntegrationDescription.value(integration, key, account.getAccountUrl(),
+                account.getAccountLocatorUrl(), !"false".equalsIgnoreCase(blocks));
+        }
         if (value == null) {
             if (key.endsWith("_VALIDITY")) {
                 return "0";

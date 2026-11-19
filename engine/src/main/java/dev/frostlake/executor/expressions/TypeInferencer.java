@@ -339,7 +339,7 @@ final class TypeInferencer {
             // ★ THE DECLARATION IS THE VARIABLE'S TYPE (live): a column derived from :v carries the
             // DECLARED type WITH its width — declare v varchar(2) := 42 makes a VARCHAR(2) column
             // and number(5,2) keeps its (5,2) — not whatever object the initialiser produced.
-            return visitor.declaredBindVariableType(((BindVariableExpression) expr).getVarName());
+            return visitor.declaredBindVariableType(((BindVariableExpression) expr).getVariableKey());
         }
         if (expr instanceof SessionVarExpression) {
             // A session variable is typed by the VALUE it holds, as a literal of that value is typed.
@@ -1603,7 +1603,9 @@ final class TypeInferencer {
      * NUMBER(3,0), {@code BITOR(123.5, 2)} NUMBER(4,0)). BITAND and BITXOR take the wider argument, at least
      * two digits, a FLOAT counting for nothing and a text for thirteen — the integer part of the NUMBER(18,5)
      * a text reads as — and a text in SECOND place caps the width at thirty-three. BITOR is one digit wider,
-     * capped at thirty-eight, with a FLOAT or a text counting eighteen. BITNOT keeps the argument's width, at
+     * capped at thirty-eight, with a FLOAT or a text counting eighteen. GETBIT declares what BITAND does over the
+     * value and the bit's place, though it answers 0 or 1: {@code GETBIT(n5, 0)} is NUMBER(5,0) and
+     * {@code GETBIT(1, 100)} NUMBER(3,0). A VARIANT counts as a FLOAT does. BITNOT keeps the argument's width, at
      * least two, and BITSHIFTRIGHT the wider of the value and the shift — {@code BITSHIFTRIGHT(1, 200)} is
      * NUMBER(3,0) — where a shift written as a text counts for nothing; BITSHIFTLEFT is always thirty-eight.
      * Null for an argument of any other kind.
@@ -1613,7 +1615,8 @@ final class TypeInferencer {
         final String funcName = written.equals("BIT_AND") || written.equals("BIT_OR") || written.equals("BIT_XOR")
             || written.equals("BIT_NOT") ? "BIT" + written.substring(4) : written;
         final boolean or = funcName.equals("BITOR");
-        final boolean twoOperands = or || funcName.equals("BITAND") || funcName.equals("BITXOR");
+        final boolean twoOperands = or || funcName.equals("BITAND") || funcName.equals("BITXOR")
+            || funcName.equals("GETBIT");
         if (!twoOperands && !funcName.equals("BITNOT") && !funcName.equals("BITSHIFTRIGHT")
                 && !funcName.equals("BITSHIFTLEFT")) {
             return null;
@@ -1714,6 +1717,9 @@ final class TypeInferencer {
         final DataType type = infer(arg);
         if (type instanceof StringType) {
             return or ? 18 : 13;
+        }
+        if (type instanceof VariantType) {
+            return or ? 18 : 0;
         }
         if (type instanceof NumericType) {
             if (NumericType.isApproximate(type)) {
@@ -2013,7 +2019,7 @@ final class TypeInferencer {
                 continue;
             }
             final DataType declared = visitor.declaredBindVariableType(
-                ((BindVariableExpression) operand).getVarName());
+                ((BindVariableExpression) operand).getVariableKey());
             if (!(declared instanceof DateTimeType)) {
                 continue;
             }

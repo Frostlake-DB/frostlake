@@ -50,6 +50,7 @@ import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DynamicTable;
 import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.MaterializedView;
+import dev.frostlake.metastore.model.ObjectParameters;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.Procedure;
@@ -951,7 +952,7 @@ public class DDLCommandHandler implements CommandHandler {
             + " unexpected '<EOF>'."));
     }
 
-    /** COMMENT is kept; the two logging levels are taken and inert; any other name is not a property. */
+    /** COMMENT is kept, and so is a parameter the routine lists; any other name is not a property. */
     private void applyRoutineProperty(final SqlObject routine,
                                       final FrostlakeParser.RoutineSetPropertyContext property,
                                       final boolean isFunction) {
@@ -979,7 +980,14 @@ public class DDLCommandHandler implements CommandHandler {
             routine.setComment(written.substring(2, written.length() - 2));
             return;
         }
+        RoutineParameters.requireLevel(name, isFunction);
         requireRoutineProperty(name, isFunction);
+        RoutineParameters.set(ownParametersOf(routine, isFunction), name, property.literal());
+    }
+
+    /** The parameters set on a routine itself, which an ALTER changes in place. */
+    private static ObjectParameters ownParametersOf(final SqlObject routine, final boolean isFunction) {
+        return isFunction ? ((Function) routine).getOwnParameters() : ((Procedure) routine).getOwnParameters();
     }
 
     /** A SQL routine's secrets and integrations are no property an ALTER takes (live-verified). */
@@ -1015,12 +1023,14 @@ public class DDLCommandHandler implements CommandHandler {
             requireHandlerRoutine(routine, "SECRETS", isFunction);
             return;
         }
-        requireRoutineProperty(getText(property.identifier()).toUpperCase(Locale.ROOT), isFunction);
+        final String name = getText(property.identifier()).toUpperCase(Locale.ROOT);
+        requireRoutineProperty(name, isFunction);
+        ownParametersOf(routine, isFunction).unset(name);
     }
 
     /** Refuse a name that is not a property of a routine at all, in the account's own words. */
     private void requireRoutineProperty(final String name, final boolean isFunction) {
-        if ("LOG_LEVEL".equals(name) || "TRACE_LEVEL".equals(name)) {
+        if (RoutineParameters.takes(name, isFunction)) {
             return;
         }
         throw new RuntimeException(SqlCompilationError.of("invalid property '" + name

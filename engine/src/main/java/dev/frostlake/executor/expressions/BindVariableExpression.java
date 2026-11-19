@@ -16,6 +16,8 @@
 
 package dev.frostlake.executor.expressions;
 
+import dev.frostlake.executor.VariableKey;
+
 /**
  * A {@code :name} bind-variable reference — inside a Snowflake Scripting block, SQL statements
  * refer to the block's variables (and a procedure's parameters) as {@code :name}. Resolved at
@@ -37,6 +39,16 @@ public class BindVariableExpression implements Expression {
 
     public String getVarName() {
         return varName;
+    }
+
+    /**
+     * The name as a block's variables are keyed: a quoted name as its quotes hold it, an unquoted one upper-cased
+     * (see {@link VariableKey}); a number as written.
+     *
+     * @return the key
+     */
+    public String getVariableKey() {
+        return VariableKey.ofWritten(varName);
     }
 
     /**

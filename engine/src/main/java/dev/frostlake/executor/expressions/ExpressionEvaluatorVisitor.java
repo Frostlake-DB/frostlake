@@ -230,6 +230,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     private Map<String, Table> declaredTypeAliasToTable;
     private List<Table> declaredTypeAllTables;
     private final TypeInferencer typeInferencer = new TypeInferencer(this);
+    /** The values the row's calls of ENCRYPT drew, shared by the calls written alike. */
+    private final SharedRowDraws sharedRowDraws = new SharedRowDraws();
     /** The intervals scalar subqueries' items were planned to lie in, keyed by the subquery node. */
     private final Map<SubqueryExpression, ValueRange> subqueryRanges = new HashMap<>();
     private final ValueRangeInferencer valueRangeInferencer = new ValueRangeInferencer(this);
@@ -1827,7 +1829,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             return;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        if (procedural != null && (procedural.hasVariable(bind.getVarName()) || procedural.isExecutingBlock())) {
+        if (procedural != null && (procedural.hasVariable(bind.getVariableKey()) || procedural.isExecutingBlock())) {
             return;
         }
         final StringBuilder detail = new StringBuilder("Bind variable for object ")
@@ -1898,8 +1900,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             return null;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        return procedural != null && procedural.bindsIntoBlockExpression() && procedural.hasVariable(expr.getVarName())
-            ? procedural.getDeclaredVariableType(expr.getVarName()) : null;
+        return procedural != null && procedural.bindsIntoBlockExpression() && procedural.hasVariable(expr.getVariableKey())
+            ? procedural.getDeclaredVariableType(expr.getVariableKey()) : null;
     }
 
     /** The value a scripting variable holds right now, or null when no block binds the name. */
@@ -1908,8 +1910,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             return null;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        return procedural != null && procedural.hasVariable(expr.getVarName())
-            ? procedural.readVariable(expr.getVarName()) : null;
+        return procedural != null && procedural.hasVariable(expr.getVariableKey())
+            ? procedural.readVariable(expr.getVariableKey()) : null;
     }
 
     /** Whether the scripting variable a {@code :name} reference names is declared and holds NULL. */
@@ -1918,8 +1920,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             return false;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        return procedural != null && procedural.hasVariable(expr.getVarName())
-            && procedural.getVariable(expr.getVarName()) == null;
+        return procedural != null && procedural.hasVariable(expr.getVariableKey())
+            && procedural.getVariable(expr.getVariableKey()) == null;
     }
 
     @Override
@@ -1931,10 +1933,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             final ProceduralExecutor proceduralExecutor = queryExecutor.getProceduralExecutor();
             if (proceduralExecutor != null) {
                 // A handler may not read what its block's BEGIN section declared, reached or not.
-                proceduralExecutor.requireReadableInHandler(expr.getVarName());
+                proceduralExecutor.requireReadableInHandler(expr.getVariableKey());
             }
-            if (proceduralExecutor != null && proceduralExecutor.hasVariable(expr.getVarName())) {
-                return proceduralExecutor.readBind(expr.getVarName());
+            if (proceduralExecutor != null && proceduralExecutor.hasVariable(expr.getVariableKey())) {
+                return proceduralExecutor.readBind(expr.getVariableKey());
             }
         }
         // Live answers this in TWO different ways, and which one depends on whether a scripting block
@@ -3623,11 +3625,84 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         if (groupingCall && readsRow(written.getArguments())) {
             return rowGroupingMask(written);
         }
-        final Object result = evaluateFunctionCall(written);
+        final Object result = SharedRowDraws.shares(written)
+            ? sharedRowDraws.shared(table instanceof FromlessDual ? table : row, sharedDrawKey(written),
+                evaluateFunctionCall(written))
+            : evaluateFunctionCall(written);
         if (written instanceof RowExpression || written.getNameExpression() != null) {
             return result;
         }
         return inDeclaredOrder(written, typedMapKeys(written, typedStructuredGet(written, result)));
+    }
+
+    /**
+     * What tells a call that draws a value from one written otherwise (see {@link SharedRowDraws}): its name and,
+     * for each argument, the row's column it reads, the constant it folds to with its type, or its text. Read after
+     * the call ran, so every column it reads is resolved.
+     */
+    private String sharedDrawKey(final FunctionCallExpression call) {
+        final StringBuilder key = new StringBuilder(call.getFunctionName().toUpperCase(Locale.ROOT));
+        for (final Expression argument : call.getArguments()) {
+            key.append('\u0001');
+            final int slot = argument instanceof ColumnReferenceExpression
+                ? rowSlotOf((ColumnReferenceExpression) argument) : -1;
+            if (slot >= 0) {
+                key.append("c:").append(slot);
+            } else if (ConstantArgumentWalk.isConstant(argument, functionRegistry)) {
+                key.append("k:").append(constantKey(argument));
+            } else {
+                key.append("e:").append(canonicalPrintOf(argument));
+            }
+        }
+        if (call.getArgumentNames() != null) {
+            key.append('\u0001').append(call.getArgumentNames());
+        }
+        return key.toString();
+    }
+
+    /** A constant argument's type and value, or its text where either cannot be read. */
+    private String constantKey(final Expression argument) {
+        try {
+            final Object value = argument.accept(this);
+            return describeTypeOf(argument) + '\u0002' + (value == null ? "" : value.getClass().getName())
+                + '\u0002' + value;
+        } catch (final RuntimeException unreadable) {
+            return canonicalPrintOf(argument);
+        }
+    }
+
+    /** The place in the row a column reference reads, or -1 where it reads no one cell of it. */
+    private int rowSlotOf(final ColumnReferenceExpression reference) {
+        if (row == null || !lambdaScopes.isEmpty() || resultContext != null || reference.getPositionalOrdinal() > 0
+                || reference instanceof ConnectByRootExpression || reference instanceof PriorExpression) {
+            return -1;
+        }
+        String columnName = reference.getColumnName();
+        if (columnName.startsWith("\"") && columnName.endsWith("\"") && columnName.length() > 1) {
+            columnName = columnName.substring(1, columnName.length() - 1);
+        }
+        if (multiTableAllTables != null && queryExecutor != null) {
+            final Object memoized = multiTableRefMemo.get(reference);
+            if (memoized instanceof Integer) {
+                return ((Integer) memoized).intValue();
+            }
+            final String spelledColumn = SqlIdentifiers.spellCanonicalEscaped(columnName);
+            final int[] resolvedOffset = {-2};
+            try {
+                queryExecutor.resolveColumnInTables(row, multiTableAllTables, multiTableAliasToTable,
+                    reference.isQualified()
+                        ? lastQualifierPart(reference.getTableName()) + "." + spelledColumn : spelledColumn,
+                    resolvedOffset);
+            } catch (final RuntimeException unresolved) {
+                return -1;
+            }
+            return resolvedOffset[0] >= 0 ? resolvedOffset[0] : -1;
+        }
+        if (table == null || !table.hasColumn(columnName)) {
+            return -1;
+        }
+        final int index = table.getColumnIndex(columnName);
+        return index < row.getValues().size() ? index : -1;
     }
 
     /**
@@ -4125,7 +4200,30 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     if (DateTimeUnitSlot.isNullLiteral(arg)) {
                         return null;
                     }
+                    // A block's variable in the slot is read by what it holds: a text is the unit, a bind of a text
+                    // too; anything else is refused as the conversion the block writes for it.
+                    final Expression heldUnit = arg instanceof ColumnReferenceExpression
+                        ? boundBlockVariable((ColumnReferenceExpression) arg) : null;
+                    final Object boundUnit = arg instanceof BindVariableExpression ? arg.accept(this) : null;
+                    if (heldUnit instanceof LiteralExpression
+                            && ((LiteralExpression) heldUnit).getType() == LiteralType.STRING
+                            || boundUnit instanceof String) {
+                        argValues.add(boundUnit instanceof String ? boundUnit
+                            : String.valueOf(((LiteralExpression) heldUnit).getValue()));
+                        continue;
+                    }
+                    final String heldConversion = heldUnit == null ? null : writtenVariableConversion(heldUnit);
+                    if (heldConversion != null) {
+                        throw new RuntimeException(funcName.equals("DATE_PART")
+                            ? SqlCompilationError.of("invalid parameter '" + heldConversion + " is not a constant'")
+                            : SqlCompilationError.inline(DateTimeUnitSlot.notAUnitRefusal(heldConversion, funcName)));
+                    }
                     final String unit = DateTimeUnitSlot.unitTextOf(arg);
+                    if (unit == null && funcName.equals("DATE_PART") && writtenVariableConversion(arg) != null) {
+                        // A block's variable of no text written into the part's place is no constant.
+                        throw new RuntimeException(SqlCompilationError.of(
+                            "invalid parameter '" + writtenVariableConversion(arg) + " is not a constant'"));
+                    }
                     if (unit == null && !funcName.equals("DATE_PART")) {
                         final String conversion = writtenVariableConversion(arg);
                         throw new RuntimeException(SqlCompilationError.inline(
@@ -13556,9 +13654,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
 
     /**
      * A block's variable written into its own expression as its text cast to the variable's type, echoed as the plan
-     * converts the text: {@code TO_NUMBER('5')} for a NUMBER, {@code TO_DOUBLE('5.5')} for a FLOAT,
-     * {@code TO_BOOLEAN('true')} for a BOOLEAN (live-verified: {@code LET day := 5; … DATEADD(day, …)}). Null for
-     * anything else.
+     * converts the text: {@code TO_NUMBER('5')} for a whole NUMBER and {@code TO_NUMBER('1.50', 10, 2)} for one with
+     * decimals, {@code TO_DOUBLE('5.5')} for a FLOAT, {@code TO_BOOLEAN('true')} for a BOOLEAN,
+     * {@code TO_DATE('2024-01-01')} for a DATE, and {@code TO_NUMBER(NULL)} for a variable holding NULL
+     * (live-verified: {@code LET day := 5; … DATEADD(day, …)}). Null for anything else.
      */
     private String writtenVariableConversion(final Expression arg) {
         if (!(arg instanceof CastExpression) || queryExecutor == null
@@ -13567,18 +13666,31 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             return null;
         }
         final CastExpression cast = (CastExpression) arg;
-        if (!(cast.getExpression() instanceof LiteralExpression)
-                || ((LiteralExpression) cast.getExpression()).getType() != LiteralType.STRING) {
+        if (!(cast.getExpression() instanceof LiteralExpression)) {
+            return null;
+        }
+        final LiteralType written = ((LiteralExpression) cast.getExpression()).getType();
+        if (written != LiteralType.STRING && written != LiteralType.NULL) {
             return null;
         }
         final String target = String.valueOf(cast.getTargetType()).toUpperCase(Locale.ROOT);
-        final String text = cast.getExpression().accept(new StrictMessagePrinter(this));
+        final String text = written == LiteralType.NULL ? "NULL"
+            : cast.getExpression().accept(new StrictMessagePrinter(this));
         if (target.startsWith("NUMBER") || target.startsWith("DECIMAL") || target.startsWith("NUMERIC")
                 || target.startsWith("INT") || target.equals("BIGINT")) {
-            return "TO_NUMBER(" + text + ")";
+            final int open = target.indexOf('(');
+            final int comma = target.indexOf(',');
+            final int close = target.indexOf(')');
+            final boolean scaled = written == LiteralType.STRING && open > 0 && comma > open && close > comma
+                && !"0".equals(target.substring(comma + 1, close).trim());
+            return scaled ? "TO_NUMBER(" + text + ", " + target.substring(open + 1, comma).trim() + ", "
+                + target.substring(comma + 1, close).trim() + ")" : "TO_NUMBER(" + text + ")";
         }
         if (target.startsWith("FLOAT") || target.startsWith("DOUBLE") || target.equals("REAL")) {
             return "TO_DOUBLE(" + text + ")";
+        }
+        if (target.equals("DATE")) {
+            return "TO_DATE(" + text + ")";
         }
         return target.equals("BOOLEAN") ? "TO_BOOLEAN(" + text + ")" : null;
     }

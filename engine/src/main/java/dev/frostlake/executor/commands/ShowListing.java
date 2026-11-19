@@ -195,6 +195,9 @@ enum ShowListing {
     /** DELEGATED AUTHORIZATIONS reads a user or an integration, and none of the modifiers. */
     DELEGATED_AUTHORIZATIONS(null, null, ShowTailGrammar.NONE, false,
         ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    /** USER WORKLOAD IDENTITY AUTHENTICATION METHODS reads a user, and none of the modifiers. */
+    USER_WORKLOAD_IDENTITY_METHODS(null, null, ShowTailGrammar.NONE, false,
+        ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     /** A listing that takes none of these scopes and modifiers. */
     OTHER(null, null, ShowTailGrammar.NONE, false, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW,
         ShowScopeAnswer.CANNOT_SHOW, false, false);
@@ -324,7 +327,7 @@ enum ShowListing {
 
     /** Whether the listing is one of a kind no object is modelled of, answered by its columns alone. */
     boolean isUnmodelled() {
-        return ordinal() >= RESOURCE_MONITORS.ordinal() && ordinal() <= DELEGATED_AUTHORIZATIONS.ordinal();
+        return ordinal() >= RESOURCE_MONITORS.ordinal() && ordinal() <= USER_WORKLOAD_IDENTITY_METHODS.ordinal();
     }
 
     /** Whether the listing is one of the three replication listings that take an account for a scope. */
@@ -422,6 +425,9 @@ enum ShowListing {
         }
         if (ctx.DELEGATED() != null) {
             return DELEGATED_AUTHORIZATIONS;
+        }
+        if (ctx.workload != null) {
+            return USER_WORKLOAD_IDENTITY_METHODS;
         }
         if (ctx.COMPUTE() != null) {
             return ctx.FAMILIES() != null ? COMPUTE_POOL_INSTANCE_FAMILIES : COMPUTE_POOLS;

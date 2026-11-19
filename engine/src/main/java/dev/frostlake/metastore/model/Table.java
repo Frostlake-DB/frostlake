@@ -108,6 +108,8 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
     private List<String> planColumnNames;
     // Declared with CREATE ICEBERG TABLE: the Iceberg metadata SHOW ICEBERG TABLES reports; null for other tables.
     private IcebergTableMetadata icebergMetadata;
+    // Declared with CREATE EXTERNAL TABLE: the location and format SHOW EXTERNAL TABLES reports; null for other tables.
+    private ExternalTableMetadata externalMetadata;
     private Instant lastDataChange;
     // When a DML statement last ran against the table, whether or not it changed a row; see markDmlRan.
     private Instant lastDml;
@@ -1280,6 +1282,16 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
     /** Marks the table as an event table. */
     public void setEventTable(final boolean eventTable) {
         this.eventTable = eventTable;
+    }
+
+    /** What makes the table an external table, or null when it is none. */
+    public ExternalTableMetadata getExternalMetadata() {
+        return externalMetadata;
+    }
+
+    /** Makes the table an external table with this metadata, or an ordinary one with null. */
+    public void setExternalMetadata(final ExternalTableMetadata externalMetadata) {
+        this.externalMetadata = externalMetadata;
     }
 
     /** The table's Iceberg metadata, or null when it is not an Iceberg table. */

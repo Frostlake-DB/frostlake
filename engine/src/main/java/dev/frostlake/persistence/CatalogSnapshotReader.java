@@ -1036,6 +1036,11 @@ final class CatalogSnapshotReader {
                     fn.setImports(fnSnapshot.imports);
                     fn.setEnvironment(fnSnapshot.environment == null ? null : fnSnapshot.environment.copy());
                     fn.setComment(fnSnapshot.comment);
+                    if (fnSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : fnSnapshot.ownParameters.entrySet()) {
+                            fn.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     if (fnSnapshot.owner != null) {
                         fn.setOwner(fnSnapshot.owner);
                     }
@@ -1073,6 +1078,11 @@ final class CatalogSnapshotReader {
                     proc.setReturnNotNull(Boolean.TRUE.equals(procSnapshot.returnNotNull));
                     proc.setEnvironment(procSnapshot.environment == null ? null : procSnapshot.environment.copy());
                     proc.setComment(procSnapshot.comment);
+                    if (procSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : procSnapshot.ownParameters.entrySet()) {
+                            proc.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     proc.setReturnsTable(procSnapshot.returnsTable);
                     if (procSnapshot.returnColumns != null) {
                         proc.setReturnColumns(restoreParameters(procSnapshot.returnColumns));
@@ -1109,6 +1119,11 @@ final class CatalogSnapshotReader {
                     pipe.setLastLoadedFileCount(pipeSnapshot.lastLoadedFileCount);
                     pipe.setLastLoadedTime(pipeSnapshot.lastLoadedTime);
                     pipe.setComment(pipeSnapshot.comment);
+                    if (pipeSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : pipeSnapshot.ownParameters.entrySet()) {
+                            pipe.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     if (pipeSnapshot.owner != null) {
                         pipe.setOwner(pipeSnapshot.owner);
                     }

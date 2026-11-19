@@ -92,6 +92,9 @@ public final class SecurityObjectCommandHandler {
 
     private static final String PASSWORD_POLICY_PREFIX = "PASSWORD_POLICY|";
     private static final String NETWORK_POLICY_PREFIX = "NETWORK_POLICY|";
+    private static final String NETWORK_RULE_LIST = "_NETWORK_RULE_LIST";
+    /** What a policy's description shows in a cell that holds nothing. */
+    private static final String NO_VALUE = "null";
 
     /**
      * The key a user's network policy is attached under.
@@ -318,6 +321,9 @@ public final class SecurityObjectCommandHandler {
                 && isAttached(PASSWORD_POLICY_PREFIX, display(kind, schema, name))) {
             throw policyInUse(name);
         }
+        if (existing != null && ctx.or_replace() != null && kind == SecurityObjectKind.NETWORK_RULE) {
+            NetworkRuleAssociations.requireFree(catalog, schema, name);
+        }
         if (otherPolicy != null && ctx.or_replace() != null) {
             throw new RuntimeException(SqlCompilationError.PREFIX + " Object found is of type '" + otherPolicy
                 + "', not specified type '" + kind.name() + "'.");
@@ -338,6 +344,9 @@ public final class SecurityObjectCommandHandler {
             // The integration is looked up before the secret's type refuses the property (live-verified).
             new IntegrationReferences(catalog).requireAuthenticationIntegration(
                 properties.get("API_AUTHENTICATION").toString());
+        }
+        if (kind == SecurityObjectKind.NETWORK_POLICY) {
+            readAddresses(properties);
         }
         requireCreatable(kind, properties);
         if (kind == SecurityObjectKind.SECRET && properties.get("API_AUTHENTICATION") != null) {
@@ -448,7 +457,8 @@ public final class SecurityObjectCommandHandler {
 
     /**
      * CREATE OR ALTER over an existing network rule or network policy: the statement tells the whole object, so a
-     * rule's value list and comment it leaves out are emptied, and so are a policy's four lists and its comment.
+     * rule's value list and comment it leaves out are emptied, and so are a policy's two IP lists and its comment,
+     * while a rule list of the policy it leaves out is kept.
      * A network rule's TYPE and MODE cannot change; a MODE left out changes nothing (live-verified).
      */
     private static void recreateInPlace(final SecurityObject existing, final Map<String, Object> properties) {
@@ -472,8 +482,9 @@ public final class SecurityObjectCommandHandler {
             }
         }
         if (existing.getKind() == SecurityObjectKind.NETWORK_POLICY) {
-            for (final String told : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST", "ALLOWED_NETWORK_RULE_LIST",
-                "BLOCKED_NETWORK_RULE_LIST", "COMMENT"}) {
+            readAddresses(changes);
+            // A rule list the statement leaves out stays as it was, where an IP list and the comment are emptied.
+            for (final String told : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST", "COMMENT"}) {
                 if (!changes.containsKey(told)) {
                     changes.put(told, null);
                 }
@@ -565,7 +576,7 @@ public final class SecurityObjectCommandHandler {
                 continue;
             }
             Object value = value(kind, spec, property.securityPropertyValue());
-            if (key.endsWith("_NETWORK_RULE_LIST")) {
+            if (key.endsWith(NETWORK_RULE_LIST)) {
                 value = ruleReferences(asStrings(value));
             }
             if (key.endsWith("_SECONDARY_ROLES")) {
@@ -743,15 +754,15 @@ public final class SecurityObjectCommandHandler {
                 }
                 return SqlStringLiterals.decode(text.getText());
             case TEXT_LIST:
+                if (v.LPAREN() == null && v.identifier() != null && key.endsWith(NETWORK_RULE_LIST)) {
+                    // A rule written bare is no value of a rule list, where a string is no list (live-verified).
+                    throw new RuntimeException(SqlCompilationError.invalidValueForParameter(written, key));
+                }
                 if (v.LPAREN() == null) {
                     throw new RuntimeException(SqlCompilationError.of("invalid type of property '" + written + "' for '"
                         + key + "'"));
                 }
-                final List<String> items = new ArrayList<>();
-                for (final TerminalNode item : v.STRING_LITERAL()) {
-                    items.add(SqlStringLiterals.decode(item.getText()));
-                }
-                return items;
+                return SecurityListItems.of(v);
             case BOOLEAN:
                 if ("TRUE".equals(word) || "FALSE".equals(word)) {
                     return Boolean.valueOf("TRUE".equals(word));
@@ -819,8 +830,8 @@ public final class SecurityObjectCommandHandler {
                 + spec.getName() + "'"));
         }
         final List<String> words = new ArrayList<>();
-        for (final TerminalNode item : v.STRING_LITERAL()) {
-            final String word = SqlStringLiterals.decode(item.getText()).toUpperCase(Locale.ROOT);
+        for (final String item : SecurityListItems.of(v)) {
+            final String word = item.toUpperCase(Locale.ROOT);
             if (!Arrays.asList(spec.getChoices()).contains(word)) {
                 throw new RuntimeException(COMPILATION_ERROR + " " + word + " invalid for "
                     + choiceListNoun(spec.getName()) + ". ");
@@ -883,6 +894,18 @@ public final class SecurityObjectCommandHandler {
     }
 
     /** A network policy takes no egress rule: such a rule has no effect there. */
+    /**
+     * A network policy's IP lists as the policy keeps them, the allowed list judged before the blocked one: a list
+     * holding an address of another shape is refused (see NetworkPolicyAddresses).
+     */
+    private static void readAddresses(final Map<String, Object> properties) {
+        for (final String list : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST"}) {
+            if (properties.get(list) != null) {
+                properties.put(list, NetworkPolicyAddresses.read(asStrings(properties.get(list))));
+            }
+        }
+    }
+
     private void requireIngressRules(final Map<String, Object> properties, final String policy) {
         for (final String list : new String[] {"ALLOWED_NETWORK_RULE_LIST", "BLOCKED_NETWORK_RULE_LIST"}) {
             if (properties.get(list) != null) {
@@ -924,7 +947,13 @@ public final class SecurityObjectCommandHandler {
     }
 
     private String ruleReference(final String reference) {
-        final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(reference));
+        final String[] parts = SqlIdentifiers.canonicalTextParts(reference);
+        if (parts.length > 3) {
+            // A name of more parts than a schema object's names nothing (live-verified).
+            throw new RuntimeException(SqlCompilationError.of(
+                "Object does not exist, or operation cannot be performed."));
+        }
+        final QualifiedName name = QualifiedName.of(parts);
         final Schema schema = catalog.requireOwningSchema(name);
         if (schema.getSecurityObjects().get(SecurityObjectKind.NETWORK_RULE, name.last()) == null) {
             throw missing(SecurityObjectKind.NETWORK_RULE, schema, name.last());
@@ -955,6 +984,9 @@ public final class SecurityObjectCommandHandler {
         if (kind == SecurityObjectKind.PASSWORD_POLICY
                 && isAttached(PASSWORD_POLICY_PREFIX, display(kind, schema, name))) {
             throw policyInUse(name);
+        }
+        if (kind == SecurityObjectKind.NETWORK_RULE) {
+            NetworkRuleAssociations.requireFree(catalog, schema, name);
         }
         if (kind == SecurityObjectKind.NETWORK_POLICY) {
             for (final Map.Entry<String, String> attachment : catalog.getSecurityObjects().attachments().entrySet()) {
@@ -1113,6 +1145,7 @@ public final class SecurityObjectCommandHandler {
             }
             if (kind == SecurityObjectKind.NETWORK_POLICY) {
                 requireIngressRules(properties, target.getName());
+                readAddresses(properties);
             }
             if (kind == SecurityObjectKind.NETWORK_RULE && properties.get("VALUE_LIST") != null) {
                 NetworkRuleChecks.requireValues(target.text("TYPE"), asStrings(properties.get("VALUE_LIST")));
@@ -1189,20 +1222,33 @@ public final class SecurityObjectCommandHandler {
         GrantNames.renamed(catalog, kind.name(), grantedBefore, into.qualifiedName(renamed));
     }
 
-    /** ALTER NETWORK POLICY … ADD | REMOVE {ALLOWED | BLOCKED}_NETWORK_RULE_LIST = 'rule'. */
+    /**
+     * ALTER NETWORK POLICY … ADD | REMOVE {ALLOWED | BLOCKED}_NETWORK_RULE_LIST = (rule, …): each rule a name or a
+     * string, looked up whether it is added or removed; removing a rule the list does not hold changes nothing.
+     */
     private void addOrRemoveRule(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObject target) {
         final String key = ctx.optionKey().getText().toUpperCase(Locale.ROOT);
         if (!"ALLOWED_NETWORK_RULE_LIST".equals(key) && !"BLOCKED_NETWORK_RULE_LIST".equals(key)) {
-            throw new RuntimeException(SqlCompilationError.invalidPropertyFor(key, target.getKind().name()));
+            // A property of the policy that is no rule list is refused as one of a network rule (live-verified).
+            throw new RuntimeException(SqlCompilationError.invalidPropertyFor(key,
+                SecurityPropertySpecs.find(target.getKind(), key) != null ? SecurityObjectKind.NETWORK_RULE.name()
+                    : target.getKind().name()));
         }
         final FrostlakeParser.SecurityPropertyValueContext value = ctx.securityPropertyValue();
+        if (value.LPAREN() == null && value.identifier() != null) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.getText(), key));
+        }
         if (value.LPAREN() == null) {
             throw new RuntimeException(SqlCompilationError.of("invalid type of property '" + value.getText() + "' for '"
                 + key + "'"));
         }
+        if (!value.securityListNumber().isEmpty()) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                value.securityListNumber(0).getText(), key));
+        }
         final List<String> rules = new ArrayList<>(target.list(key));
-        for (final TerminalNode item : value.STRING_LITERAL()) {
-            final String rule = ruleReference(SqlStringLiterals.decode(item.getText()));
+        for (final String item : SecurityListItems.of(value)) {
+            final String rule = ruleReference(item);
             if (ctx.ADD() != null) {
                 requireIngressRule(rule, target.getName());
                 if (!rules.contains(rule)) {
@@ -1915,9 +1961,14 @@ public final class SecurityObjectCommandHandler {
         return shown.append(']').toString();
     }
 
+    /**
+     * A row of a policy's description. No cell of it is NULL: a property that holds nothing, as a comment never
+     * set, and a property with no default, as a name, show the text {@code null} (live-verified).
+     */
     private static Row describedRow(final String property, final Object value, final String defaultValue,
                                     final String description) {
-        return new Row(Arrays.<Object>asList(property, value, defaultValue, description));
+        return new Row(Arrays.<Object>asList(property, value == null ? NO_VALUE : value,
+            defaultValue == null ? NO_VALUE : defaultValue, description));
     }
 
     private ResultSet describe(final FrostlakeParser.SecurityObjectListingContext ctx, final SecurityObjectKind kind) {
@@ -1937,7 +1988,7 @@ public final class SecurityObjectCommandHandler {
                 if ("COMMENT".equals(spec.getName()) || items.isEmpty()) {
                     continue;
                 }
-                if (spec.getName().endsWith("_NETWORK_RULE_LIST")) {
+                if (spec.getName().endsWith(NETWORK_RULE_LIST)) {
                     // A rule list is described as JSON, each rule by its fully qualified name.
                     final StringBuilder json = new StringBuilder("[");
                     for (final String rule : items) {
@@ -1970,12 +2021,12 @@ public final class SecurityObjectCommandHandler {
         final String comment = object.getComment();
         if (kind == SecurityObjectKind.PASSWORD_POLICY) {
             final List<Row> rows = new ArrayList<>();
-            rows.add(new Row(Arrays.<Object>asList("NAME", object.getName(), null, "Name of password policy.")));
-            rows.add(new Row(Arrays.<Object>asList("OWNER", object.getOwner(), null, "Owner of password policy.")));
+            rows.add(describedRow("NAME", object.getName(), null, "Name of password policy."));
+            rows.add(describedRow("OWNER", object.getOwner(), null, "Owner of password policy."));
             for (final SecurityPropertySpec spec : SecurityPropertySpecs.of(kind)) {
                 final String value = object.text(spec.getName());
-                rows.add(new Row(Arrays.<Object>asList(spec.getName(),
-                    value != null ? value : spec.getDefaultValue(), spec.getDefaultValue(), spec.getDescription())));
+                rows.add(describedRow(spec.getName(), value != null ? value : spec.getDefaultValue(),
+                    spec.getDefaultValue(), spec.getDescription()));
             }
             // COMMENT is listed third, after the name and the owner.
             rows.add(2, rows.remove(rows.size() - 1));

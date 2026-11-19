@@ -43,8 +43,9 @@ import dev.frostlake.transaction.TransactionManager;
  * 100315 / P0000, and of one a Python handler raised 100357 / P0000. A routine's or a policy's signature refused is
  * 42601, by what it got wrong: a required argument after an optional one 946, a repeated argument name 90200, a
  * repeated column name 90211, an argument with no type 90201, an external function's type 2176 for an argument and
- * 2177 for its result. A constraint that is not there is 1450 / 42601, and a column of the clustering key renamed
- * 3320 and dropped 3203 / 42601. A refusal of no known family reads 100351 / P0000.
+ * 2177 for its result. A constraint that is not there is 1450 / 42601, a key that is not deferrable and initially
+ * deferred all the same 1460 and key properties that contradict each other 1461 / 42601, and a column of the
+ * clustering key renamed 3320 and dropped 3203 / 42601; a user named by more parts than a name has 906 / 42000. A refusal of no known family reads 100351 / P0000.
  * A hybrid table's primary key already held is 200001 / 22000 and a foreign key it breaks 200009 / 22000, and a
  * privilege refusal - an access-control error, {@code Insufficient privileges to operate on …} - 3001 / 42501
  * (documented). A REVOKE that skipped grants others depend on, {@code Revoke partially executed: …}, is 3935 / 23001.
@@ -120,7 +121,11 @@ final class HandlerErrorCode {
      * suspended 91421 / 22000, a triggered serverless task without its completion interval 91865 / 55000, an alert's
      * CONFIG that spells no JSON object 91461 / 42601 and a change to a started alert 392005 / 55000; a SUM's raw
      * total past its carrier 100058 / 22000 and an ordered window's intermediate result past it 100045 / 22003; a
-     * retention past 90 days 1048 / 22023.
+     * retention past 90 days 1048 / 22023; an address a network policy's IP list cannot hold 3043 / 22023 and a
+     * stage's credentials left blank 3003 / 42501; a value a property does not take 1422 / 22023
+     * and a name that is no property of its kind 1420 / 22023; a statement of no supported type 2041 / 42601, a
+     * listing for want of a current pipe 1017 / 42601, a parameter a level does not take 1009 / 22023, and a word
+     * that is no log level 394007 or no trace level 394011 / 42601.
      *
      * @param message the refusal's sentence
      * @return the pair, or null for a sentence of none of these families
@@ -147,8 +152,35 @@ final class HandlerErrorCode {
         if (message.contains("Numeric value is out of range, error: Window function intermediate result too large")) {
             return new HandlerErrorCode(100045, "22003");
         }
+        if (message.contains("Not supported IPv4 format for values '")) {
+            return new HandlerErrorCode(3043, "22023");
+        }
+        if (message.contains("invalid value '") && message.contains("' for property '")) {
+            return new HandlerErrorCode(1422, "22023");
+        }
+        if (message.contains("invalid property '") && message.contains("' for '")) {
+            return new HandlerErrorCode(1420, "22023");
+        }
+        if (message.equals(StageCredentials.REQUIRED)) {
+            return new HandlerErrorCode(3003, "42501");
+        }
         if (message.contains("Exceeds maximum allowable retention time (")) {
             return new HandlerErrorCode(1048, "22023");
+        }
+        if (message.contains("Unsupported statement type '")) {
+            return new HandlerErrorCode(2041, "42601");
+        }
+        if (message.contains("This session does not have a current pipe")) {
+            return new HandlerErrorCode(1017, "42601");
+        }
+        if (message.contains("cannot set parameter '")) {
+            return new HandlerErrorCode(1009, "22023");
+        }
+        if (message.startsWith("Invalid value for log level.")) {
+            return new HandlerErrorCode(394007, "42601");
+        }
+        if (message.startsWith("Invalid value for trace level.")) {
+            return new HandlerErrorCode(394011, "42601");
         }
         return null;
     }
@@ -178,6 +210,15 @@ final class HandlerErrorCode {
         }
         if (message.contains("constraint '") && message.endsWith("' does not exist")) {
             return new HandlerErrorCode(1450, "42601");
+        }
+        if (message.contains("user identifier '") && message.endsWith("' has too many qualifiers")) {
+            return new HandlerErrorCode(906, "42000");
+        }
+        if (message.endsWith("Constraint is not deferrable")) {
+            return new HandlerErrorCode(1460, "42601");
+        }
+        if (message.endsWith("Conflicting constraint properties")) {
+            return new HandlerErrorCode(1461, "42601");
         }
         if (message.contains("' which belongs to a clustering key")) {
             return new HandlerErrorCode(message.startsWith("Cannot rename column '") ? 3320 : 3203, "42601");
@@ -219,6 +260,10 @@ final class HandlerErrorCode {
         }
         if (message.contains(SqlAccessControlError.PREFIX) && message.contains(INSUFFICIENT_PRIVILEGES)) {
             return new HandlerErrorCode(3001, "42501");
+        }
+        if (message.contains("Object type or Class '") && message.contains(NOT_AUTHORIZED)) {
+            // A class that is missing, of a listing, a DROP, an ALTER or a COMMENT ON alike (live-verified).
+            return new HandlerErrorCode(398014, "02000");
         }
         if (message.contains("syntax error line ")) {
             return new HandlerErrorCode(1003, "42000");
@@ -466,8 +511,15 @@ final class HandlerErrorCode {
         if (message.contains("Time travel data is not available for ")) {
             return new HandlerErrorCode(707, "02000");
         }
+        if (message.contains("Unsupported subquery type cannot be evaluated inside VIEW object: ")) {
+            return new HandlerErrorCode(2031, "42601");
+        }
         if (message.contains("is not a valid date/time component for function ")) {
             return new HandlerErrorCode(2151, "22023");
+        }
+        if (message.contains("Date/time component [")
+                && message.contains("needs to be an identifier or a string literal.")) {
+            return new HandlerErrorCode(2150, "42601");
         }
         if (message.contains("Invalid data type [") && message.contains("] for predicate [")) {
             return new HandlerErrorCode(2034, "22000");

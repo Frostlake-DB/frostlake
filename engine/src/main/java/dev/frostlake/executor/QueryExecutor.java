@@ -10792,7 +10792,7 @@ public class QueryExecutor implements ImportLocalizer {
         } else if (argument.COLON() != null) {
             name = argument.identifier() != null ? argument.identifier().getText() : argument.INTEGER_LITERAL().getText();
             final ProceduralExecutor procedural = getProceduralExecutor();
-            if (procedural != null && procedural.hasVariable(name)) {
+            if (procedural != null && procedural.hasVariable(VariableKey.ofWritten(name))) {
                 return;
             }
             if (procedural != null && procedural.isExecutingBlock()) {
@@ -11681,6 +11681,16 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /** {@link #parseSelectStatement}, parsed once per distinct text: every statement over a view reads its body. */
+    /**
+     * Reads a query's rows for the judgement of a statement that reads none of them (see
+     * {@link ViewExpansionJudgement}): what reading them raises is raised, and the rows are dropped.
+     *
+     * @param sql the query
+     */
+    void readForJudgement(final String sql) {
+        DeferredFault.requireNone(executeSelectFromContext(parseSelectStatementCached(sql)).getRows());
+    }
+
     private FrostlakeParser.SelectStatementContext parseSelectStatementCached(final String sql) {
         final FrostlakeParser.SelectStatementContext cached = SELECT_CACHE.get(sql);
         if (cached != null) {
@@ -23128,10 +23138,18 @@ public class QueryExecutor implements ImportLocalizer {
         return new PlannedQuery(planned.shape, planned.description) {
             @Override
             ResultSet run() {
+                final String outerView = ViewBodyRows.begin(viewName);
+                final long heldBefore = ViewBodyRows.held();
                 try {
-                    return planned.run();
+                    final ResultSet rows = planned.run();
+                    if (ViewBodyRows.held() != heldBefore) {
+                        ViewBodyRows.rename(rows.getRows(), viewName);
+                    }
+                    return rows;
                 } catch (final UnsupportedSubqueryException refused) {
                     throw refused.namesFunction() ? refused : UnsupportedSubqueryException.insideView(viewName);
+                } finally {
+                    ViewBodyRows.end(outerView);
                 }
             }
         };
@@ -25632,8 +25650,9 @@ public class QueryExecutor implements ImportLocalizer {
     /** The count a block's variable gives a LIMIT, OFFSET or FETCH slot, or null when it holds NULL. */
     private Integer boundRowCount(final String name, final boolean offset) {
         final ProceduralExecutor procedural = getProceduralExecutor();
-        return procedural == null || !procedural.hasVariable(name) ? null
-            : RowCountSlot.ofBind(name, procedural.getVariable(name), offset);
+        final String key = VariableKey.ofWritten(name);
+        return procedural == null || !procedural.hasVariable(key) ? null
+            : RowCountSlot.ofBind(name, procedural.getVariable(key), offset);
     }
 
     /** The LIMIT/OFFSET window applied at once over {@code rows}. */

@@ -25,6 +25,8 @@ import dev.frostlake.metastore.QueryHistoryTracker;
 import dev.frostlake.metastore.model.Account;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.ManagedAccount;
+import dev.frostlake.metastore.model.ObjectParameters;
+import dev.frostlake.metastore.model.Pipe;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.security.SecurityManager;
 import dev.frostlake.storage.ResultSet;
@@ -765,6 +767,55 @@ public class ShowCommandExecutor {
      */
     public ResultSet showParametersInAlert(final SchemaObjectName alert, final String likePattern) {
         return sessionExecutor.showParametersInAlert(alert, likePattern);
+    }
+
+    /**
+     * SHOW PARAMETERS IN FUNCTION: the parameters of the overload the written signature picks.
+     *
+     * @param function      the function as written
+     * @param argumentTypes the argument types written after it
+     * @param likePattern   the LIKE filter, or null
+     * @return the listing
+     */
+    public ResultSet showParametersInFunction(final SchemaObjectName function, final List<DataType> argumentTypes,
+                                              final String likePattern) {
+        return sessionExecutor.showParametersOfSchemaObject(ContainerParameterCatalog.functionRows(),
+            routineExecutor.seenFunction(function, argumentTypes).getOwnParameters(), "FUNCTION", function,
+            likePattern);
+    }
+
+    /**
+     * SHOW PARAMETERS IN PROCEDURE: the parameters of the overload the written signature picks.
+     *
+     * @param procedure     the procedure as written
+     * @param argumentTypes the argument types written after it
+     * @param likePattern   the LIKE filter, or null
+     * @return the listing
+     */
+    public ResultSet showParametersInProcedure(final SchemaObjectName procedure, final List<DataType> argumentTypes,
+                                               final String likePattern) {
+        return sessionExecutor.showParametersOfSchemaObject(ContainerParameterCatalog.procedureRows(),
+            routineExecutor.seenProcedure(procedure, argumentTypes).getOwnParameters(), "PROCEDURE", procedure,
+            likePattern);
+    }
+
+    /**
+     * SHOW PARAMETERS IN PIPE: the pipe's two log levels and whether it is paused.
+     *
+     * @param pipe        the pipe as written
+     * @param likePattern the LIKE filter, or null
+     * @return the listing
+     */
+    public ResultSet showParametersInPipe(final SchemaObjectName pipe, final String likePattern) {
+        final Pipe found = pipelineExecutor.seenPipe(pipe);
+        // A paused pipe tells its pause as its own setting, beside the levels an ALTER PIPE gave it.
+        final ObjectParameters own = new ObjectParameters();
+        own.copyFrom(found.getOwnParameters());
+        if (found.isPaused()) {
+            own.set("PIPE_EXECUTION_PAUSED", "true");
+        }
+        return sessionExecutor.showParametersOfSchemaObject(ContainerParameterCatalog.pipeRows(), own, "PIPE", pipe,
+            likePattern);
     }
 
     public ResultSet showParametersInTable(final SchemaObjectName table, final String likePattern) {

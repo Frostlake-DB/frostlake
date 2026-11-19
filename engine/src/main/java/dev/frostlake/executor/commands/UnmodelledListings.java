@@ -16,12 +16,16 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.UserLookup;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
+import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.RelationKind;
 import dev.frostlake.metastore.model.Schema;
@@ -29,6 +33,9 @@ import dev.frostlake.metastore.model.SecurityObjectKind;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.ResultSet;
+import dev.frostlake.storage.Row;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import org.antlr.v4.runtime.Token;
@@ -54,13 +61,19 @@ import org.antlr.v4.runtime.Token;
  *   REPLICATION ACCOUNTS                        a LIKE alone
  *   DELEGATED AUTHORIZATIONS                    BY USER u or TO SECURITY INTEGRATION i, each looked up and
  *                                               refused when missing, and none of the modifiers
+ *   USER WORKLOAD IDENTITY AUTHENTICATION       FOR USER u, looked up and refused when missing; TERSE is read and
+ *   METHODS                                     none of the modifiers
  *   REGIONS                                     the public regions ({@link RegionsListing}), and no scope
  * </pre>
  *
  * <p>HISTORY is read by every one of the first four families but CHANNELS and the SESSION and AUTHENTICATION
  * POLICIES, which refuse it where it stands.
  *
- * <p>SESSION POLICIES is read here with the others and is the one modelled: once its scope is judged, the session
+ * <p>RESOURCE MONITORS, SHARES, FAILOVER GROUPS, REPLICATION GROUPS and REPLICATION DATABASES list the objects
+ * declared of them, kept as metadata ({@link ResourceMonitorCommandHandler}, {@link ShareCommandHandler},
+ * {@link FailoverGroupCommandHandler}, and the secondary databases).
+ *
+ * <p>SESSION POLICIES is read here with the others and is modelled too: once its scope is judged, the session
  * policies of the scope's schemas are its rows ({@link SecurityObjectCommandHandler#showRows}).
  */
 final class UnmodelledListings {
@@ -82,6 +95,10 @@ final class UnmodelledListings {
     static void requireParsed(final FrostlakeParser.ShowStatementContext ctx, final ShowListing listing) {
         if (ctx.replicationListingKind() != null) {
             requireReplicationParsed(ctx);
+        } else if (ctx.userMethodsScope() != null && ctx.userMethodsScope().objectName() == null) {
+            // FOR reads USER and a name after it: the statement stops at what follows the last word written.
+            throw SyntaxAfter.unexpected(ctx.userMethodsScope().USER() != null ? ctx.userMethodsScope().USER()
+                : ctx.userMethodsScope().FOR());
         } else if (ctx.unmodelledListingKind() != null && ctx.HISTORY() != null && !listing.readsHistory()) {
             throw syntaxErrorAt(ctx.HISTORY().getSymbol());
         }
@@ -90,6 +107,8 @@ final class UnmodelledListings {
     /**
      * The replication listings open on REPLICATION or FAILOVER, the second listing groups alone; any other word
      * there is no listing, and the statement stops at the word after it. TERSE stops at the listing's own word.
+     * WITH PRIMARY and a name narrow the three listings that read a scope to one primary's secondaries, in the
+     * scope's place and with nothing after the name (live-verified); REPLICATION ACCOUNTS stops at the PRIMARY.
      * REPLICATION ACCOUNTS reads no scope. For the others a scope written ACCOUNT needs the account's name, and
      * DATABASE or SCHEMA written alone is no name: each stops at what follows it.
      */
@@ -102,6 +121,22 @@ final class UnmodelledListings {
         }
         if (ctx.TERSE() != null) {
             throw syntaxErrorAt(kind.word);
+        }
+        final FrostlakeParser.ReplicationPrimaryContext primary = ctx.replicationPrimary();
+        if (primary != null) {
+            if (kind.ACCOUNTS() != null) {
+                // REPLICATION ACCOUNTS has no primary: the statement stops at the word.
+                throw syntaxErrorAt(primary.PRIMARY().getSymbol());
+            }
+            if (primary.objectName() == null) {
+                // The primary's name is due: the statement stops at what follows the word.
+                throw SyntaxAfter.unexpected(primary.PRIMARY());
+            }
+            if (ctx.showTail() != null && ctx.showTail().getChildCount() > 0) {
+                // Nothing is read after the primary's name: no LIMIT, no STARTS WITH.
+                throw syntaxErrorAt(ctx.showTail().getStart());
+            }
+            return;
         }
         if (ctx.IN() == null) {
             return;
@@ -173,6 +208,8 @@ final class UnmodelledListings {
         List<Schema> schemas = null;
         if (listing == ShowListing.DELEGATED_AUTHORIZATIONS) {
             requireGrantee(ctx.delegatedAuthorizationScope());
+        } else if (listing == ShowListing.USER_WORKLOAD_IDENTITY_METHODS) {
+            requireUser(ctx.userMethodsScope());
         } else if (!listing.isAccountLevel()) {
             schemas = requireScope(ctx, listing, scope);
         }
@@ -182,6 +219,11 @@ final class UnmodelledListings {
         final SecurityObjectKind modelled = listing == ShowListing.SESSION_POLICIES ? SecurityObjectKind.SESSION_POLICY
             : listing == ShowListing.AUTHENTICATION_POLICIES ? SecurityObjectKind.AUTHENTICATION_POLICY
             : listing == ShowListing.PACKAGES_POLICIES ? SecurityObjectKind.PACKAGES_POLICY : null;
+        final List<Row> kept = listing == ShowListing.REPLICATION_DATABASES ? secondaryDatabases(ctx)
+            : keptRows(listing);
+        if (kept != null) {
+            return new ResultSet(columns.getColumns(), kept);
+        }
         if (modelled != null && schemas != null) {
             // The kinds listed here that are modelled: the session, authentication or packages policies of the
             // scope's schemas.
@@ -189,6 +231,48 @@ final class UnmodelledListings {
                 queryExecutor.getSecurityManager()));
         }
         return columns;
+    }
+
+    /**
+     * The rows of the account's kinds that are kept as metadata: the resource monitors, the outbound shares, and
+     * the failover groups, which the replication group listing shows too.
+     *
+     * @return the rows, or null for a listing of another kind
+     */
+    private List<Row> keptRows(final ShowListing listing) {
+        if (listing == ShowListing.RESOURCE_MONITORS) {
+            return new ResourceMonitorCommandHandler(catalog).rows();
+        }
+        final AccountIdentity identity = AccountIdentity.of(queryExecutor.getEngineConfig());
+        if (listing == ShowListing.SHARES) {
+            return new ShareCommandHandler(catalog, identity).rows();
+        }
+        if (listing == ShowListing.FAILOVER_GROUPS || listing == ShowListing.REPLICATION_GROUPS) {
+            return new FailoverGroupCommandHandler(catalog, identity).rows();
+        }
+        return null;
+    }
+
+    /**
+     * The rows of SHOW REPLICATION DATABASES: the secondary databases declared here, each naming its primary;
+     * WITH PRIMARY keeps the secondaries of that one primary.
+     */
+    private List<Row> secondaryDatabases(final FrostlakeParser.ShowStatementContext ctx) {
+        final AccountIdentity identity = AccountIdentity.of(queryExecutor.getEngineConfig());
+        final FrostlakeParser.ReplicationPrimaryContext primary = ctx.replicationPrimary();
+        final String wanted = primary == null || primary.objectName() == null ? null
+            : QualifiedName.join(queryExecutor.resolveObjectNameParts(primary.objectName()));
+        final List<Row> rows = new ArrayList<>();
+        for (final Database database : catalog.getAllDatabases()) {
+            if (database.getReplicaOf() == null || wanted != null && !wanted.equals(database.getReplicaOf())) {
+                continue;
+            }
+            rows.add(new Row(Arrays.asList((Object) identity.getRegion(),
+                ShowResultHelpers.createdOn(database.getCreatedTime()), identity.getAccountName(),
+                database.getName(), ShowResultHelpers.text(database.getComment()), "false", database.getReplicaOf(),
+                "", "", identity.getOrganization(), identity.getAccountLocator())));
+        }
+        return rows;
     }
 
     /**
@@ -215,6 +299,28 @@ final class UnmodelledListings {
             }
         }
         return scope.schemas(catalog, listing == ShowListing.INDEXES);
+    }
+
+    /**
+     * Look up the user a USER WORKLOAD IDENTITY AUTHENTICATION METHODS listing names; with none named it lists the
+     * session's own. A name of two or three parts names no object, and a longer one is a user identifier with too
+     * many qualifiers (live-verified).
+     */
+    private void requireUser(final FrostlakeParser.UserMethodsScopeContext scope) {
+        if (scope == null) {
+            return;
+        }
+        final String[] user = queryExecutor.resolveObjectNameParts(scope.objectName());
+        if (user.length > 3) {
+            throw new RuntimeException(SqlCompilationError.inline("user identifier '"
+                + SqlIdentifiers.spellAlreadyCanonicalPath(QualifiedName.join(user)) + "' has too many qualifiers"));
+        }
+        if (user.length > 1) {
+            throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
+        }
+        if (!catalog.hasUserExact(user[0])) {
+            throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint("User", user[0]));
+        }
     }
 
     /**

@@ -650,7 +650,7 @@ final class DerivedRelationJudgement {
         }
     }
 
-    private static void collectConjuncts(final FrostlakeParser.BooleanExprContext predicate,
+    static void collectConjuncts(final FrostlakeParser.BooleanExprContext predicate,
                                          final List<FrostlakeParser.BooleanExprContext> into) {
         if (predicate instanceof FrostlakeParser.AndExprContext) {
             collectConjuncts(((FrostlakeParser.AndExprContext) predicate).booleanExpr(0), into);

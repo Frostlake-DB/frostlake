@@ -37,6 +37,8 @@ public class Pipe extends SqlObject {
     private String lastLoadedTime;
     // An auto-ingest pipe made by cloning its schema, which does not run until it is resumed (documented).
     private boolean stoppedCloned;
+    /** The parameters ALTER … SET gave the pipe itself, the logging levels and their kin, by name. */
+    private final ObjectParameters ownParameters = new ObjectParameters();
 
     public Pipe(final String name, final String copyStatement, final boolean autoIngest) {
         super(name);
@@ -54,6 +56,15 @@ public class Pipe extends SqlObject {
         this.notificationChannel = notificationChannel;
         this.paused = false;
         this.lastLoadedFileCount = 0;
+    }
+
+    /**
+     * The parameters set on the pipe itself; one absent here is inherited from its schema.
+     *
+     * @return the pipe's own settings
+     */
+    public ObjectParameters getOwnParameters() {
+        return ownParameters;
     }
 
     public String getCopyStatement() {

@@ -60,57 +60,21 @@ public class DirectStatement extends AbstractFrostlakeStatement {
     }
 
 
-    /** Per-statement MULTI_STATEMENT_COUNT set via {@link #setParameter}, overriding the session's. */
-    private Integer statementMultiCount;
-
-    /**
-     * The real driver's per-statement parameter surface ({@code unwrap(...).setParameter(...)});
-     * MULTI_STATEMENT_COUNT is the one parameter this driver understands.
-     */
-    public void setParameter(final String name, final int value) throws SQLException {
-        if (!"MULTI_STATEMENT_COUNT".equalsIgnoreCase(name)) {
-            throw new SQLException("Unknown statement parameter: " + name);
-        }
-        this.statementMultiCount = Integer.valueOf(value);
+    @Override
+    protected int sessionStatementCount() {
+        return connection instanceof DirectConnection ? ((DirectConnection) connection).getMultiStatementCount() : 1;
     }
 
-    /**
-     * The multi-statement gate the real driver runs before executing (live-verified): the pack's
-     * statement count must EQUAL the desired count — per-statement parameter first, else the
-     * connection's session value — with 0 meaning any. An exact ALTER SESSION SET/UNSET
-     * MULTI_STATEMENT_COUNT statement passes through and moves the connection's value.
-     */
-    private void applyMultiStatementGate(final String sql) throws SQLException {
-        // The ALTER SESSION statement is gated like any other (live-verified: under count 2 even
-        // the UNSET refuses as 1 vs 2 — the per-statement parameter is the escape hatch); its
-        // assignment takes effect only once it passes.
-        gate(sql);
-        final Integer assigned = JdbcMultiStatement.sessionCountAssignment(sql);
-        if (assigned != null) {
-            if (connection instanceof DirectConnection) {
-                ((DirectConnection) connection).setMultiStatementCount(assigned.intValue());
-            }
-            return;
+    @Override
+    protected void sessionStatementCount(final int count) {
+        if (connection instanceof DirectConnection) {
+            ((DirectConnection) connection).setMultiStatementCount(count);
         }
     }
 
-    private void gate(final String sql) throws SQLException {
-        final int desired = desiredCount();
-        if (desired == 0) {
-            return;
-        }
-        final int actual = JdbcMultiStatement.countStatements(sql);
-        if (actual != desired) {
-            throw JdbcMultiStatement.countMismatch(sql, actual, desired);
-        }
-    }
-
-    /** The statement count this request asks for: the statement's own parameter, else the session's. */
-    private int desiredCount() {
-        return statementMultiCount != null
-            ? statementMultiCount.intValue()
-            : (connection instanceof DirectConnection
-                ? ((DirectConnection) connection).getMultiStatementCount() : 1);
+    @Override
+    protected int statementCount(final String sql) {
+        return JdbcMultiStatement.countStatements(sql);
     }
 
     /**
@@ -125,7 +89,7 @@ public class DirectStatement extends AbstractFrostlakeStatement {
         }
         applyMultiStatementGate(sql);
         final ExecutionResult result;
-        final Integer displacedCount = DynamicStatementCount.beginRequest(desiredCount(),
+        final Integer displacedCount = DynamicStatementCount.beginRequest(desiredStatementCount(),
             JdbcMultiStatement.countStatements(sql));
         // The statement runs under a token cancel() reaches from another thread and the query timeout bounds.
         final StatementCancellation token = new StatementCancellation(queryTimeout());

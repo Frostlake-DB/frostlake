@@ -85,4 +85,13 @@ public class UnsupportedSubqueryException extends RuntimeException {
     public boolean namesFunction() {
         return namesFunction;
     }
+
+    /**
+     * Whether this refusal names the view whose body holds its subquery.
+     *
+     * @return true for a refusal made by {@link #insideView}
+     */
+    public boolean namesView() {
+        return getMessage() != null && getMessage().contains("inside VIEW object: ");
+    }
 }

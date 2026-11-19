@@ -161,14 +161,14 @@ public class BindVariableSubstitutor {
                     rejectDottedBindVariable(toks, i + 1, nameTok);
                     if (declarations != null) {
                         // A handler may not read what its block's BEGIN section declared (see HandlerLets).
-                        declarations.requireReadableInHandler(nameTok.getText());
+                        declarations.requireReadableInHandler(VariableKey.ofWritten(nameTok.getText()));
                     }
-                    final Object held = variables.get(nameTok.getText().toUpperCase(Locale.ROOT));
+                    final Object held = variables.get(VariableKey.ofWritten(nameTok.getText()));
                     if (statement && declarations != null) {
                         refuseRowSource(sql, toks, intoTargets, i);
                     }
                     final Object value = declarations != null
-                        ? declarations.boundValue(nameTok.getText(), held, statement) : held;
+                        ? declarations.boundValue(VariableKey.ofWritten(nameTok.getText()), held, statement) : held;
                     final RuntimeException infinite = statement ? InfiniteBindRefusal.of(value) : null;
                     if (infinite != null) {
                         throw infinite;
@@ -195,7 +195,7 @@ public class BindVariableSubstitutor {
     private void refuseRowSource(final String sql, final List<Token> toks, final Set<Integer> intoTargets,
                                  final int colon) {
         final String written = toks.get(colon + 1).getText();
-        if (!declarations.holdsRowSource(written)) {
+        if (!declarations.holdsRowSource(VariableKey.ofWritten(written))) {
             return;
         }
         if (colon >= 2 && colon + 2 < toks.size() && toks.get(colon - 1).getType() == FrostlakeLexer.LPAREN
@@ -329,8 +329,8 @@ public class BindVariableSubstitutor {
                     || !SqlTokens.isWord(nameTok) || nameTok.getStartIndex() != toks.get(i).getStopIndex() + 1) {
                 continue;
             }
-            final DataType declared = declarations.getDeclaredVariableType(nameTok.getText());
-            final boolean holdsNull = variables.get(nameTok.getText().toUpperCase(Locale.ROOT)) == null;
+            final DataType declared = declarations.getDeclaredVariableType(VariableKey.ofWritten(nameTok.getText()));
+            final boolean holdsNull = variables.get(VariableKey.ofWritten(nameTok.getText())) == null;
             DateOperandKind kind = null;
             if (declared instanceof DateTimeType) {
                 kind = "DATE".equals(declared.getName()) ? holdsNull ? DateOperandKind.NULL_DATE : DateOperandKind.DATE
@@ -350,7 +350,7 @@ public class BindVariableSubstitutor {
                                           final int from, final int to) {
         for (int i = from; i <= to; i++) {
             if (kinds.containsKey(Integer.valueOf(i))) {
-                declarations.requireReadableInHandler(toks.get(i + 1).getText());
+                declarations.requireReadableInHandler(VariableKey.ofWritten(toks.get(i + 1).getText()));
             }
         }
     }
@@ -508,7 +508,8 @@ public class BindVariableSubstitutor {
         }
         final boolean literalOnlySlot = isLiteralOnlySlot(toks, colonIndex);
         final String literal = toLiteral(value);
-        final DataType declared = declarations == null ? null : declarations.getDeclaredVariableType(name);
+        final DataType declared = declarations == null ? null
+            : declarations.getDeclaredVariableType(VariableKey.ofWritten(name));
         if (isIdentifierArgument(toks, colonIndex)) {
             if (value instanceof Number) {
                 throw new RuntimeException("Unsupported feature 'Bind by Object ID'.");

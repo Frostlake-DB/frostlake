@@ -18,6 +18,7 @@ package dev.frostlake.executor;
 
 import com.snowflake.snowpark_java.DataFrame;
 import dev.frostlake.DatabaseEngine;
+import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.commands.AccessControlHandler;
 import dev.frostlake.executor.commands.AlertCommandHandler;
 import dev.frostlake.executor.commands.AlterCommandHandler;
@@ -34,7 +35,9 @@ import dev.frostlake.executor.commands.DMLCommandHandler;
 import dev.frostlake.executor.commands.DataTypeParser;
 import dev.frostlake.executor.commands.DbtProjects;
 import dev.frostlake.executor.commands.DynamicTableProperties;
+import dev.frostlake.executor.commands.ExternalTableCommandHandler;
 import dev.frostlake.executor.commands.ExternalVolumeCommandHandler;
+import dev.frostlake.executor.commands.FailoverGroupCommandHandler;
 import dev.frostlake.executor.commands.GrantRevokeHandler;
 import dev.frostlake.executor.commands.InlineTags;
 import dev.frostlake.executor.commands.IntegrationCommandHandler;
@@ -42,7 +45,9 @@ import dev.frostlake.executor.commands.LoopControlPlacement;
 import dev.frostlake.executor.commands.ManualRunPrivileges;
 import dev.frostlake.executor.commands.PropertyVariables;
 import dev.frostlake.executor.commands.QueryCommandHandler;
+import dev.frostlake.executor.commands.ResourceMonitorCommandHandler;
 import dev.frostlake.executor.commands.SecurityObjectCommandHandler;
+import dev.frostlake.executor.commands.ShareCommandHandler;
 import dev.frostlake.executor.commands.ShowCommandHandler;
 import dev.frostlake.executor.commands.TagValues;
 import dev.frostlake.executor.commands.TaskRunProperties;
@@ -618,6 +623,27 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
     public Object visitExternalVolumeStatement(final FrostlakeParser.ExternalVolumeStatementContext ctx) {
         try {
             return new ExternalVolumeCommandHandler(catalog).handle(ctx);
+        } catch (final Exception e) {
+            if (e instanceof SecurityException) throw (SecurityException) e;
+            if (e instanceof ProceduralException) throw (ProceduralException) e;
+            throw StatementErrors.propagate(e);
+        }
+    }
+
+    @Override
+    public Object visitAccountObjectStatement(final FrostlakeParser.AccountObjectStatementContext ctx) {
+        try {
+            if (ctx.EXTERNAL() != null) {
+                return new ExternalTableCommandHandler(catalog, queryExecutor, this).create(ctx);
+            }
+            if (ctx.RESOURCE() != null) {
+                return new ResourceMonitorCommandHandler(catalog).handle(ctx);
+            }
+            final AccountIdentity identity = AccountIdentity.of(queryExecutor.getEngineConfig());
+            if (ctx.SHARE() != null) {
+                return new ShareCommandHandler(catalog, identity).handle(ctx);
+            }
+            return new FailoverGroupCommandHandler(catalog, identity).handle(ctx);
         } catch (final Exception e) {
             if (e instanceof SecurityException) throw (SecurityException) e;
             if (e instanceof ProceduralException) throw (ProceduralException) e;
@@ -1826,9 +1852,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 // as the CALL handed it back.
                 final Object held = bindExpr instanceof FrostlakeParser.QualifiedNameExprContext
                     ? proceduralExecutor.heldCallAnswer(
-                        ((FrostlakeParser.QualifiedNameExprContext) bindExpr).qualifiedName().getText())
+                        getText(((FrostlakeParser.QualifiedNameExprContext) bindExpr).qualifiedName()))
                     : null;
-                binds.add(proceduralExecutor.usingBind(bindExpr.getText(),
+                binds.add(proceduralExecutor.usingBind(bindExpr instanceof FrostlakeParser.QualifiedNameExprContext
+                        ? getText(((FrostlakeParser.QualifiedNameExprContext) bindExpr).qualifiedName())
+                        : bindExpr.getText(),
                     held != null ? held : evaluateExpression(bindExpr)));
             }
         }
@@ -2193,10 +2221,13 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         return null;
     }
 
-    /** Index of the parameter named {@code name} (case-insensitive), or -1 if the procedure has no such parameter. */
+    /**
+     * Index of the parameter named {@code name}, or -1 if the procedure has no such parameter. Both are names as
+     * identifiers' values, so a quoted name of another case is another name.
+     */
     private int indexOfParameter(final List<Parameter> params, final String name) {
         for (int i = 0; i < params.size(); i++) {
-            if (params.get(i).getName().equalsIgnoreCase(name)) {
+            if (params.get(i).getName().equals(name)) {
                 return i;
             }
         }

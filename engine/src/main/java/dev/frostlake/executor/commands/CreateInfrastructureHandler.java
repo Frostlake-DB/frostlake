@@ -882,6 +882,23 @@ public class CreateInfrastructureHandler implements CommandHandler {
             + " cannot be created: its ORIGIN is not reached from this engine."));
     }
 
+    /** A key of the CREDENTIALS is judged by its shape before the stage's name is (see StageCredentials). */
+    private static void requireWellFormedCredentials(final FrostlakeParser.StagePropertiesContext properties) {
+        if (properties == null) {
+            return;
+        }
+        final List<FrostlakeParser.ParenOptionListContext> credentials = new ArrayList<>();
+        final List<FrostlakeParser.ParenOptionListContext> formats = new ArrayList<>();
+        for (final FrostlakeParser.StageOptionContext option : properties.stageOption()) {
+            if (option.parenOptionList() != null && StageCredentials.names(option.identifier())) {
+                credentials.add(option.parenOptionList());
+            } else if (option.parenOptionList() != null && option.FILE_FORMAT() != null) {
+                formats.add(option.parenOptionList());
+            }
+        }
+        StageCredentials.requireWellFormed(credentials, formats);
+    }
+
     public Object handleCreateStage(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         final String[] stageParts = queryExecutor.createdNameParts(ctx);
         final String stageName = QualifiedName.join(stageParts);
@@ -890,6 +907,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             // Asked before the stage a replacement drops is gone.
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_STAGE, stageName);
         }
+        requireWellFormedCredentials(ctx.stageProperties());
         try {
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists
                     && !TemporaryObjectStatements.isTemporary(ctx),
@@ -915,6 +933,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             boolean sawCloudAccessOption = false;
             Integration storageIntegration = null;
             boolean credentials = false;
+            FrostlakeParser.ParenOptionListContext credentialsGroup = null;
             StageDirectoryOptions directory = null;
             final Map<String, String> formatOptions = new LinkedHashMap<>();
             final Map<String, String> copyOptions = new LinkedHashMap<>();
@@ -1004,6 +1023,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
                         if ("CREDENTIALS".equals(key) || "STORAGE_INTEGRATION".equals(key)) {
                             sawCloudAccessOption = true;
                             credentials = credentials || "CREDENTIALS".equals(key);
+                            if ("CREDENTIALS".equals(key)) {
+                                credentialsGroup = option.parenOptionList();
+                            }
                         } else if ("DIRECTORY".equals(key)) {
                             directory = StageDirectoryOptions.read(option.parenOptionList(), true);
                         } else if ("COPY_OPTIONS".equals(key) && option.parenOptionList() != null) {
@@ -1025,6 +1047,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
             CloudStageUrls.require(url);
             StorageIntegrationReference.requireLocation(storageIntegration, url);
+            StageCredentials.requireFilled(credentialsGroup, url);
             // A GCS stage reaches its bucket through a storage integration alone (live-verified).
             if (storageIntegration == null && url != null && url.regionMatches(true, 0, "gcs://", 0, 6)) {
                 throw new RuntimeException(SqlCompilationError.of("Creation of stages with direct credentials,"

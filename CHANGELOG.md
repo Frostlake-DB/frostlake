@@ -12,6 +12,18 @@ for exactly that reason.
 
 ### Now refused (SQL that earlier versions accepted)
 
+- **A network rule a network policy lists can be neither dropped nor replaced, and neither can its schema**
+  (live-verified): `DROP NETWORK RULE r` and `CREATE OR REPLACE NETWORK RULE r` are `Cannot drop Network rule R as it
+  is associated with some network policies.`, and `DROP SCHEMA s` and `CREATE OR REPLACE SCHEMA s` over a schema
+  holding such a rule are `Cannot drop schema S as it includes network rule - policy associations.`, with IF EXISTS
+  too. All four went through and left the policy naming a rule that was gone. Take the rule off the policy's lists
+  first.
+- **`ALTER NETWORK POLICY p ADD | REMOVE … = (1)` is refused** (live-verified) as `invalid value [1] for parameter
+  'ALLOWED_NETWORK_RULE_LIST'`, as a number in the list of a CREATE or a SET is; it was read as an empty list.
+- **ALTER FUNCTION and ALTER PROCEDURE judge the level they are given** (live-verified): `SET LOG_LEVEL = 'BOGUS'` is
+  `Invalid value for log level. Allowed values are TRACE,DEBUG,INFO,WARN,ERROR,FATAL,OFF.` (code 394007), a
+  `TRACE_LEVEL` that is none `Invalid value for trace level. Allowed values are ALWAYS,ON_EVENT,PROPAGATE,OFF.` (code
+  394011) and a number `invalid value [5] for parameter 'LOG_LEVEL'`. Any value used to be taken.
 - **The JDBC driver refuses a DATE past what a java.sql.Date reaches** (about year 292,278,994 either side):
   `getDate`, `getTimestamp` and `getObject` raise `The value 999999999-12-31 is beyond the reach of a java.sql.Date;
   read it with getString.` (SQLSTATE 22008), where they handed back another date without a word. `getString` reads
@@ -24,8 +36,72 @@ for exactly that reason.
   body that uses a class of an imported jar built for Java 17 is refused when the routine is created, `cannot access
   Helper` with `class file has wrong version 61.0, should be 55.0`, at the body's first use of the class.
 
+- **A procedure whose body holds an object constant with a key that is no text is refused as it is created**
+  (live-verified): `CREATE PROCEDURE p() ... AS $$ BEGIN RETURN {1: 'a'}; END $$` is a syntax error at the key, as
+  the block run on its own is. It used to be created, and failed when called.
+
+- **A block's `SELECT case INTO :x` is refused** (live-verified): CASE or CAST written as the first item of a
+  block's SELECT statement, where a name is meant, is a syntax error at the token after the word and then at the next
+  statement's first word, in a procedure's body as it is created and in a block run on its own. The procedure used to
+  be created.
+
+- **A network policy's IP lists take IPv4 addresses alone** (live-verified): an entry of `ALLOWED_IP_LIST` or
+  `BLOCKED_IP_LIST` that is no IPv4 address, with or without a CIDR prefix, is refused at CREATE and ALTER NETWORK
+  POLICY, the failing entries told together: `Not supported IPv4 format for values '[abc, 1.2.3.4/33]'.  Current
+  support format is single IPv4 address with or without CIDR.` (code 3043). An address is read leniently - leading
+  zeros, a sign, blanks around the slash and one dot at the end pass - and the policy keeps each entry trimmed and
+  without a slash at its end, a comma inside an entry separating several; SHOW and DESCRIBE NETWORK POLICY list them
+  so. Any text used to be stored.
+- **A stage's CREDENTIALS refuse an AWS key holding a colon and an S3 stage's blank key** (live-verified): an
+  `AWS_KEY_ID`, `AWS_SECRET_KEY` or `AWS_TOKEN` with a colon in it, a URL for one, is `invalid value 's3://b/p/' for
+  property 'AWS_KEY_ID'` (code 1422) at CREATE STAGE and ALTER STAGE, before the stage is looked up; a key id or a
+  secret key left empty or blank on an S3 stage is `Valid credentials are required for this stage location.` (code
+  3003). Any text used to be taken.
+
+- **The variance family over NUMBERs with a fraction is refused where the account's formula is** (live-verified):
+  `VARIANCE`, `VAR_SAMP`, `VAR_POP`, `STDDEV`, `STDDEV_SAMP`, `STDDEV_POP` and their spellings, grouped or over a
+  window, square each value as a product at the scale a product declares, and a square whose raw leaves the 128-bit
+  carrier is refused, `Number out of representable range: type FIXED[SB16](38,0){not null}, value 1.7161e+38` for a
+  NUMBER(38,3) of 13100000000000000. A sum of values or of squares that leaves the carrier is `Value overflow in a
+  SUM aggregate`, the count times the sum of squares is refused as a product is, and from six decimals on a
+  difference of more than 38 digits is refused in its own digits, `type FIXED[SB16](38,12){nullable}, value
+  116000000000000000000000000.000000000000`. Such a series used to be held exactly and answered.
+
 ### Added
 
+- **`SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS [FOR USER <name>]`** (live-verified): the listing of a user's
+  workload identity federation settings, the session's own user when none is named. The engine models no such
+  setting, so it answers the account's seven columns (`name`, `type`, `comment`, `last_used`, `created_on`,
+  `additional_info`, `status`) and no rows. A named user is looked up — `User 'U' does not exist or not authorized.`
+  — by its name or an `IDENTIFIER()` reference; TERSE is read and changes nothing; LIKE, IN, LIMIT and STARTS WITH
+  are the syntax errors they are on the account.
+- **CREATE USER takes session and object parameters among its properties** (documented; not run on a live account):
+  `CREATE USER u TIMEZONE = 'Europe/Warsaw' QUERY_TAG = 't' STATEMENT_TIMEOUT_IN_SECONDS = 600` sets on the new user
+  what `ALTER USER u SET …` sets, with the refusals that statement makes for a repeated name or a value its
+  parameter does not take. A name that is no parameter's stays a syntax error.
+
+- **Resource monitors, shares, failover groups, secondary databases and external tables can be declared**, so the
+  Snowflake Terraform provider's `snowflake_resource_monitor`, `snowflake_share`, `snowflake_failover_group`,
+  `snowflake_secondary_database` and `snowflake_external_table` resources create, read, update and destroy against
+  the engine. `CREATE [OR REPLACE] RESOURCE MONITOR [IF NOT EXISTS] … WITH CREDIT_QUOTA, FREQUENCY, START_TIMESTAMP,
+  END_TIMESTAMP, NOTIFY_USERS, TRIGGERS ON n PERCENT DO NOTIFY | SUSPEND | SUSPEND_IMMEDIATE` and `ALTER RESOURCE
+  MONITOR … SET …`; `CREATE [OR REPLACE] SHARE [IF NOT EXISTS] … COMMENT`, `ALTER SHARE … SET COMMENT | ACCOUNTS`,
+  `ADD | REMOVE ACCOUNTS`, `UNSET COMMENT` and `DESCRIBE SHARE`; `CREATE FAILOVER GROUP [IF NOT EXISTS] … OBJECT_TYPES,
+  ALLOWED_DATABASES, ALLOWED_SHARES, ALLOWED_INTEGRATION_TYPES, ALLOWED_ACCOUNTS, REPLICATION_SCHEDULE` or `AS REPLICA
+  OF`, and `ALTER FAILOVER GROUP … RENAME TO | SET | UNSET | ADD … TO | REMOVE … FROM | REFRESH | PRIMARY | SUSPEND |
+  RESUME`; `CREATE DATABASE … AS REPLICA OF`; `CREATE [OR REPLACE] EXTERNAL TABLE [IF NOT EXISTS]` with columns
+  computed from `VALUE`, `PARTITION BY`, `LOCATION = @stage`, `FILE_FORMAT`, `REFRESH_ON_CREATE`, `AUTO_REFRESH`,
+  `PATTERN` and `COMMENT`. Each kind's `DROP` removes what was declared, and `SHOW RESOURCE MONITORS`, `SHOW SHARES`,
+  `SHOW FAILOVER GROUPS`, `SHOW REPLICATION GROUPS`, `SHOW REPLICATION DATABASES`, `SHOW EXTERNAL TABLES` and `SHOW
+  TABLES` (`is_external`) list it. The objects are metadata: no credit is metered, nothing is shared or replicated,
+  and an external table reads no file, so a query over it answers no rows (see `docs/scope.md`). The statements
+  follow the documentation; an account's answers were not measured, except the refusals of `CREATE EXTERNAL TABLE`
+  with no `LOCATION`, no `FILE_FORMAT`, an unknown property or format type, a missing stage or an internal stage,
+  which are live-verified.
+- **SHOW DATABASES and SHOW SHARES IN FAILOVER GROUP list what the group allows**; for a group that does not exist
+  the database listing answers `Object does not exist, or operation cannot be performed.` and the share listing
+  `Replication group '<NAME>' does not exist or not authorized.` (live-verified). Both used to answer `Unsupported
+  statement type 'Cannot show objects of type … in FAILOVER GROUP'.`
 - **The Snowflake endpoints answer in process** (`dev.frostlake.http.SnowflakeDirectEndpoint`): a request handed over
   as its URI, headers and body is answered as the HTTP server answers it, with no port; `direct(name)` serves the
   engine `jdbc:frostlake:direct:<name>` connections share. The optional module `frostlake-sf-transport` builds on it:
@@ -33,9 +109,209 @@ for exactly that reason.
   `jdbc:snowflake://mydb/?account=frostlake&httpTransport=frostlake` reaches that engine without a socket. It needs a
   driver that offers the HTTP transport, which no release does yet, so the module is built only with `-Psf-transport`
   and is not published.
+- **`Connection.createClob()` makes a CLOB on both JDBC drivers**, as the account's driver does: it starts empty, is
+  written through `setString` or its character and ASCII streams, searched, truncated and freed, and binds its text
+  with `setClob`. Both drivers refused the call as unsupported.
+
+- **A Scala procedure can be written against the Scala Snowpark API** (`frostlake-rt-scala`, live-verified): a
+  handler that takes `com.snowflake.snowpark.Session` runs statements with `session.sql(...)` and `session.table(...)`,
+  reads a `DataFrame` with `collect()`, `count()`, `first()` and `limit(n)`, reads a `Row` by place (`row(0)`,
+  `row.get(0)`) and by typed accessor, and may hand a `DataFrame` back as a table procedure's answer. It used to fail
+  with a Scala compile error, only the Java API (`com.snowflake.snowpark_java`) being there. Columns and
+  `functions`, `schema`, and the `Row(...)` constructor are not there yet.
+
+- **`SHOW REPLICATION DATABASES WITH PRIMARY <name>` is read** (live-verified), as are `SHOW REPLICATION GROUPS`
+  and `SHOW FAILOVER GROUPS` with the clause: the listing narrowed to one primary's secondaries, the name of one
+  part or several, after an optional LIKE and with nothing after it. It was a syntax error at PRIMARY, which stopped
+  the Snowflake Terraform provider's `snowflake_database` resource at its first read.
 
 ### Fixed
 
+- **SHOW PARAMETERS reads IN FUNCTION, IN PROCEDURE and IN PIPE** (live-verified): `SHOW PARAMETERS IN FUNCTION
+  f(FLOAT)` and `IN PROCEDURE p(VARCHAR)` name one overload by its argument types, as a DESCRIBE does, and `IN PIPE p`
+  a pipe; each was a syntax error at the name. A function lists `ENABLE_CONSOLE_OUTPUT`, `LOG_EVENT_LEVEL`,
+  `LOG_LEVEL`, `METRIC_LEVEL` and `TRACE_LEVEL`, a procedure these and `AUTO_EVENT_LOGGING`, a pipe
+  `LOG_EVENT_LEVEL`, `LOG_LEVEL` and `PIPE_EXECUTION_PAUSED`, each with the value in force and the level it comes
+  from: `FUNCTION`, `PROCEDURE` or `PIPE` for the object's own setting, else `SCHEMA` or `DATABASE`, else empty at the
+  default; a session's setting does not reach the listing. A routine written without its argument list is `Cannot
+  show parameters of SqlIdentifier{qualifierNames=[], identifierName=FUNCTION}`, no name at all `No function name
+  specified` (code 2041) or `This session does not have a current pipe` (code 1017), and a pipe written with an
+  argument list `invalid identifier 'TOK_UDF_TARGET'`.
+- **ALTER FUNCTION, ALTER PROCEDURE and ALTER PIPE keep the parameters they set** (live-verified): `SET` and `UNSET`
+  of `LOG_LEVEL`, `LOG_EVENT_LEVEL`, `TRACE_LEVEL`, `METRIC_LEVEL` and `ENABLE_CONSOLE_OUTPUT` on a routine, of
+  `AUTO_EVENT_LOGGING` on a procedure and of `LOG_LEVEL` and `LOG_EVENT_LEVEL` on a pipe are taken, kept as written
+  and told by SHOW PARAMETERS; a routine took the two levels without keeping them and refused the others as invalid
+  properties, as a pipe refused both of its own. A function refuses the procedure's parameter, `cannot set parameter
+  'AUTO_EVENT_LOGGING' at 'FUNCTION'` (code 1009).
+
+- **A CREATE OR REPLACE TABLE refused for its key properties leaves the standing table** (live-verified):
+  `CREATE OR REPLACE TABLE t (id NUMBER UNIQUE RELY NORELY)` (`Conflicting constraint properties`) and
+  `… UNIQUE NOT DEFERRABLE INITIALLY DEFERRED` (`Constraint is not deferrable`) dropped the table `t` that was there
+  before answering the refusal; the properties are now judged before anything is replaced.
+- **The key-property refusals carry the account's codes** (live-verified): `Constraint is not deferrable` reaches a
+  client as 1460 / 42601 and `Conflicting constraint properties` as 1461 / 42601, where both read 0 with no state.
+
+- **A network policy's rule lists take names** (live-verified): `CREATE NETWORK POLICY np
+  ALLOWED_NETWORK_RULE_LIST = ("DB"."S"."R", s.r2, r3, 'db.s.r4')`, the BLOCKED list and `ALTER NETWORK POLICY … SET |
+  ADD | REMOVE` alike were a syntax error at the first name, strings alone being read. A plain name is the text it
+  stands for (`"my rule"` reads as the string `'my rule'` does, and so names `MY RULE`) and a qualified one is read as
+  written; a name of four parts is `Object does not exist, or operation cannot be performed.`, a rule written outside
+  parentheses `invalid value [r] for parameter 'ALLOWED_NETWORK_RULE_LIST'`, and `ADD` of another property of the
+  policy `invalid property 'COMMENT' for 'NETWORK_RULE'`. A name is an item of every other list of a security object
+  too: `AUTHENTICATION_METHODS = (PASSWORD)`, `ALLOWED_SECONDARY_ROLES = (PUBLIC)`, `ALLOWLIST = (numpy)`, and
+  `ALLOWED_IP_LIST = (x)` is refused as the address `X`. The Terraform provider writes its rule lists so.
+- **CREATE OR ALTER NETWORK POLICY keeps a rule list it leaves out** (live-verified): over a policy with both rule
+  lists, `CREATE OR ALTER NETWORK POLICY np BLOCKED_IP_LIST = ('5.6.7.8')` empties the other IP list and the comment
+  and keeps both rule lists, which `… = ()` empties; the rule lists were emptied too.
+- **DESCRIBE of a password, an authentication and a session policy holds no NULL cell** (live-verified): a comment
+  never set, a session policy's agent scope and every `default` of a property that has none (NAME, OWNER, COMMENT,
+  CREATED_ON, OWNER_ROLE_TYPE, the role lists, CLIENT_POLICY, PAT_POLICY, WORKLOAD_IDENTITY_POLICY) show the text
+  `null`, which a driver reads as a string; they were SQL NULL, on which the Terraform provider's scan failed.
+- **DESCRIBE STREAMLIT of an app made with ROOT_LOCATION tells its packages** (live-verified): `default_packages` is
+  `python==3.11.*,snowflake-snowpark-python,streamlit` and `user_packages` an empty text, both NULL before, and the
+  row ends in the `compute_pool` and `runtime_name` columns, NULL for such an app, which it lacked.
+- **POLICY_REFERENCES lists a user's password policy**: after `ALTER USER u SET PASSWORD POLICY db.s.pp`,
+  `POLICY_REFERENCES(REF_ENTITY_NAME => 'u', REF_ENTITY_DOMAIN => 'USER')` answers one row - the policy's database,
+  schema and name, `PASSWORD_POLICY`, the user and `USER`, `ACTIVE`, every other cell NULL - where it answered none,
+  so the Terraform provider dropped the attachment from its state. The row follows the function's documentation and
+  the rows of the other domains.
+
+- **DESCRIBE SECURITY INTEGRATION lists every property of a Snowflake OAuth, External OAuth, SAML2 or SCIM
+  integration** (documented, not live-verified: integrations of these types are not created on the account used for
+  verification): one row per property of the type, set or not, with its type, value and default as texts — a SCIM
+  integration's `NETWORK_POLICY` and `SYNC_PASSWORD`; an OAuth client's `PRE_AUTHORIZED_ROLES_LIST`,
+  `BLOCKED_ROLES_LIST` (behind the account's privileged roles while `OAUTH_ADD_PRIVILEGED_ROLES_TO_BLOCKED_LIST` is
+  on), key fingerprints, and the generated `OAUTH_CLIENT_ID`, endpoints and allowed endpoints; an External OAuth
+  server's keys, role lists, audience and mapping claim; a SAML2 integration's identity-provider rows and the service
+  provider's ACS URL, issuer URL and metadata. It listed ENABLED, the properties written and the comment, so a client
+  reading a row the account always lists (the Snowflake Terraform provider's `scim_integration` and
+  `oauth_integration_for_custom_clients`) failed. The property naming the variant (`OAUTH_CLIENT`, `SCIM_CLIENT`,
+  `EXTERNAL_OAUTH_TYPE`) is told by SHOW INTEGRATIONS' type and has no row; a SAML2 integration's ENABLED is told by
+  SHOW as well. API authentication, storage, notification, API, catalog and external access integrations are
+  described as before.
+- **RESULT_SCAN names an interval column that cannot hold NULL without STRIP_NULL_VALUE** (live-verified): over
+  `SELECT INTERVAL '1' YEAR AS ym, 1 AS n` the scan's refusal reads `CAST(GET(RESULT_SCAN_RESULT_SCAN.$1, 0) AS
+  INTERVAL YEAR(9))`, as it does for an operation, a cast, a COALESCE or an IFF over what is never NULL and for a
+  derived relation's column of such; it wrapped every column but a table's NOT NULL one. An interval constant is
+  judged never NULL wherever a select item's nullability is told.
+- **SHOW PROCEDURES lists the built-in procedure the engine runs** (live-verified): `SYSTEM$SEND_EMAIL` is listed
+  with `is_builtin` = `Y`, one row for each of its two overloads, created `2012-08-01`, in no schema and no database,
+  among the user procedures where its name sorts - in the current schema, `IN SCHEMA`, `IN DATABASE`, `IN ACCOUNT`
+  and `SHOW BUILTIN PROCEDURES`; `SHOW USER PROCEDURES` leaves it out. No built-in procedure was listed. The account
+  lists more built-in procedures, which the engine does not run and does not list.
+- **A malformed record of a staged JSON file is refused in the account's words** (live-verified): INFER_SCHEMA and a
+  staged-file query answer `Error parsing JSON: unknown keyword "tru"`, `missing colon`, `unterminated string`,
+  `incomplete object value`, `garbage in the numeric literal: 1a}` and the reader's other sentences, with the file,
+  the line and the character the account's reader stops at - a fault at a line's end is the next line's character 0 -
+  and the row with the line it starts on. They answered the Java parser's sentence, INFER_SCHEMA with its place and
+  the query with `Invalid JSON in file`. INFER_SCHEMA also reads an array that is no record to its end before
+  refusing it, refuses what follows a stripped outer array (`misplaced [`, `garbage after outer ]`), and reads a
+  trailing comma and a single-quoted string; a staged-file query reads an unquoted key, a single-quoted string and a
+  trailing comma as PARSE_JSON does.
+- **PARSE_JSON names a sign with nothing to sign** (live-verified): `PARSE_JSON('{"a":-}')` is `stray minus sign, pos
+  7` and `'[+]'` `stray plus sign, pos 3`, at what follows the sign; a word a blank parts from its sign is named
+  without it, and a sign the document ends after is `no number after a sign`. They read `unknown keyword "-"`.
+- **ENCRYPT calls written alike read one ciphertext in a row** (live-verified): `SELECT ENCRYPT('msg', 'key') =
+  ENCRYPT('msg', 'key')` is true, as the account's plan computes the call once for a row, in a select list, a WHERE and
+  an aggregate's argument alike; so is `ENCRYPT(m, k) = ENCRYPT(t.m, K)` over one relation, and `ENCRYPT_RAW` with a
+  drawn IV. Each row and each statement still draws its own, and a call that differs in a value, a cast, its argument
+  count or the relation it reads draws its own too. Every call used to draw its own.
+- **`ENCRYPT_RAW(value, key)` draws its IV** (live-verified), as a NULL IV does. The call without an IV was refused
+  for too few arguments.
+- **The variance of NUMBERs of seven or more decimals reads the squares the account reads** (live-verified): each
+  square is rounded half up to twelve decimals, or to the value's own scale past that, before it is summed, so
+  `VAR_POP` over a NUMBER(38,7) can differ from the exact variance in its last digit, and so can the deviations
+  rooted in it. The engine answered the exact variance rounded once.
+- **A variance that fills the 128-bit carrier at its scale is answered** (live-verified): below six decimals the
+  quotient is refused only when its raw leaves the carrier, so `VAR_POP` over the whole numbers 12247448713915890
+  and its negative is 149999999999999987973337994492100.000000, 39 digits. It was refused past 38.
+- **A product refused for its size names the raw of the exact product** (live-verified): a NUMBER(38,7) of
+  20000000000000 squared is refused at `value 4e+40`, the raw at the fourteen decimals of the exact product, where
+  the engine printed the raw at the twelve decimals the product declares, `4e+38`.
+- **GETBIT declares the width BITAND does, and a VARIANT operand of a bitwise function counts as a FLOAT does**
+  (live-verified): `GETBIT(n5, 0)` over a NUMBER(5,0) is NUMBER(5,0), `GETBIT(1, 100)` NUMBER(3,0) and `GETBIT(s, 0)`
+  over a text NUMBER(13,0); `BITAND(v, 3)`, `BITXOR(v, 3)`, `BITNOT(v)` and `BITSHIFTRIGHT(v, 1)` over a VARIANT are
+  NUMBER(2,0) and `BITOR(v, 3)` NUMBER(19,0), tagged `[SB8]` by SYSTEM$TYPEOF where the VARIANT is a held value.
+  All of them were NUMBER(38,0), in a query's columns and in a table created from one.
+
+- **A table's property list reads NULL for an option's value** (live-verified): at CREATE TABLE and ALTER TABLE …
+  SET, `STAGE_FILE_FORMAT = (FIELD_DELIMITER = NULL)` is `invalid value [NULL] for parameter 'FIELD_DELIMITER'`,
+  `CHANGE_TRACKING = (A = NULL)` is `invalid value [TOK_PROPERTY_LIST] for parameter 'CHANGE_TRACKING'` and
+  `NOPE = (A = NULL)` is `invalid property 'NOPE' for 'TABLE'`, where each was a syntax error at the list's first
+  name. A table's `COMMENT = (A = 1)` is taken at CREATE as it is at ALTER, the comment reading `TOK_PROPERTY_LIST`.
+- **A word that is no kind names a class where a comment is set** (live-verified): `ALTER foo bar SET COMMENT = 'c'`,
+  `ALTER foo bar UNSET COMMENT` and `COMMENT ON foo x IS 'c'` are `Object type or Class 'FOO' does not exist or not
+  authorized.`, IF EXISTS or not, where they were syntax errors at the word; a statement cut short, `ALTER foo bar`, is
+  a syntax error where it ends. `ALTER SNAPSHOT x SET COMMENT = 'c'` misses the snapshot, and `COMMENT ON SNAPSHOT` is
+  `Unsupported feature 'TOK_SERVICE_SNAPSHOT'.`
+- **Three families of refusal carry the account's codes**: a class that is missing 398014 / 02000, `invalid value
+  '…' for property '…'` 1422 / 22023 and `invalid property '…' for '…'` 1420 / 22023.
+- **A fault in a sequence's options names the account's token** (live-verified), in CREATE SEQUENCE and ALTER
+  SEQUENCE alike. An option after the first that does not read whole is refused where it starts when no comma stands
+  before it: `ALTER SEQUENCE s1 SET INCREMENT = 2 x` is a syntax error at `x`, where it was one at the end of the
+  input, and so are `… 2 x y`, `… 2 x =` and `… 2 INCREMENT x` at their first word; a COMMENT names the token after
+  it. After a comma, a name before another name names the comma (`SET INCREMENT = 2, x y`), a name whose `=` no
+  value follows the `=`, and a name before any other token that token. A name where the number of the first
+  INCREMENT or START is meant is told twice, `SET INCREMENT = x`.
+- **`START WITH = 1` and `INCREMENT BY = 2` are read** (live-verified): a sequence's START takes WITH and `=`
+  together, and its INCREMENT takes BY and `=`, in CREATE SEQUENCE and ALTER SEQUENCE. They were syntax errors at
+  the `=`.
+- **A multi-table INSERT with brackets that open no query after an INTO is told in two lines** (live-verified):
+  `INSERT ALL INTO t VALUES (1) ('x') SELECT 1; SELECT 1 x y` is a syntax error at `'x'` and then at the INSERT's
+  `SELECT`, the token after the brackets, and no later statement is read; the second line used to name a later
+  statement's word, or to be missing. Brackets that end the statement let the later statements be read, and a comma
+  after an INTO's VALUES row, `INSERT ALL INTO t VALUES (1), (2) SELECT 1`, is the statement's one line.
+- **EXPLAIN writes an operand in parentheses by the width it is worked in** (live-verified). An aggregate of the
+  query's own Aggregate stands in parentheses in arithmetic, `(SUM(T.A)) + 1` and `(COUNT(*)) * 2`, and in a
+  comparison unless it is a count. A counting or ranking window is converted in a sum, a difference and a product
+  with what stands beside it, `(COUNT(*) OVER ()) + (T.N)`. A SUM or an AVG window is eight bytes wide and a MAX, MIN,
+  LAG or FIRST_VALUE window as wide as its column, so the narrower operand is converted, `(T.A) + SUM(T.A) OVER ()`.
+  Two stored columns of whole numbers are compared by their stored widths, `(T.N5) + T.N18`, both where the result
+  needs more, `(T.N5) * (T.N5)`; a column of a table holding no rows is one byte wide. A whole window sum divided by
+  a whole number is `SCALED_ROUND_INT_DIVIDE(SUM(T.A) OVER (), 2)`, and a number beside a FLOAT aggregate is the
+  FLOAT literal, `(SUM(T.D)) + 1.0`.
+- **An object constant with a key that is no text is refused at the account's places inside a block**
+  (live-verified). A plain assignment, `m := {1: 'a'}::MAP(NUMBER, VARCHAR);`, is refused at the first token of its
+  value and then, where a word follows the constant, at the token after that word: `'{'`, then the `'('` after MAP.
+  A LET, a DEFAULT and a RETURN name the key and then each value, as a query does, under EXECUTE IMMEDIATE too, where
+  only the key was named. A signed number key, `{-1: 'a'}`, names its sign and then the value.
+- **A DECLARE section's cursor over `SELECT TOP ?` is refused at the `?`** (live-verified), where the declaration
+  after the cursor was named. A block's EXECUTE IMMEDIATE whose text closes early, `EXECUTE IMMEDIATE 'SELECT 'a' v'
+  USING (x)`, names the word after the string and then the `(` of its USING, in a statement and in an assigned
+  `(EXECUTE IMMEDIATE ...)` alike.
+- **A JDBC statement given no text at all is refused with a `SQLException`**, `Invalid SQL text: null` (SQLSTATE
+  03000), on both drivers, where `execute(null)` failed with a `NullPointerException`.
+- **A view over a correlated subquery the account cannot evaluate is judged where the statement reads it**
+  (live-verified). A statement that reads the subquery's column is refused in the view's name even where it keeps no
+  row: `SELECT * FROM v WHERE FALSE`, `... WHERE 1 = 0`, `... LIMIT 0`, a constant-false HAVING and their EXPLAIN
+  were answered. A row the statement's own filter drops is not judged: `SELECT y FROM v WHERE id > 5` over ids 1 and
+  2 answers no row, and `SELECT id FROM (SELECT * FROM v)` answers, where both were refused. A view read through
+  another view is named by the outer one. The refusal carries the account's code and SQLSTATE, 2031 and 42601.
+- **A block's plain assignment whose value does not parse is refused at the value's first token** (live-verified),
+  whatever token the value fails at: `n := 1 + ;` names the `1` and `n := ABS(1,);` the `ABS`, where the `;` and the
+  `)` were named. The account then reads on: a word that may be a name is taken and the token after it refused too,
+  so `n := 1 + ABS(,);` adds the `(` and `n := 1 + (SELECT COUNT(*) FROM TABLE(rs));` the `(` after COUNT. A value
+  that ends before a word, `n := a b;`, names the word as before.
+- **A block's variable where a date function reads its unit is read by what it holds** (live-verified). A variable
+  holding a text is the unit: `IF (DATEADD(u, 1, d) IS NULL)` over `u VARCHAR DEFAULT 'day'` runs, and so does a
+  statement's `DATEADD(:u, 1, d)`; both were refused. A variable of another type is refused as the conversion the
+  block writes for it, inside a larger expression too: `RETURN DATEADD(u, 1, CURRENT_DATE()) IS NULL` over an INT is
+  `Date/time component [TO_NUMBER('1') ]for function DATEADD needs to be an identifier or a string literal.`, where it
+  was `['U'] is not a valid date/time component`. The echo spells a NUMBER with decimals `TO_NUMBER('1.50', 10, 2)`
+  and a DATE `TO_DATE('2024-01-01')`, and the refusal carries the account's code and SQLSTATE, 2150 and 42601.
+- **Words and brackets read the account's way** (live-verified). A JOIN standing where a table is named tells the
+  token after it twice: `SELECT * FROM JOIN` and `WITH JOIN AS (...) SELECT * FROM JOIN WHERE a = 1` name the end of
+  the input and the WHERE twice, and `SELECT * FROM JOIN LIMIT 1` names the LIMIT and then the `1`. A block's RETURN
+  or assignment whose value opens a bracket and holds nothing names the token after the brackets, `BEGIN RETURN (;
+  END;` the `;`, where the bracket was named. `DESCRIBE TABLE t (TRIGGER)` names the word alone, without the token
+  after it.
+- **A quoted scripting variable and an unquoted one of the same letters are two variables** (live-verified):
+  `DECLARE "low" INT DEFAULT 1; low INT DEFAULT 2; BEGIN RETURN "low" + low * 10; END;` answers 21, where the two
+  names shared one value and it answered 22. Each keeps its own value through assignments, LET, conditions, loops,
+  nested blocks, handlers, `:name` binds, SELECT ... INTO targets and USING lists, and a procedure's parameters
+  `("low" INT, low INT)` are two as well. `"LOW"` and `low` stay one name. A CALL's named argument fills the
+  parameter of exactly its name: `"Low" => 1, low => 2` binds both parameters of `p("Low" INT, "LOW" INT)`, which
+  was refused as the second one given twice.
 - **A privilege granted to one grantee by two grantors is two grants** (live-verified): each grantor's grant is
   listed on its own row by SHOW GRANTS and the privilege views, with its own grant option, and a REVOKE takes back
   only the grants its roles made: every grantor's with MANAGE GRANTS, its own alone for an owner without it. A second

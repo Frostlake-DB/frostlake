@@ -681,6 +681,22 @@ final class ShowPipelineExecutor {
         return new ResultSet(taskColumns(), rows);
     }
 
+    /**
+     * The pipe a statement names, by its exact name, when the session sees it; one it does not see is refused as a
+     * missing one is.
+     *
+     * @param written the pipe as written
+     * @return the pipe
+     */
+    Pipe seenPipe(final SchemaObjectName written) {
+        final Schema schema = written.schema();
+        final Pipe pipe = schema.getPipeExact(written.name());
+        if (pipe == null || !seen("PIPE", schema, pipe.getName(), pipe.getOwner())) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Pipe", written.fullName()));
+        }
+        return pipe;
+    }
+
     /** DESCRIBE PIPE returns the pipe's SHOW PIPES row — live gives the two commands one shape. */
     public ResultSet describePipe(final SchemaObjectName written) {
         final String pipeName = written.name();

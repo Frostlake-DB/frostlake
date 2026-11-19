@@ -1,0 +1,4 @@
+# The parameters SHOW PARAMETERS IN PIPE lists, in name order: the schema's two log levels and the pipe's pause.
+LOG_EVENT_LEVEL
+LOG_LEVEL
+PIPE_EXECUTION_PAUSED

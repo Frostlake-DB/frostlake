@@ -721,7 +721,8 @@ final class ShowRelationalExecutor {
                     table.hasSearchOptimization() ? "ON" : "OFF",
                     table.hasSearchOptimization() ? "100" : null,
                     table.hasSearchOptimization() ? 0L : null,
-                    "N", table.isSchemaEvolution() ? "Y" : "N", "ROLE", table.isEventTable() ? "Y" : "N",
+                    table.getExternalMetadata() != null ? "Y" : "N", table.isSchemaEvolution() ? "Y" : "N", "ROLE",
+                    table.isEventTable() ? "Y" : "N",
                     table.isHybrid() ? "Y" : "N",
                     table.getIcebergMetadata() != null ? "Y" : "N", "N", "N", "N", "OFF", "OFF"
                 ));

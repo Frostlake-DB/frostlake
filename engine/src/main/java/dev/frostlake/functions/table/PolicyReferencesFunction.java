@@ -54,7 +54,8 @@ import java.util.TreeMap;
  * folds to upper case, a double-quoted one is kept as written, and a name with fewer than three parts is completed
  * from the session's database and schema, so {@code 'mydb.myschema.mytable'} finds the table wherever the session
  * is (live-verified, in either case). A name that finds nothing is refused without the privilege sentence other
- * refusals carry, a missing policy as a missing table (live-verified).
+ * refusals carry, a missing policy as a missing table (live-verified). A user answers the password policy set on
+ * it, as the function's page describes the user domain.
  */
 public class PolicyReferencesFunction extends TableFunction {
 
@@ -65,7 +66,10 @@ public class PolicyReferencesFunction extends TableFunction {
     private static final Set<String> TABLE_LIKE_DOMAINS = new HashSet<String>(Arrays.asList("VIEW",
         "MATERIALIZED VIEW", "EXTERNAL TABLE"));
 
-    /** The domains whose object POLICY_REFERENCES finds as TAG_REFERENCES does, listing no attachment of it. */
+    /**
+     * The domains whose object POLICY_REFERENCES finds as TAG_REFERENCES does, listing no attachment of it but a
+     * user's password policy.
+     */
     private static final Set<String> OBJECT_DOMAINS = new HashSet<String>(Arrays.asList("TAG", "USER", "ACCOUNT",
         "INTEGRATION"));
 
@@ -137,7 +141,7 @@ public class PolicyReferencesFunction extends TableFunction {
      * The attachments on one entity. The domain is one a reference function knows, matched as written but for case,
      * or it is {@code Unknown domain: <as written>.}; TABLE and VIEW list their kind's attachments, EXTERNAL TABLE
      * none here but refuses a name no table holds, TAG, USER, INTEGRATION and ACCOUNT find their object as
-     * TAG_REFERENCES finds it and list none — the current account by its locator, in any case — an APPLICATION is
+     * TAG_REFERENCES finds it and list none but a user's password policy — the current account by its locator, in any case — an APPLICATION is
      * looked for, and any other domain is an invalid value, named with underscores (live-verified).
      */
     private void appendByEntity(final String entityName, final String entityDomain,
@@ -170,6 +174,9 @@ public class PolicyReferencesFunction extends TableFunction {
         }
         if (OBJECT_DOMAINS.contains(words)) {
             new TagReferencesFunction(catalog).requireObject(entityName, words);
+            if ("USER".equals(words)) {
+                appendUserRows(entityName, rows);
+            }
             return;
         }
         if (!"TABLE".equals(words) && !"VIEW".equals(words)) {
@@ -201,6 +208,24 @@ public class PolicyReferencesFunction extends TableFunction {
         } else if (materialized != null && "TABLE".equals(domain)) {
             appendMaterializedViewRows(schema, materialized, rows);
         }
+    }
+
+    /**
+     * The password policy set on a user: one row naming the policy where it lives and the user as the entity, which
+     * lives in no database or schema.
+     */
+    private void appendUserRows(final String entityName, final List<Row> rows) {
+        final String[] written = SqlIdentifiers.canonicalTextParts(entityName);
+        final String user = written[written.length - 1];
+        final String policyName = catalog.getSecurityObjects().userPasswordPolicy(user);
+        if (policyName == null) {
+            return;
+        }
+        final String[] policy = QualifiedName.parse(policyName).parts();
+        rows.add(new Row(Arrays.asList(
+            policy.length >= 3 ? policy[policy.length - 3] : null,
+            policy.length >= 2 ? policy[policy.length - 2] : null, policy[policy.length - 1], "PASSWORD_POLICY",
+            null, null, user, "USER", null, null, null, null, null, ACTIVE)));
     }
 
     /** The materialized view of exactly that name, or null. */

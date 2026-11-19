@@ -60,6 +60,16 @@ public final class SecurityObjectStore {
     }
 
     /** What is attached under a key, e.g. the password policy of a user, or null. */
+    /**
+     * The password policy attached to a user.
+     *
+     * @param userName the user's name, as the account holds it
+     * @return the policy's qualified name, or null when the user holds none of its own
+     */
+    public String userPasswordPolicy(final String userName) {
+        return attachment("PASSWORD_POLICY|USER|" + userName);
+    }
+
     public String attachment(final String key) {
         return attachments.get(key);
     }

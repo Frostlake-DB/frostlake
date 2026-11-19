@@ -176,13 +176,37 @@ service stands behind an integration here. OVERLAP_POLICY is kept and read back,
 before the next run starts, so no run overlaps another. USER_TASK_TIMEOUT_MS is kept and shown and not enforced: a
 task's statement runs to completion.
 
+## Resource monitors, shares, failover groups, secondary databases and external tables — declared, never acted on
+
+`CREATE | ALTER | DROP RESOURCE MONITOR`, `CREATE | ALTER | DROP | DESCRIBE SHARE`, `CREATE | ALTER | DROP FAILOVER
+GROUP`, `CREATE DATABASE … AS REPLICA OF` and `CREATE | ALTER | DROP | DESCRIBE EXTERNAL TABLE` run, so that
+infrastructure tooling (the Snowflake Terraform provider among it) can manage these objects against the engine,
+and `SHOW RESOURCE MONITORS`, `SHOW SHARES`, `SHOW FAILOVER GROUPS` (and `SHOW REPLICATION GROUPS`), `SHOW
+REPLICATION DATABASES`, `SHOW DATABASES | SHARES IN FAILOVER GROUP` and `SHOW EXTERNAL TABLES` list what was
+declared. Nothing stands behind them:
+
+- a **resource monitor** keeps its quota, frequency, start and end, notified users and triggers; no credit is
+  metered, so `used_credits` stays `0.00` and no trigger ever notifies or suspends;
+- a **share** keeps its comment and the accounts it was given; no account reads through it and `DESCRIBE SHARE`
+  answers no object;
+- a **failover group** keeps its object types, allowed databases, shares, integration types and accounts and its
+  schedule; nothing is replicated, refreshed or failed over, and `REFRESH`, `PRIMARY`, `SUSPEND` and `RESUME` change
+  nothing;
+- a **secondary database** is an empty database that remembers its primary; nothing is refreshed into it;
+- an **external table** is a table of `VALUE` and its declared columns over an external stage, with its location
+  and file format kept for the listing. **No file is read through it**: a query over it answers no rows, and a
+  refresh finds nothing.
+
+These objects are not kept by a snapshot: a restored engine holds them only when its write-ahead log replays the
+statements that made them. The statements follow Snowflake's documentation; an account's answers for them were
+not measured, apart from the refusals of a malformed `CREATE EXTERNAL TABLE`.
+
 ## Object kinds that are listed but not modelled — the listing answers its columns and no rows
 
-A client that walks an account's metadata issues SHOW commands for kinds Frostlake has no object of: resource
-monitors, shares, connections, applications and application packages, indexes, channels, snapshots, Git
-repositories, semantic views, DBT projects, session, authentication and packages policies, external and data metric
-functions, replication databases, replication and failover groups, replication accounts, and delegated
-authorizations. None of these can be created here, and none is planned for its own sake: they are account
+A client that walks an account's metadata issues SHOW commands for kinds Frostlake has no object of: connections,
+applications and application packages, indexes, channels, snapshots, Git repositories, semantic views, DBT projects,
+external and data metric functions, replication accounts, and delegated authorizations. None of these can be
+created here, and none is planned for its own sake: they are account
 administration, sharing, replication and ingestion surfaces with nothing behind them in an in-memory engine.
 
 Their listings are in scope all the same, **as shapes**: each `SHOW <KIND>` answers the columns a real account

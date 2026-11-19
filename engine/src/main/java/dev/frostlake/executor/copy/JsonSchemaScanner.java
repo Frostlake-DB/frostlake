@@ -16,10 +16,12 @@
 
 package dev.frostlake.executor.copy;
 
+import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.JsonParser;
 import tools.jackson.core.JsonToken;
 import tools.jackson.core.TokenStreamLocation;
+import tools.jackson.core.json.JsonReadFeature;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -50,10 +52,18 @@ import java.util.TreeMap;
  * format sets ALLOW_DUPLICATE, when the key's last value is the one read. Such a refusal names the record's row,
  * and the line the record starts on when that is not the line of the fault: a record starts where the one before
  * it ended, the first one on line 1.
+ *
+ * <p>Any other malformed record is refused in the words of the account's reader, {@code Error parsing JSON: unknown
+ * keyword "tru"}, at the line and character that reader stops at (see {@link JsonRecordFault}); an array that is no
+ * record is read to its end first, and nothing may follow a stripped outer array.
  */
 final class JsonSchemaScanner {
 
-    private static final ObjectMapper MAPPER = JsonMapper.builder().build();
+    /** Reads what the account's reader reads past strict JSON: a trailing comma and a single-quoted string. */
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+        .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
+        .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
+        .build();
 
     private final InferenceFile file;
     private final SchemaScanOptions options;
@@ -95,6 +105,15 @@ final class JsonSchemaScanner {
     }
 
     private List<FileColumn> read() {
+        try {
+            return readRecords();
+        } catch (final JacksonException malformed) {
+            // A value read after its token was: a string a line break or the file's end cuts.
+            throw parseError(malformed);
+        }
+    }
+
+    private List<FileColumn> readRecords() {
         JsonToken token = next();
         while (token != null) {
             if (token == JsonToken.START_ARRAY && options.stripOuterArray()) {
@@ -106,6 +125,7 @@ final class JsonSchemaScanner {
                     readRecord(token);
                     token = next();
                 }
+                requireNothingAfterOuterArray(token);
             } else {
                 if (!options.readsAllRecords() && records >= options.maxRecordsPerFile()) {
                     break;
@@ -115,6 +135,22 @@ final class JsonSchemaScanner {
             token = next();
         }
         return readColumns();
+    }
+
+    /** Refuse what follows a stripped outer array, in the words of the account's reader. */
+    private void requireNothingAfterOuterArray(final JsonToken closing) {
+        if (closing != JsonToken.END_ARRAY) {
+            return;
+        }
+        final JsonToken following = next();
+        if (following == null) {
+            return;
+        }
+        final JsonRecordFault fault = namedFault();
+        if (fault != null) {
+            throw named(fault);
+        }
+        throw new RuntimeException("Error parsing JSON: garbage after outer ]");
     }
 
     /** The columns the file gave, once it is read: its first conflict of types, if any, refuses the call. */
@@ -127,6 +163,14 @@ final class JsonSchemaScanner {
 
     /** One record's keys, taken into the file's columns; the next record starts where this one ends. */
     private void readRecord(final JsonToken token) {
+        if (token == JsonToken.START_ARRAY) {
+            // An array is read to its end before it is refused as no record: a fault inside it comes first.
+            try {
+                parser.skipChildren();
+            } catch (final JacksonException malformed) {
+                throw parseError(malformed);
+            }
+        }
         if (token != JsonToken.START_OBJECT) {
             throw notAnObject(token);
         }
@@ -285,8 +329,17 @@ final class JsonSchemaScanner {
         }
     }
 
-    /** A malformed document's refusal, naming where the parse stopped. */
+    /**
+     * A malformed document's refusal: the fault as the account's reader names and places it (see
+     * {@link JsonRecordFault}), or where no such fault is found, where the parse stopped.
+     */
     private RuntimeException parseError(final JacksonException malformed) {
+        final JsonRecordFault fault = namedFault();
+        if (fault != null) {
+            final RuntimeException named = named(fault);
+            named.initCause(malformed);
+            return named;
+        }
         final TokenStreamLocation where = malformed.getLocation();
         final String detail = malformed.getOriginalMessage() == null ? "" : malformed.getOriginalMessage();
         final int end = detail.indexOf('\n');
@@ -295,6 +348,23 @@ final class JsonSchemaScanner {
             : refusal(end < 0 ? detail : detail.substring(0, end), where.getLineNr(), where.getColumnNr());
         refusal.initCause(malformed);
         return refusal;
+    }
+
+    /** A fault's refusal: its sentence, the stored file with the place and the row, then the file as listed. */
+    private RuntimeException named(final JsonRecordFault fault) {
+        return new RuntimeException("Error parsing JSON: " + fault.sentence()
+            + fault.placeLines(file.storedName(), true) + fault.fileLine(file.relativeName())
+            + "\n  Row 0 starts at line 0, column $1");
+    }
+
+    /** The first fault the account's reader finds in the file, or null where it finds none or the file is unread. */
+    private JsonRecordFault namedFault() {
+        try {
+            return JsonRecordFault.first(StagedFileIo.withoutByteOrderMark(StagedFileIo.readString(file.path())),
+                options.stripOuterArray(), options.allowDuplicate());
+        } catch (final IOException unread) {
+            return null;
+        }
     }
 
     /** A refusal of the current record at a line and character, or at none when the line is -1. */

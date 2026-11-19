@@ -528,14 +528,46 @@ final class ShowSessionExecutor {
     }
 
     /**
+     * SHOW PARAMETERS IN FUNCTION, IN PROCEDURE and IN PIPE: the parameters the object lists, each with the value in
+     * force and the level it comes from, the object's own (level {@code FUNCTION}, {@code PROCEDURE} or
+     * {@code PIPE}), its schema's, its database's or the default (level empty). A session's own setting does not
+     * reach the listing (live-verified).
+     *
+     * @param parameters  the parameters an object of the kind lists
+     * @param own         the object's own settings
+     * @param level       the level an own setting is told at
+     * @param written     the object as written
+     * @param likePattern the LIKE filter, or null
+     * @return the listing
+     */
+    public ResultSet showParametersOfSchemaObject(final List<SessionParameterRow> parameters,
+                                                  final ObjectParameters own, final String level,
+                                                  final SchemaObjectName written, final String likePattern) {
+        final List<Row> rows = new ArrayList<>();
+        for (final SessionParameterRow parameter : parameters) {
+            if (matchesLike(parameter.getName(), likePattern)) {
+                rows.add(inheritedRow(parameter, own.get(parameter.getName()), level, written.schema(),
+                    written.database()));
+            }
+        }
+        return new ResultSet(parameterColumns(), rows);
+    }
+
+    /**
      * One parameter's row for a table or a dynamic table: its own value at the TABLE level, else its schema's, else
      * its database's, else the default.
      */
     private static Row inheritedRow(final SessionParameterRow parameter, final String own, final Schema schema,
                                     final Database database) {
+        return inheritedRow(parameter, own, "TABLE", schema, database);
+    }
+
+    /** One parameter's row for an object of a schema, its own value told at the level given. */
+    private static Row inheritedRow(final SessionParameterRow parameter, final String own, final String ownLevel,
+                                    final Schema schema, final Database database) {
         final String key = parameter.getName();
         String value = own;
-        String level = "TABLE";
+        String level = ownLevel;
         if (value == null) {
             value = containerValue(key, schema.getDataRetentionTimeInDays(), schema.getParameters());
             level = "SCHEMA";

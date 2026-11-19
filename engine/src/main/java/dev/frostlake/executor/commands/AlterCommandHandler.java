@@ -1905,6 +1905,12 @@ public class AlterCommandHandler implements CommandHandler {
                             pipe.setPaused(opt.booleanValue().TRUE() != null);
                         } else if ("COMMENT".equals(optName) && opt.STRING_LITERAL() != null) {
                             pipe.setComment(visitor.extractStringLiteral(opt.STRING_LITERAL()));
+                        } else if (("LOG_LEVEL".equals(optName) || "LOG_EVENT_LEVEL".equals(optName))
+                                && opt.STRING_LITERAL() != null) {
+                            // A pipe keeps its own two log levels, told by SHOW PARAMETERS IN PIPE.
+                            final String level = visitor.extractStringLiteral(opt.STRING_LITERAL());
+                            TaskParameterValues.requireText(optName, level);
+                            pipe.getOwnParameters().set(optName, level);
                         } else if ("ERROR_INTEGRATION".equals(optName) && opt.booleanValue() == null) {
                             // A string is the integration's exact name; an identifier folds as one does.
                             final String integration = opt.STRING_LITERAL() != null
@@ -1926,6 +1932,8 @@ public class AlterCommandHandler implements CommandHandler {
                             pipe.setComment(null);
                         } else if ("PIPE_EXECUTION_PAUSED".equals(optName)) {
                             pipe.setPaused(false);
+                        } else if ("LOG_LEVEL".equals(optName) || "LOG_EVENT_LEVEL".equals(optName)) {
+                            pipe.getOwnParameters().unset(optName);
                         } else {
                             throw new RuntimeException(SqlCompilationError.invalidPropertyFor(optName, "PIPE"));
                         }

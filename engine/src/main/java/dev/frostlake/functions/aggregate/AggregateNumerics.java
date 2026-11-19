@@ -1055,11 +1055,7 @@ public final class AggregateNumerics {
      */
     public static BigDecimal exactVarianceAtDeclaredScale(final ExactMoments moments, final boolean sample,
                                                           final int maxInputScale) {
-        // NUMBER(38, s) holds 38 - s digits before the point: a variance past them is refused, never answered past
-        // its type (a window frame's alike).
-        final int scale = varianceScale(maxInputScale);
-        final BigDecimal variance = moments.variance(sample, scale);
-        return fitOrRefuse(variance, NumericRangeRefusal.gText(variance.doubleValue()), scale);
+        return moments.variance(sample, maxInputScale);
     }
 
     /**

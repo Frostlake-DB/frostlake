@@ -49,6 +49,17 @@ public class Function extends SqlObject implements Routine {
     private volatile boolean unvalidated = false;
     private List<String> imports = new ArrayList<>();
     private RoutineEnvironment environment = new RoutineEnvironment();
+    /** The parameters ALTER … SET gave the function itself, the logging levels and their kin, by name. */
+    private final ObjectParameters ownParameters = new ObjectParameters();
+
+    /**
+     * The parameters set on the function itself; one absent here is inherited from its schema.
+     *
+     * @return the function's own settings
+     */
+    public ObjectParameters getOwnParameters() {
+        return ownParameters;
+    }
 
     public Function(final String name, final List<Parameter> parameters,
                    final DataType returnType, final String body, final boolean isTableFunction) {

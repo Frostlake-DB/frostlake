@@ -738,6 +738,7 @@ final class CatalogSnapshotWriter {
             fnSnapshot.imports = new ArrayList<>(fn.getImports());
             fnSnapshot.environment = fn.getEnvironment().copy();
             fnSnapshot.comment = fn.getComment();
+            fnSnapshot.ownParameters = new HashMap<>(fn.getOwnParameters().entries());
             fnSnapshot.owner = fn.getOwner();
             fnSnapshot.createdAt = fn.getCreatedTime();
             fnSnapshot.lastDdlAt = fn.getLastDdlTime();
@@ -772,6 +773,7 @@ final class CatalogSnapshotWriter {
             procSnapshot.imports = new ArrayList<>(proc.getImports());
             procSnapshot.environment = proc.getEnvironment().copy();
             procSnapshot.comment = proc.getComment();
+            procSnapshot.ownParameters = new HashMap<>(proc.getOwnParameters().entries());
             procSnapshot.owner = proc.getOwner();
             procSnapshot.createdAt = proc.getCreatedTime();
             procSnapshot.lastDdlAt = proc.getLastDdlTime();
@@ -799,6 +801,7 @@ final class CatalogSnapshotWriter {
             pipeSnapshot.lastLoadedFileCount = pipe.getLastLoadedFileCount();
             pipeSnapshot.lastLoadedTime = pipe.getLastLoadedTime();
             pipeSnapshot.comment = pipe.getComment();
+            pipeSnapshot.ownParameters = new HashMap<>(pipe.getOwnParameters().entries());
             pipeSnapshot.owner = pipe.getOwner();
             pipeSnapshot.createdAt = pipe.getCreatedTime();
             pipeSnapshot.lastDdlAt = pipe.getLastDdlTime();

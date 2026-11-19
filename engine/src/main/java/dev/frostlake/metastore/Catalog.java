@@ -29,6 +29,7 @@ import dev.frostlake.metastore.model.Contact;
 import dev.frostlake.metastore.model.CortexSearchService;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DatabaseRole;
+import dev.frostlake.metastore.model.FailoverGroup;
 import dev.frostlake.metastore.model.FileFormat;
 import dev.frostlake.metastore.model.JoinPolicy;
 import dev.frostlake.metastore.model.MaskingPolicy;
@@ -39,10 +40,12 @@ import dev.frostlake.metastore.model.PrivacyPolicy;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.ProjectionPolicy;
 import dev.frostlake.metastore.model.RelationKind;
+import dev.frostlake.metastore.model.ResourceMonitor;
 import dev.frostlake.metastore.model.Role;
 import dev.frostlake.metastore.model.RowAccessPolicy;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObjectStore;
+import dev.frostlake.metastore.model.Share;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.StageType;
 import dev.frostlake.metastore.model.StorageLifecyclePolicy;
@@ -93,6 +96,9 @@ public class Catalog {
      */
     private final Map<String, Set<String>> copyLoadedFiles = new ConcurrentHashMap<>();
     private final ExternalVolumeRegistry externalVolumes = new ExternalVolumeRegistry();
+    private final AccountObjectRegistry<ResourceMonitor> resourceMonitors = new AccountObjectRegistry<>();
+    private final AccountObjectRegistry<Share> shares = new AccountObjectRegistry<>();
+    private final AccountObjectRegistry<FailoverGroup> failoverGroups = new AccountObjectRegistry<>();
     private final Map<String, User> users;
     private final Map<String, Role> roles;
     private final AccountDirectory accountDirectory = new AccountDirectory();
@@ -1270,6 +1276,21 @@ public class Catalog {
      */
     public Map<String, Set<String>> getCopyLoadedFiles() {
         return copyLoadedFiles;
+    }
+
+    /** The account's resource monitors. */
+    public AccountObjectRegistry<ResourceMonitor> getResourceMonitors() {
+        return resourceMonitors;
+    }
+
+    /** The account's outbound shares. */
+    public AccountObjectRegistry<Share> getShares() {
+        return shares;
+    }
+
+    /** The account's failover groups. */
+    public AccountObjectRegistry<FailoverGroup> getFailoverGroups() {
+        return failoverGroups;
     }
 
     /** The account's external volumes. */

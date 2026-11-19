@@ -762,7 +762,8 @@ final class CreatedObjectProperties {
      * A list given a name that takes no list (live-verified): a list of properties is {@code invalid value
      * [TOK_PROPERTY_LIST] for parameter 'CHANGE_TRACKING'}, an empty one given a switch {@code Invalid value specified
      * for property 'CHANGE_TRACKING'}, and a list of constants given for STAGE_FILE_FORMAT is read as the name of a
-     * format, {@code File format 'TOK_CONSTANT_LIST' does not exist}.
+     * format, {@code File format 'TOK_CONSTANT_LIST' does not exist}. A COMMENT takes a list of properties, and
+     * then reads {@code TOK_PROPERTY_LIST}.
      */
     private static void rejectListsOfAnotherType(final List<String> names,
                                                  final List<FrostlakeParser.TablePropertyConstantContext> constants,
@@ -773,6 +774,10 @@ final class CreatedObjectProperties {
             if (lists.get(i) != null && lists.get(i).parenOption().isEmpty() && BOOLEAN.equals(typeOf(key))) {
                 // An empty list is no value of a switch at all (live-verified).
                 throw new RuntimeException("Invalid value specified for property '" + key + "'");
+            }
+            if (lists.get(i) != null && "COMMENT".equals(key) && !lists.get(i).parenOption().isEmpty()) {
+                // A comment takes a list of properties, and holds the parser's word for it.
+                continue;
             }
             if (lists.get(i) != null && typeOf(key) != null) {
                 throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.PROPERTY_LIST,

@@ -34,6 +34,8 @@ public class Procedure extends SqlObject implements Routine {
     private ExecuteAs executeAs = ExecuteAs.OWNER;
     private List<String> imports = new ArrayList<>();
     private RoutineEnvironment environment = new RoutineEnvironment();
+    /** The parameters ALTER … SET gave the procedure itself, the logging levels and their kin, by name. */
+    private final ObjectParameters ownParameters = new ObjectParameters();
     // Declared RETURNS TABLE(col TYPE, ...) columns — name the result of a CALL / TABLE(proc()) source.
     private List<Parameter> returnColumns = new ArrayList<>();
     // RETURNS TABLE, with or without columns: RETURNS TABLE () declares a table of whatever the body returns.
@@ -42,6 +44,15 @@ public class Procedure extends SqlObject implements Routine {
     private boolean secure = false;
     private NullHandling nullHandling = NullHandling.CALLED_ON_NULL_INPUT;
     private Volatility volatility = Volatility.VOLATILE;
+
+    /**
+     * The parameters set on the procedure itself; one absent here is inherited from its schema.
+     *
+     * @return the procedure's own settings
+     */
+    public ObjectParameters getOwnParameters() {
+        return ownParameters;
+    }
 
     /**
      * A TEMPORARY (TEMP / VOLATILE) procedure lives only as long as the session that created it, the same

@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import org.antlr.v4.runtime.Token;
 
 /**
  * What an ALTER USER … SET writes beside the properties in their own form (live-verified): the session parameters,
@@ -78,9 +79,26 @@ final class UserParameterList {
      * @param action the SET action of the statement
      */
     UserParameterList(final FrostlakeParser.UserActionContext action) {
-        this.properties = action.userProperty();
-        this.propertyAssignments = action.userPropertyAssignment();
-        this.written = LeveledParameterSettings.assignments(action.sessionAssignment());
+        this(action.userProperty(), action.userPropertyAssignment(), action.sessionAssignment());
+    }
+
+    /**
+     * The parameters a CREATE USER writes among its properties, read as ALTER USER … SET reads them.
+     *
+     * @param properties the properties of the statement, in their own form
+     * @param parameters the parameters of the statement
+     */
+    UserParameterList(final List<FrostlakeParser.UserPropertyContext> properties,
+                      final List<FrostlakeParser.SessionAssignmentContext> parameters) {
+        this(properties, new ArrayList<FrostlakeParser.UserPropertyAssignmentContext>(), parameters);
+    }
+
+    private UserParameterList(final List<FrostlakeParser.UserPropertyContext> properties,
+                              final List<FrostlakeParser.UserPropertyAssignmentContext> propertyAssignments,
+                              final List<FrostlakeParser.SessionAssignmentContext> assignments) {
+        this.properties = properties;
+        this.propertyAssignments = propertyAssignments;
+        this.written = LeveledParameterSettings.assignments(assignments);
         for (final SessionParameterSetting setting : written) {
             if (POLICY_BYPASSES.contains(setting.written().toUpperCase(Locale.ROOT))) {
                 bypasses = true;
@@ -99,6 +117,27 @@ final class UserParameterList {
     void requireBypassPrivilege(final User user) {
         if (bypasses) {
             throw bypassRefusal(user);
+        }
+    }
+
+    /** Whether the list sets a policy bypass. */
+    boolean setsBypass() {
+        return bypasses;
+    }
+
+    /**
+     * Refuses, as the syntax error it is, an assignment of a CREATE USER whose name is no parameter's, at the name.
+     *
+     * @param assignments the assignments the statement writes beside its properties
+     */
+    static void requireParameters(final List<FrostlakeParser.SessionAssignmentContext> assignments) {
+        for (final FrostlakeParser.SessionAssignmentContext assignment : assignments) {
+            final String name = SessionParameterSetting.writtenOf(assignment.sessionParameter());
+            if (new SessionParameterSetting(name, assignment.sessionValue(), true).key() == null) {
+                final Token refused = assignment.getStart();
+                throw new RuntimeException(SqlCompilationError.of(
+                    ShowScopeRefusal.syntaxErrorAt(refused, refused.getText())));
+            }
         }
     }
 

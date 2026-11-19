@@ -786,7 +786,7 @@ public class ExpressionEvaluator {
             return false;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        final String name = ((BindVariableExpression) expression).getVarName();
+        final String name = ((BindVariableExpression) expression).getVariableKey();
         return procedural != null && procedural.hasVariable(name) && procedural.getVariable(name) == null;
     }
 

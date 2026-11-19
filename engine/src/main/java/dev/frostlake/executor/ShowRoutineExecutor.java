@@ -50,6 +50,7 @@ import dev.frostlake.types.SqlTypeNames;
 import dev.frostlake.types.StringType;
 import dev.frostlake.types.StructuredTypes;
 import dev.frostlake.types.VectorType;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -64,6 +65,9 @@ import java.util.Map;
  * masking / row-access policies. Extracted from {@link ShowCommandExecutor}, which delegates here.
  */
 final class ShowRoutineExecutor {
+
+    /** When the account's built-in routines were created, as every account lists them. */
+    private static final Instant BUILTIN_CREATED = Instant.parse("2012-08-01T07:00:00Z");
 
     private final Catalog catalog;
     private final FunctionRegistry functionRegistry;
@@ -125,36 +129,56 @@ final class ShowRoutineExecutor {
     }
 
     /**
-     * One row per built-in procedure the engine can CALL — of which there are none, so this appends
-     * nothing.
+     * One row per built-in procedure the engine can CALL, each among the user procedures where its name sorts, as
+     * the account lists them (live-verified).
      *
-     * <p>This is not an oversight and must not become a hand-maintained list of the names a real account
-     * happens to ship: like the function listing, this one describes what <em>this</em> engine dispatches.
-     * {@code CALL} resolves a name through {@code Schema.getProcedure} and nothing else
-     * ({@code SQLCommandVisitor.visitCallStatement} raises "Procedure not found" the moment the catalog
-     * misses), so every procedure Frostlake can run is a user procedure in a schema, and the built-in
-     * half of the listing is structurally empty. The SYSTEM$ routines the engine implements are
-     * FUNCTIONS, not procedures — a real account agrees (
-     * {@code SHOW BUILTIN PROCEDURES} does not list SYSTEM$WAIT while {@code SHOW BUILTIN FUNCTIONS}
-     * does), so {@code appendBuiltinFunctionRows} lists them instead.
+     * <p>This must not become a hand-maintained list of the names a real account happens to ship: like the
+     * function listing, this one describes what <em>this</em> engine dispatches. {@code CALL} resolves a name
+     * through {@code Schema.getProcedure} but for the account's own procedures it answers itself
+     * ({@link SendEmailProcedure}, which {@code SQLCommandVisitor.visitCallStatement} dispatches), so those are the
+     * rows listed here, enumerated from the class that runs them. The SYSTEM$ routines the engine implements are
+     * otherwise FUNCTIONS, not procedures — a real account agrees ({@code SHOW BUILTIN PROCEDURES} does not list
+     * SYSTEM$WAIT while {@code SHOW BUILTIN FUNCTIONS} does), so {@code appendBuiltinFunctionRows} lists them
+     * instead.
      *
-     * <p>When the engine grows a built-in procedure, add it to whatever source {@code CALL} learns to
-     * dispatch it from and enumerate that source here — the one mistake to avoid is a second, separate
-     * list that the dispatcher never reads.
+     * <p>A built-in row is the account's (live-verified): created at the account's epoch, 2012-08-01 in the
+     * Pacific zone, in no schema and no database — both cells empty, as the description, the secrets and the
+     * integrations are — {@code is_builtin} Y, one row for each overload with its count of arguments, and
+     * {@code is_secure} NULL.
+     *
+     * <p>When the engine grows another built-in procedure, enumerate the source {@code CALL} dispatches it from
+     * here — the one mistake to avoid is a second, separate list that the dispatcher never reads.
      */
     private void appendBuiltinProcedureRows(final List<Row> rows) {
-        // Intentionally empty — see the javadoc above.
+        for (final Integer count : SendEmailProcedure.listedArgumentCounts()) {
+            final Row builtin = new Row(Arrays.asList(
+                ShowResultHelpers.createdOn(BUILTIN_CREATED),
+                SendEmailProcedure.NAME,
+                "",
+                "Y", "N", "N",
+                count, count,
+                SendEmailProcedure.listedSignature(count.intValue()),
+                "",
+                "",
+                "N", "N", null,
+                "",
+                ""
+            ));
+            int at = 0;
+            while (at < rows.size() && String.valueOf(rows.get(at).getValue(1))
+                    .compareTo(SendEmailProcedure.NAME) <= 0) {
+                at++;
+            }
+            rows.add(at, builtin);
+        }
     }
 
     /**
      * SHOW PROCEDURES IN DATABASE &lt;db&gt;: the built-in catalog plus the user procedures of every
      * schema in the database, mirroring {@link #showFunctionsInDatabase(String)}.
      *
-     * <p>Live-verified: with two user procedures in one schema of a two-schema database,
-     * {@code IN DATABASE} answers 34 (32 built-in + 2) and {@code IN SCHEMA} the other schema 32.
-     * {@link #appendBuiltinProcedureRows} contributes nothing here because Frostlake dispatches no
-     * built-in procedures — the call is what keeps the two listings structurally identical, so a
-     * built-in procedure would show up in both the moment one exists.
+     * <p>Live-verified: {@code IN DATABASE} and {@code IN SCHEMA} list the built-in procedures beside the user
+     * procedures in scope, as the unscoped listing does.
      */
     public ResultSet showProceduresInDatabase(final String databaseName) {
         final List<ResultSetColumn> columns = procedureColumns();
@@ -720,6 +744,40 @@ final class ShowRoutineExecutor {
             }
         }
         return propertyValueResult(rows);
+    }
+
+    /**
+     * The function a statement names by its schema and the signature it writes, when the session sees it; one it
+     * does not see is refused as a missing one is.
+     *
+     * @param written       the function as written
+     * @param argumentTypes the argument types written after it
+     * @return the overload
+     */
+    Function seenFunction(final SchemaObjectName written, final List<DataType> argumentTypes) {
+        final Schema owner = written.schema();
+        final Function fn = owner.getFunctionByWrittenSignature(written.name(), argumentTypes);
+        if (!seen(QueryExecutor.functionGrant(owner, fn))) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Function", owner.qualifiedName(fn.getName())));
+        }
+        return fn;
+    }
+
+    /**
+     * The procedure a statement names by its schema and the signature it writes (see {@link #seenFunction}).
+     *
+     * @param written       the procedure as written
+     * @param argumentTypes the argument types written after it
+     * @return the overload
+     */
+    Procedure seenProcedure(final SchemaObjectName written, final List<DataType> argumentTypes) {
+        final Schema owner = written.schema();
+        final Procedure proc = owner.getProcedureByWrittenSignature(written.name(), argumentTypes);
+        if (!seen(QueryExecutor.procedureGrant(owner, proc))) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Procedure",
+                owner.qualifiedName(proc.getName())));
+        }
+        return proc;
     }
 
     /**

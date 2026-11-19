@@ -190,6 +190,10 @@ public class CreateNamespaceHandler implements CommandHandler {
             }
             final String comment = ddl.extractCommentFromList(properties.comments());
             if (comment != null) db.setComment(comment);
+            if (ctx.replicaSource != null) {
+                // A secondary database remembers its primary; nothing is ever refreshed into it.
+                db.setReplicaOf(QualifiedName.join(ParseTreeText.qualifiedNameParts(ctx.replicaSource)));
+            }
             properties.applyParameters(db.getParameters());
             for (final FrostlakeParser.TagListContext tags : properties.tags()) {
                 InlineTags.apply(db, tags, queryExecutor);
@@ -400,6 +404,7 @@ public class CreateNamespaceHandler implements CommandHandler {
                 final String scN = parts.length == 2 ? parts[1] : parts[0];
                 if (dbN != null) {
                     final Schema replacedSchema = catalog.databaseExact(dbN).schemaExact(scN);
+                    NetworkRuleAssociations.requireFree(catalog, replacedSchema);
                     // The schema replaced is a dropped version of its name, as a dropped one is (live-verified: SHOW
                     // SCHEMAS HISTORY lists it).
                     final DroppedObject version = ddl.keepReplacedSchema(dbN, replacedSchema);
@@ -410,6 +415,8 @@ public class CreateNamespaceHandler implements CommandHandler {
                         ddl.getStreamManager().onSchemaDropped(dbN, scN);
                     }
                 }
+            } catch (final NetworkRuleAssociationRefusal held) {
+                throw held;
             } catch (final RuntimeException ignored) {}
         }
         try {
