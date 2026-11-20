@@ -374,6 +374,8 @@ final class ExplainPlan {
      */
     private static void compileStatementQuery(final QueryExecutor executor,
                                               final FrostlakeParser.SelectStatementContext query) {
+        // A query that reads no row of a view is still judged for the view's body (see ViewExpansionJudgement).
+        ViewExpansionJudgement.require(executor, query);
         compileAt(executor, query,
             holdsDynamicPivot(query) || judgedByRows(executor, query, ParseTreeText.getOriginalText(query)));
     }
@@ -411,7 +413,7 @@ final class ExplainPlan {
      * refusal then the view's (see {@link UnsupportedSubqueryException#insideView}). A name is looked for in every
      * schema: a view of another schema that carries it only costs the EXPLAIN a read of the query's rows.
      */
-    private static boolean readsViewHoldingSubquery(final Catalog catalog, final ParseTree node, final int depth) {
+    static boolean readsViewHoldingSubquery(final Catalog catalog, final ParseTree node, final int depth) {
         if (depth > VIEW_DEPTH) {
             return false;
         }

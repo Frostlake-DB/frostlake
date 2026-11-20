@@ -40,9 +40,13 @@ public class ResultSet {
     private boolean recursiveStep;
     /** Whether this is the answer a Snowflake Scripting RETURN handed its CALL or block. */
     private boolean scriptingAnswer;
+    /** How many rows a planned result's row stands for, or -1 (see {@link #markCountedRows}). */
+    private long countedRows = -1L;
     /** The rows a CTAS wrote or a TRUNCATE removed, when this is that statement's status; null otherwise. */
     private Long rowsInserted;
     private Long rowsDeleted;
+    /** The query ID of the statement of a request this result answers, or null (see {@link #markQueryId}). */
+    private String queryId;
 
     public ResultSet(final List<ResultSetColumn> columns, final List<Row> rows) {
         this.columns = new ArrayList<>(columns);
@@ -72,6 +76,7 @@ public class ResultSet {
         copy.scriptingAnswer = scriptingAnswer;
         copy.rowsInserted = rowsInserted;
         copy.rowsDeleted = rowsDeleted;
+        copy.queryId = queryId;
         return copy;
     }
 
@@ -171,6 +176,27 @@ public class ResultSet {
         return this;
     }
 
+    /**
+     * The query ID of the statement of a request this result answers, as RESULT_SCAN reads it back, or null when the
+     * statement took none.
+     *
+     * @return the query ID, or null
+     */
+    public String getQueryId() {
+        return queryId;
+    }
+
+    /**
+     * Record the query ID the statement this result answers took.
+     *
+     * @param id the query ID
+     * @return this result
+     */
+    public ResultSet markQueryId(final String id) {
+        this.queryId = id;
+        return this;
+    }
+
     /** The statistics this result carries of the catalog table beneath it, or null. */
     public RelationStatistics getRelationStatistics() {
         return relationStatistics;
@@ -225,6 +251,23 @@ public class ResultSet {
         this.rowsInserted = Long.valueOf(inserted);
         this.rowsDeleted = Long.valueOf(deleted);
         return this;
+    }
+
+    /**
+     * Mark a planned result whose one row stands for {@code rows} rows of a GENERATOR a select counts through it
+     * (the executor's GeneratorRowReads).
+     *
+     * @param rows how many rows the result's row stands for
+     * @return this result
+     */
+    public ResultSet markCountedRows(final long rows) {
+        this.countedRows = rows;
+        return this;
+    }
+
+    /** How many rows a planned result's row stands for (see {@link #markCountedRows}), or -1. */
+    public long getCountedRows() {
+        return countedRows;
     }
 
     /** The rows the statement wrote (see {@link #markRowsChanged}), or null when it recorded none. */

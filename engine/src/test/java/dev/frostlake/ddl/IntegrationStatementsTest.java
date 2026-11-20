@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.TreeSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -398,12 +399,13 @@ public class IntegrationStatementsTest extends BaseDatabaseTest {
             + " REST_AUTHENTICATION = (TYPE = OAUTH OAUTH_CLIENT_ID = 'id' OAUTH_CLIENT_SECRET = 's'"
             + " OAUTH_ALLOWED_SCOPES = ('PRINCIPAL_ROLE:ALL')) ENABLED = TRUE");
         final String catalog = "DESCRIBE CATALOG INTEGRATION it_polaris";
-        assertEquals("{\"CATALOG_URI\":\"https://p/api/catalog\",\"CATALOG_NAME\":\"c\"}",
-            describeValue(catalog, "REST_CONFIG"));
-        assertTrue(describeValue(catalog, "REST_AUTHENTICATION").contains("\"OAUTH_CLIENT_SECRET\":\"\u263A\""));
+        assertEquals("{CATALOG_URI=https://p/api/catalog, CATALOG_NAME=c, CATALOG_API_TYPE=PUBLIC,"
+            + " ACCESS_DELEGATION_MODE=EXTERNAL_VOLUME_CREDENTIALS}", describeValue(catalog, "REST_CONFIG"));
+        assertFalse(describeValue(catalog, "REST_AUTHENTICATION").contains("OAUTH_CLIENT_SECRET"),
+            "the secret is not among the members");
         engine.executeQuery("ALTER CATALOG INTEGRATION it_polaris SET REST_AUTHENTICATION ="
             + " (OAUTH_CLIENT_SECRET = 'rotated') REFRESH_INTERVAL_SECONDS = 60");
-        assertTrue(describeValue(catalog, "REST_AUTHENTICATION").contains("\"OAUTH_CLIENT_ID\":\"id\""),
+        assertTrue(describeValue(catalog, "REST_AUTHENTICATION").contains("OAUTH_CLIENT_ID=id,"),
             "setting the secret keeps the other entries");
         assertEquals("60", describeValue(catalog, "REFRESH_INTERVAL_SECONDS"));
         engine.executeQuery("DROP INTEGRATION it_polaris");

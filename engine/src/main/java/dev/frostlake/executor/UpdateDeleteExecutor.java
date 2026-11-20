@@ -1461,12 +1461,12 @@ final class UpdateDeleteExecutor {
             executor.compileSubqueriesIn(expressions, scopeTable, aliasToTable, allTables, null);
         final Set<String> targets = new HashSet<>();
         for (final FrostlakeParser.AssignmentContext assign : assignments) {
-            final String colName = ParseTreeText.namePartText(assign.namePart());
-            requireColumn(table, colName, assign.namePart());
-            // Keyed by the canonical spelling: SET "x" = 1, "X" = 2 writes two different columns.
+            final String colName = WrittenColumnTargets.requireAssigned(table, assign);
+            // Keyed by the canonical spelling: SET "x" = 1, "X" = 2 writes two different columns. The later one is
+            // named as written, qualifier and all (live-verified).
             if (!targets.add(colName)) {
                 throw new RuntimeException(SqlCompilationError.of(
-                    "duplicate column name '" + SqlIdentifiers.spellCanonical(colName) + "'"));
+                    "duplicate column name '" + WrittenColumnTargets.spelled(assign) + "'"));
             }
         }
         final ExpressionEvaluator scope = new ExpressionEvaluator(scopeTable, executor.getFunctionRegistry(),
@@ -1506,6 +1506,12 @@ final class UpdateDeleteExecutor {
                     }
                 } finally {
                     ExpressionSource.end(displaced);
+                }
+            }
+            if (phase == 0) {
+                // A target's qualifier is judged once every name the statement reads has resolved.
+                for (final FrostlakeParser.AssignmentContext assign : assignments) {
+                    WrittenColumnTargets.requireQualifier(alias != null ? alias : table.getName(), assign);
                 }
             }
         }
@@ -1601,18 +1607,6 @@ final class UpdateDeleteExecutor {
      * was written. Resolution itself is delegated, so this can only add a position to a refusal that
      * would have happened anyway — never change which statements are refused.
      */
-    private void requireColumn(final Table table, final String colName,
-                               final FrostlakeParser.NamePartContext where) {
-        try {
-            executor.getColumnIndex(table, colName);
-        } catch (final RuntimeException unknown) {
-            throw new RuntimeException(SqlCompilationError.invalidIdentifier(
-                where.getStart().getLine(), where.getStart().getCharPositionInLine(),
-                colName.toUpperCase(Locale.ROOT)), unknown);
-        }
-        VirtualColumns.refuseTarget(table, colName);
-    }
-
     /** Where a WHERE clause's PREDICATE begins — the offset the extracted text was taken from. */
     private SourcePosition originOf(final FrostlakeParser.WhereClauseContext where) {
         return new SourcePosition(where.booleanExpr().getStart().getLine(),

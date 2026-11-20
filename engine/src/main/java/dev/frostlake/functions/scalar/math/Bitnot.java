@@ -17,7 +17,9 @@
 package dev.frostlake.functions.scalar.math;
 
 import dev.frostlake.functions.NumericArgumentFunction;
+import dev.frostlake.functions.SemiStructuredRejection;
 import dev.frostlake.types.IntegerResultWidths;
+import dev.frostlake.values.BinaryValue;
 
 import java.util.List;
 
@@ -27,7 +29,20 @@ public class Bitnot extends NumericArgumentFunction {
     @Override
     public Object evaluate(final List<Object> args) {
         if (args.get(0) == null) return null;
+        if (args.get(0) instanceof BinaryValue) return BinaryBitwise.inverted((BinaryValue) args.get(0));
         return BitwiseOperand.result(BitwiseOperand.wide(args.get(0)).not());
+    }
+
+    /** A VARIANT is cast to a whole number here. */
+    @Override
+    public String variantCastTarget() {
+        return "FIXED";
+    }
+
+    /** A BINARY value is taken in first place, the BINARY form (see BinaryBitwise). */
+    @Override
+    public SemiStructuredRejection binaryRejection(final int position) {
+        return position == 0 ? SemiStructuredRejection.NONE : super.binaryRejection(position);
     }
 
     @Override

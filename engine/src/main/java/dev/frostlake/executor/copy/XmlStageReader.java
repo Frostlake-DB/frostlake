@@ -52,7 +52,7 @@ public class XmlStageReader implements StageFileReader {
     @Override
     public List<JsonNode> readRecords(final Path file, final FileFormatOptions options, final String shownName)
             throws IOException {
-        final String marked = StagedFileIo.readMarked(file, StandardCharsets.UTF_8);
+        final String marked = StagedFileIo.readMarked(file, StandardCharsets.UTF_8, options.getCompression());
         final int unreadable = StagedFileIo.firstUnreadable(marked);
         if (unreadable >= 0 && !options.replacesInvalidCharacters()) {
             throw StagedFileIo.unreadableRefusal("XML", marked, unreadable, shownName,

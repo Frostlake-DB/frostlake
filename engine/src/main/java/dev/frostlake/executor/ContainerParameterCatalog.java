@@ -31,7 +31,8 @@ import java.util.List;
  * (resource {@code dev/frostlake/parameters/container.tsv}). A database lists the ones marked for databases, a
  * schema the ones marked for schemas, and a table the schema's that its own list names (resource
  * {@code dev/frostlake/parameters/table.txt}); a dynamic table likewise (resource
- * {@code dev/frostlake/parameters/dynamic_table.txt}).
+ * {@code dev/frostlake/parameters/dynamic_table.txt}), a function ({@code function.txt}) and a pipe
+ * ({@code pipe.txt}). A procedure lists a function's and one of its own, AUTO_EVENT_LOGGING, which no container has.
  */
 public final class ContainerParameterCatalog {
 
@@ -39,6 +40,9 @@ public final class ContainerParameterCatalog {
     private static final List<SessionParameterRow> SCHEMA = new ArrayList<>();
     private static final List<SessionParameterRow> TABLE = new ArrayList<>();
     private static final List<SessionParameterRow> DYNAMIC_TABLE = new ArrayList<>();
+    private static final List<SessionParameterRow> FUNCTION = new ArrayList<>();
+    private static final List<SessionParameterRow> PROCEDURE = new ArrayList<>();
+    private static final List<SessionParameterRow> PIPE = new ArrayList<>();
 
     static {
         try (InputStream in = ContainerParameterCatalog.class.getResourceAsStream(
@@ -69,6 +73,12 @@ public final class ContainerParameterCatalog {
         // so does a dynamic table.
         loadNamed("table", TABLE);
         loadNamed("dynamic_table", DYNAMIC_TABLE);
+        loadNamed("function", FUNCTION);
+        loadNamed("pipe", PIPE);
+        // A procedure's own parameter sorts before the ones it shares with a function.
+        PROCEDURE.add(new SessionParameterRow("AUTO_EVENT_LOGGING", "OFF",
+            "Adds default logs and traces to stored procedures when enabled", "STRING"));
+        PROCEDURE.addAll(FUNCTION);
     }
 
     /** The schema's parameters a list resource names, in the list's order. */
@@ -118,6 +128,31 @@ public final class ContainerParameterCatalog {
     /** The parameters a dynamic table lists, in name order. */
     public static List<SessionParameterRow> dynamicTableRows() {
         return Collections.unmodifiableList(DYNAMIC_TABLE);
+    }
+
+    /** The parameters a function lists, in name order. */
+    public static List<SessionParameterRow> functionRows() {
+        return Collections.unmodifiableList(FUNCTION);
+    }
+
+    /** The parameters a procedure lists, in name order. */
+    public static List<SessionParameterRow> procedureRows() {
+        return Collections.unmodifiableList(PROCEDURE);
+    }
+
+    /** The parameters a pipe lists, in name order. */
+    public static List<SessionParameterRow> pipeRows() {
+        return Collections.unmodifiableList(PIPE);
+    }
+
+    /** Whether a function lists the parameter (an upper-case name). */
+    public static boolean isFunctionParameter(final String name) {
+        return contains(FUNCTION, name);
+    }
+
+    /** Whether a procedure lists the parameter (an upper-case name). */
+    public static boolean isProcedureParameter(final String name) {
+        return contains(PROCEDURE, name);
     }
 
     /** Whether a database lists the parameter (an upper-case name). */

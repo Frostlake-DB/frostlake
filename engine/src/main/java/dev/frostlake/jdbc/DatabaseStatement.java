@@ -27,6 +27,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -38,6 +39,8 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
     protected final DatabaseConnection connection;
     protected final HttpClient httpClient;
     protected DatabaseResultSet currentResultSet;
+    // The result sets getMoreResults(KEEP_CURRENT_RESULT) left open, closed with the statement.
+    private final List<DatabaseResultSet> keptResultSets = new ArrayList<>();
     // Every result the last (possibly multi-statement) execution produced, one per statement, and the walk
     // over them: which answer rows and which an update count, and where getMoreResults() stands.
     protected List<ResultSetData> pendingResultData = new ArrayList<>();
@@ -50,54 +53,19 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
     }
 
 
-    /** Per-statement MULTI_STATEMENT_COUNT set via {@link #setParameter}, overriding the session's. */
-    private Integer statementMultiCount;
-
-    /**
-     * The real driver's per-statement parameter surface ({@code unwrap(...).setParameter(...)});
-     * MULTI_STATEMENT_COUNT is the one parameter this driver understands.
-     */
-    public void setParameter(final String name, final int value) throws SQLException {
-        if (!"MULTI_STATEMENT_COUNT".equalsIgnoreCase(name)) {
-            throw new SQLException("Unknown statement parameter: " + name);
-        }
-        this.statementMultiCount = Integer.valueOf(value);
+    @Override
+    protected int sessionStatementCount() {
+        return connection.getMultiStatementCount();
     }
 
-    /**
-     * The multi-statement gate the real driver runs before executing (live-verified): the pack's
-     * statement count must EQUAL the desired count — per-statement parameter first, else the
-     * connection's session value — with 0 meaning any. An exact ALTER SESSION SET/UNSET
-     * MULTI_STATEMENT_COUNT statement passes through and moves the connection's value.
-     */
-    private void applyMultiStatementGate(final String sql) throws SQLException {
-        // The ALTER SESSION statement is gated like any other (live-verified: under count 2 even
-        // the UNSET refuses as 1 vs 2 — the per-statement parameter is the escape hatch); its
-        // assignment takes effect only once it passes.
-        gate(sql);
-        final Integer assigned = JdbcMultiStatement.sessionCountAssignment(sql);
-        if (assigned != null) {
-            connection.setMultiStatementCount(assigned.intValue());
-            return;
-        }
+    @Override
+    protected void sessionStatementCount(final int count) {
+        connection.setMultiStatementCount(count);
     }
 
-    private void gate(final String sql) throws SQLException {
-        final int desired = statementMultiCount != null
-            ? statementMultiCount.intValue() : connection.getMultiStatementCount();
-        if (desired == 0) {
-            return;
-        }
-        final int actual = JdbcMultiStatement.countTokens(sql);
-        if (actual != desired) {
-            throw JdbcMultiStatement.countMismatch(sql, actual, desired);
-        }
-    }
-
-    /** The count this statement declares to the server: its own parameter, else the session's. */
-    private Integer desiredMultiCount() {
-        return statementMultiCount != null
-            ? statementMultiCount : Integer.valueOf(connection.getMultiStatementCount());
+    @Override
+    protected int statementCount(final String sql) {
+        return JdbcMultiStatement.countTokens(sql);
     }
 
     /** Send a request, gated first, and keep its results. */
@@ -109,7 +77,7 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
             currentResultSet.close();
             currentResultSet = null;
         }
-        final SqlResponse response = httpClient.execute(sql, desiredMultiCount(), queryTimeout(), this);
+        final SqlResponse response = httpClient.execute(sql, Integer.valueOf(desiredStatementCount()), queryTimeout(), this);
         pendingResultData = response.getResultSets() != null ? response.getResultSets() : new ArrayList<>();
         return response;
     }
@@ -263,8 +231,16 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
             if (currentResultSet != null) {
                 currentResultSet.close();
             }
+            closeKeptResultSets();
             closed = true;
         }
+    }
+
+    private void closeKeptResultSets() throws SQLException {
+        for (final DatabaseResultSet kept : keptResultSets) {
+            kept.close();
+        }
+        keptResultSets.clear();
     }
 
     @Override
@@ -344,13 +320,32 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
         return walk.updateCount();
     }
 
-    /** Move to the next statement's result; see {@link JdbcResultWalk#next()} for what it answers. */
+    /**
+     * Move to the next statement's result, closing the current result set; see {@link JdbcResultWalk#next()} for
+     * what it answers.
+     */
     @Override
     public boolean getMoreResults() throws SQLException {
+        return getMoreResults(Statement.CLOSE_CURRENT_RESULT);
+    }
+
+    /**
+     * Move to the next statement's result, the current result set closed, kept open or closed with every one kept
+     * before it, as {@code current} says (see {@link JdbcResultWalk#next()} for what it answers).
+     */
+    @Override
+    public boolean getMoreResults(final int current) throws SQLException {
         checkClosed();
         if (currentResultSet != null) {
-            currentResultSet.close();
+            if (current == Statement.KEEP_CURRENT_RESULT) {
+                keptResultSets.add(currentResultSet);
+            } else {
+                currentResultSet.close();
+            }
             currentResultSet = null;
+        }
+        if (current == Statement.CLOSE_ALL_RESULTS) {
+            closeKeptResultSets();
         }
         final boolean answer = walk.next();
         if (walk.currentIsRows()) {

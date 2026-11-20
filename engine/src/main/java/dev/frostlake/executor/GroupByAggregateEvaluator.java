@@ -1143,9 +1143,11 @@ final class GroupByAggregateEvaluator {
                 GroupingSetScope.leave(outerGrouping);
             }
             if (groupRowsSink != null) {
+                // The clauses after the grouping read a rolled-up dimension as NULL outside an aggregate, the rows
+                // as stored inside one, and GROUPING from the set (see SuperGroupRows).
                 for (final List<Row> sourceRows : setGroups) {
-                    groupRowsSink.add(maskedColumns.isEmpty() ? sourceRows
-                        : withColumnsNulled(sourceRows, maskedColumns));
+                    groupRowsSink.add(new SuperGroupRows(maskedColumns.isEmpty() ? sourceRows
+                        : withColumnsNulled(sourceRows, maskedColumns), sourceRows, groupingKeys, rolledUp));
                 }
             }
 
@@ -2307,6 +2309,18 @@ final class GroupByAggregateEvaluator {
         if (expr == null) {
             return null;
         }
+        // A super-group's GROUPING calls read its grouping set, wherever in the expression they stand.
+        final GroupingKeys groupingKeys = SuperGroupRows.keysOf(groupRows);
+        if (groupingKeys != null && GroupingSetScope.current() != groupingKeys) {
+            final GroupingKeys outerGrouping = GroupingSetScope.enter(groupingKeys);
+            try {
+                return evaluateSelectItem(expr, groupRows, table, aliasToTable, allTables, lateralAliases, itemCell);
+            } finally {
+                GroupingSetScope.leave(outerGrouping);
+            }
+        }
+        // An aggregate reads a super-group's rows as stored, its rolled-up dimensions included.
+        final List<Row> aggregatedRows = SuperGroupRows.aggregated(groupRows);
         // A star-argument aggregate — COUNT(*), HASH_AGG(*) — is its own parse-tree node.
         if (expr instanceof FrostlakeParser.FunctionCallStarExprContext) {
             final FrostlakeParser.FunctionCallStarExprContext starCall =
@@ -2314,7 +2328,7 @@ final class GroupByAggregateEvaluator {
             final String starName = aggregateName(starCall.functionName().getText());
             final StarArgument star = StarArgument.of(starCall);
             if ("COUNT".equalsIgnoreCase(starName) && star.isBare() && starCall.DISTINCT() == null) {
-                return (long) groupRows.size();
+                return (long) aggregatedRows.size();
             }
             if (executor.getFunctionRegistry().hasAggregateFunction(starName)) {
                 // ★ THE STAR EXPANDS AND THE CALL IS THEN ORDINARY. Live answers HASH_AGG(*) exactly as
@@ -2335,11 +2349,11 @@ final class GroupByAggregateEvaluator {
                     // list counts the rows in which EVERY column is non-NULL (live: COUNT(t.*) over
                     // (4, NULL, 6) is 0 where COUNT(*) is 1).
                     return starCall.DISTINCT() != null
-                        ? countDistinctTuples(starArgs, groupRows, table, aliasToTable, allTables)
-                        : countNonNullTuples(starArgs, groupRows, table, aliasToTable, allTables);
+                        ? countDistinctTuples(starArgs, aggregatedRows, table, aliasToTable, allTables)
+                        : countNonNullTuples(starArgs, aggregatedRows, table, aliasToTable, allTables);
                 }
                 return evaluateGenericAggregate(starName, starCall.DISTINCT() != null, null, starArgs,
-                    groupRows, table, aliasToTable, allTables);
+                    aggregatedRows, table, aliasToTable, allTables);
             }
         }
 
@@ -2365,7 +2379,7 @@ final class GroupByAggregateEvaluator {
             final boolean distinct = funcCtx.DISTINCT() != null;
             final List<String> args = aggArgTexts(funcCtx, table, allTables);
             final String arg0 = args.isEmpty() ? "" : args.get(0);
-            final List<Row> aggregateInputRows = groupRows;
+            final List<Row> aggregateInputRows = aggregatedRows;
             switch (funcName) {
                 case "COUNT": {
                     if (distinct && args.size() > 1) {
@@ -2492,8 +2506,10 @@ final class GroupByAggregateEvaluator {
         // then evaluate the surrounding expression with those results substituted in (mirrors the nested
         // window-function path). Without this the whole expression fell through to the column-reference
         // branch below, whose text is not a column name, and resolved to NULL.
+        final Map<String, Object> rolledUp = SuperGroupRows.rolledUpOf(groupRows);
         if (executor.hasAggregateFunctionInExpression(expr)) {
-            return evaluateAroundAggregates(expr, groupRows, table, aliasToTable, allTables, lateralAliases, itemCell);
+            return evaluateAroundAggregates(expr, groupRows, table, aliasToTable, allTables, lateralAliases, itemCell,
+                null, rolledUp);
         }
 
         // Not an aggregate: a plain (possibly qualified) column reference is constant within the
@@ -2528,6 +2544,9 @@ final class GroupByAggregateEvaluator {
                 ev.setMultiTableContext(aliasToTable, allTables);
             }
             offerEarlierItems(ev, lateralAliases);
+            if (rolledUp != null) {
+                ev.setResultContext(rolledUp);
+            }
             return ev.evaluate(parsedRef, groupRows.get(0));
         }
         // The bare-column fallback looks the column up by its CANONICAL name — a quoted "c" by c, not by
@@ -2923,6 +2942,11 @@ final class GroupByAggregateEvaluator {
                 ((DecfloatAwareAccumulator) acc).setDecfloatArgument(
                     NumericType.isDecfloat(aggregatedType) || pairedDecfloat);
             }
+            if (acc instanceof RegrAccumulator && args.size() > 1) {
+                // REGR_SXY and REGR_R2 read a side declared an exact NUMBER exactly.
+                ((RegrAccumulator) acc).setExactArguments(NumericType.isExactNumber(declared),
+                    NumericType.isExactNumber(declaredTypeOf(args.get(1), table, aliasToTable, allTables)));
+            }
             if (acc instanceof MedianAccumulator) {
                 ((MedianAccumulator) acc).setPerGroup(perGroup);
             }
@@ -2990,23 +3014,34 @@ final class GroupByAggregateEvaluator {
         } else if (hasTwoArgs && acc instanceof MaxByMinByAccumulator) {
             // MAX_BY / MIN_BY(<value>, <sort_key> [, <N>]): both arguments are columns whose RAW values
             // matter. The bounded third-argument form returns an ARRAY of up to N values ordered by key
-            // (MIN ascending / MAX descending); DISTINCT dedups the values (the aggregation-loader idiom
-            // MIN_BY(DISTINCT ref, ref, 100) — the scalar form silently returned ONE bare value where
-            // Snowflake returns the array).
-            if (args.size() >= 3) {
-                ((MaxByMinByAccumulator) acc).setLimit(
-                    DecimalText.parse(args.get(2).trim()).intValue(), distinct);
+            // (MIN ascending / MAX descending); DISTINCT there drops a repeated (value, key) pair.
+            final boolean counted = args.size() >= 3;
+            if (counted) {
+                ((MaxByMinByAccumulator) acc).setLimit(MaxByCountRule.count(args.get(2)));
             }
+            final Set<Object> seenPairs = counted && distinct ? new HashSet<>() : null;
             final List<Object> values = aggArgValues(funcName, args.get(0), aggRows, table, aliasToTable, allTables);
             final List<Object> keys = aggArgValues(funcName, args.get(1), aggRows, table, aliasToTable, allTables);
             for (int i = 0; i < values.size(); i++) {
+                if (seenPairs != null && !seenPairs.add(MaxByCountRule.distinctPair(values.get(i), keys.get(i)))) {
+                    continue;
+                }
                 ((MaxByMinByAccumulator) acc).accumulate(values.get(i), keys.get(i));
             }
         } else if (hasTwoArgs && acc instanceof ObjectAggAccumulator) {
             // OBJECT_AGG(<key>, <value>): key/value pairs into one OBJECT (NULL key or value drops the pair).
+            // DISTINCT drops a repeated (key, value) pair, so only a key met with two different values is the
+            // duplicate key the accumulator refuses.
             final List<Object> keys = aggArgValues(funcName, args.get(0), aggRows, table, aliasToTable, allTables);
             final List<Object> values = aggArgValues(funcName, args.get(1), aggRows, table, aliasToTable, allTables);
+            final Set<Object> seenPairs = distinct ? new HashSet<>() : null;
             for (int i = 0; i < keys.size(); i++) {
+                final List<Object> pair = new ArrayList<>(2);
+                pair.add(keys.get(i));
+                pair.add(values.get(i));
+                if (seenPairs != null && !seenPairs.add(distinctKey(pair))) {
+                    continue;
+                }
                 ((ObjectAggAccumulator) acc).accumulate(keys.get(i), values.get(i));
             }
         } else if (hasTwoArgs) {
@@ -3034,7 +3069,7 @@ final class GroupByAggregateEvaluator {
                     } else if (acc instanceof CovarAccumulator) {
                         ((CovarAccumulator) acc).accumulate(dy, dx);
                     } else if (acc instanceof RegrAccumulator) {
-                        ((RegrAccumulator) acc).accumulate(dy, dx);
+                        ((RegrAccumulator) acc).accumulate(dy, dx, y, x);
                     } else {
                         acc.accumulate(y);
                     }

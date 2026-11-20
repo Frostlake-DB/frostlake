@@ -227,6 +227,55 @@ public class Role implements Taggable {
         return grants.hasGrantOption(objectType, objectName, privilege);
     }
 
+    /**
+     * Takes back the instance of a privilege one grantor made, leaving other grantors' instances (see
+     * {@link GrantLedger}).
+     *
+     * @return whether the grantor had made an instance
+     */
+    public boolean revokePrivilegeGrantedBy(final String objectType, final String objectName,
+                                            final Privilege privilege, final String grantor) {
+        return grants.revokePrivilegeGrantedBy(objectType, objectName, privilege, grantor);
+    }
+
+    /**
+     * Records a privilege held as one grant in a grantor's name, whoever made its instances, as an object's
+     * ownership copied with its grants keeps them.
+     */
+    public void regrantAs(final String objectType, final String objectName, final Privilege privilege,
+                          final String grantor) {
+        grants.regrantAs(objectType, objectName, privilege, grantor);
+    }
+
+    /** The grantors of the instances of a privilege held on an object, in name order; none when it is not held. */
+    public List<String> privilegeGrantors(final String objectType, final String objectName, final Privilege privilege) {
+        return grants.privilegeGrantors(objectType, objectName, privilege);
+    }
+
+    /** When one grantor's instance of a privilege was made; null when no moment is recorded. */
+    public Instant getPrivilegeGrantTime(final String objectType, final String objectName, final Privilege privilege,
+                                         final String grantor) {
+        return grants.getPrivilegeGrantTime(objectType, objectName, privilege, grantor);
+    }
+
+    /** Puts back the moment one grantor's instance of a privilege was made. */
+    public void setPrivilegeGrantTime(final String objectType, final String objectName, final Privilege privilege,
+                                      final String grantor, final Instant granted) {
+        grants.setPrivilegeGrantTime(objectType, objectName, privilege, grantor, granted);
+    }
+
+    /** Whether one grantor's instance of a privilege carries the grant option. */
+    public boolean hasGrantOption(final String objectType, final String objectName, final Privilege privilege,
+                                  final String grantor) {
+        return grants.hasGrantOption(objectType, objectName, privilege, grantor);
+    }
+
+    /** Gives or takes the grant option of one grantor's instance of a privilege. */
+    public void setGrantOption(final String objectType, final String objectName, final Privilege privilege,
+                               final String grantor, final boolean holds) {
+        grants.setGrantOption(objectType, objectName, privilege, grantor, holds);
+    }
+
     /** The future grants this role holds, in the order they were made. */
     public List<FutureGrant> getFutureGrants() {
         return new ArrayList<>(futureGrants);

@@ -27,9 +27,8 @@ import java.util.List;
  * this grouping set, 0 when it is grouped by), with e1 as the most significant bit. Equivalent to
  * {@code GROUPING(e1, …, en)} for the same argument list.
  *
- * <p>In a plain GROUP BY context this evaluates to 0. The actual per-row mask for ROLLUP/CUBE/GROUPING
- * SETS super-group rows is computed in {@code GroupByAggregateEvaluator} (see {@code computeGroupingMask}),
- * which overrides this base result.
+ * <p>In a plain GROUP BY context this evaluates to 0, whether or not a key's value is NULL. A ROLLUP, CUBE or
+ * GROUPING SETS row's mask is read from its grouping set wherever the call stands (see {@code GroupingSetScope}).
  */
 public class GroupingIdFn extends BuiltInFunction {
 
@@ -39,9 +38,6 @@ public class GroupingIdFn extends BuiltInFunction {
 
     @Override
     public Object evaluate(final List<Object> args) {
-        // Base result outside a super-group expansion: 1 if the (first) argument was NULLed by a
-        // ROLLUP/CUBE expansion, else 0. Super-group rows are resolved to the full bitmask upstream.
-        if (args.isEmpty() || args.get(0) == null) return 1L;
         return 0L;
     }
 

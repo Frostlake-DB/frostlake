@@ -72,7 +72,7 @@ final class RowLimitBindRule {
                 continue;
             }
             final String name = clause.getChild(i + 1).getText();
-            if (procedural != null && procedural.hasVariable(name)) {
+            if (procedural != null && procedural.hasVariable(VariableKey.ofWritten(name))) {
                 continue;
             }
             final Token colon = ((TerminalNode) child).getSymbol();

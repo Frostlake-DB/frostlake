@@ -72,6 +72,10 @@ public final class Decfloats {
             return BigDecimal.ZERO;
         }
         BigDecimal stripped = rounded.stripTrailingZeros();
+        if ((long) stripped.precision() - stripped.scale() < MIN_EXPONENT) {
+            // Below a tenth of the last place: zero there, without writing out the digits of a far exponent.
+            return BigDecimal.ZERO;
+        }
         if (-stripped.scale() < MIN_EXPONENT) {
             stripped = stripped.setScale(-MIN_EXPONENT, RoundingMode.HALF_UP);
             if (stripped.signum() == 0) {

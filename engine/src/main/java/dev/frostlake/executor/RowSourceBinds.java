@@ -58,7 +58,7 @@ public final class RowSourceBinds {
         if (tree instanceof FrostlakeParser.BindVarExprContext) {
             final FrostlakeParser.BindVarExprContext bind = (FrostlakeParser.BindVarExprContext) tree;
             final String written = bind.variableName() == null ? null : bind.variableName().getText();
-            if (written != null && block.holdsRowSource(written)) {
+            if (written != null && block.holdsRowSource(SqlIdentifiers.canonical(bind.variableName()))) {
                 if (bind.getParent() instanceof FrostlakeParser.TableSourceContext) {
                     throw asTableOperand(written);
                 }

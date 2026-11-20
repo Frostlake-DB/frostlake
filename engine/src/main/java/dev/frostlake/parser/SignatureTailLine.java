@@ -227,7 +227,8 @@ public final class SignatureTailLine {
             noteWholeStatement(readWhole, text, sql, listener);
             return;
         }
-        throw new SqlSyntaxException(SqlCompilationError.of(String.join("\n", ordered)), ordered, sql);
+        final List<String> told = DescribeBracketWordLines.withoutTheTokenAfter(BlockReadOn.spoken(sql), ordered);
+        throw new SqlSyntaxException(SqlCompilationError.of(String.join("\n", told)), told, sql);
     }
 
     /**

@@ -24,6 +24,7 @@ import dev.frostlake.executor.expressions.LiteralExpression;
 import dev.frostlake.executor.expressions.LiteralType;
 import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.SubqueryExpression;
+import dev.frostlake.functions.table.Getnextval;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.Parameter;
@@ -34,11 +35,13 @@ import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.types.DataType;
+import dev.frostlake.types.NumericType;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -107,6 +110,8 @@ final class PlanBuilder {
     private static final int DEEPEST_VIEW = 32;
 
     private final QueryExecutor executor;
+    /** The stored values the plan weighs, read once per plan (see PlanConstants#storedRange). */
+    private StoredColumnValues storedValues;
 
     /** The FROM list item each table reference stands for, from when its SELECT is entered until it is planned. */
     private final Map<FrostlakeParser.TableReferenceContext, PlanFromItem> pending = new IdentityHashMap<>();
@@ -313,7 +318,7 @@ final class PlanBuilder {
                 for (final TableColumn column : table.getColumns()) {
                     columns.add(PlanColumn.scanned(column.getName(), relationName(plan) + "."
                         + SqlIdentifiers.spellCanonical(column.getName()), column.getDataType(),
-                        new PlanRead(plan, column.getName())));
+                        new PlanRead(plan, column.getName())).storedIn(table, column.getName()));
                 }
             }
         }
@@ -408,9 +413,34 @@ final class PlanBuilder {
             final PlanColumn column = state.getScope().resolve((ColumnReferenceExpression) expression);
             name = name != null ? name : ((ColumnReferenceExpression) expression).getColumnName();
             type = column == null ? null : column.getType();
+        } else if (printer.decimalsOf(expression) != null) {
+            // An exact number's decimals decide how a read of the column is spelled: AVG of a whole number is
+            // SCALED_ROUND_INT_DIVIDE over a view's column of one too (live-verified).
+            type = new NumericType("NUMBER", 38, printer.decimalsOf(expression).intValue());
         }
-        return new PlanColumn(name, text, type, printer.getReads(), printer.getWindows(),
+        final PlanColumn column = new PlanColumn(name, text, type, printer.getReads(), printer.getWindows(),
             expression instanceof LiteralExpression && ((LiteralExpression) expression).getType() == LiteralType.NULL);
+        return printer.isCompound(expression) && !enclosed(text) ? column.markCompound() : column;
+    }
+
+    /** Whether a text stands whole in one pair of parentheses, as {@code (A + 1)} does and {@code (A) + 1} not. */
+    private static boolean enclosed(final String text) {
+        if (!text.startsWith("(") || !text.endsWith(")")) {
+            return false;
+        }
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            final char c = text.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0 && i < text.length() - 1) {
+                    return false;
+                }
+            }
+        }
+        return depth == 0;
     }
 
     private PlanColumn writtenColumn(final FrostlakeParser.SelectItemContext item, final String name) {
@@ -505,6 +535,17 @@ final class PlanBuilder {
             @Override
             public Expression inlinedItem(final SubqueryExpression subquery) {
                 return PlanConstantFold.inlinedItem(executor, subquery);
+            }
+
+            @Override
+            public BigInteger[] storedRange(final PlanColumn column) {
+                if (column.getStoredTable() == null || column.getStoredColumn() == null) {
+                    return null;
+                }
+                if (storedValues == null) {
+                    storedValues = new StoredColumnValues(executor);
+                }
+                return storedValues.wholeRange(column.getStoredTable(), column.getStoredColumn());
             }
         };
     }
@@ -1105,6 +1146,9 @@ final class PlanBuilder {
         // over an empty ValuesClause in place of the Generator a select with no FROM reads (live-verified).
         final List<String> sequences = new ArrayList<>();
         sequenceReads(select.selectList(), sequences);
+        if (select.tableExpression() != null) {
+            sequences.removeAll(drawnNames(select.tableExpression()));
+        }
         state.getScope().readSequences(sequences);
         if (select.FROM() == null) {
             if (!sequences.isEmpty()) {
@@ -1190,6 +1234,29 @@ final class PlanBuilder {
         for (int i = 0; i < node.getChildCount(); i++) {
             sequenceReads(node.getChild(i), found);
         }
+    }
+
+    /**
+     * The names the GETNEXTVAL items of a FROM list answer by — an alias, or the function's name — whose
+     * {@code <name>.NEXTVAL} is the item's column rather than a sequence read.
+     */
+    private static Set<String> drawnNames(final ParseTree list) {
+        final Set<String> names = new HashSet<>();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            ParseTree child = list.getChild(i);
+            if (child instanceof FrostlakeParser.JoinClauseContext) {
+                child = ((FrostlakeParser.JoinClauseContext) child).tableReference();
+            }
+            if (child instanceof FrostlakeParser.TableReferenceContext) {
+                final FrostlakeParser.TableReferenceContext reference = (FrostlakeParser.TableReferenceContext) child;
+                if (reference.tableSource() != null
+                        && Getnextval.NAME.equals(calledName(reference.tableSource()))) {
+                    final String alias = aliasOf(reference);
+                    names.add(alias == null ? Getnextval.NAME : alias.toUpperCase(Locale.ROOT));
+                }
+            }
+        }
+        return names;
     }
 
     /** A Getnextval for each sequence read over the plan, the first read lowest. */
@@ -1286,6 +1353,10 @@ final class PlanBuilder {
                 final FrostlakeParser.TableReferenceContext reference = (FrostlakeParser.TableReferenceContext) child;
                 if (flattens(reference.tableSource())) {
                     plan = flattened(plan);
+                    continue;
+                }
+                if (Getnextval.NAME.equals(calledName(reference.tableSource()))) {
+                    plan = drawn(plan, reference.tableSource());
                     continue;
                 }
                 final PlanNode read = referencePlan(reference, named, scope);
@@ -1686,6 +1757,45 @@ final class PlanBuilder {
     }
 
     /** A Flatten over what stands before it, or over a ValuesClause where nothing does. */
+    /**
+     * A {@code TABLE(GETNEXTVAL(seq))} item: a Getnextval naming the sequence over the relations before it, or over a
+     * ValuesClause of one NULL row where it is written first (live-verified).
+     */
+    private static PlanNode drawn(final PlanNode plan, final FrostlakeParser.TableSourceContext source) {
+        final PlanNode under = plan != null ? plan
+            : new PlanNode("ValuesClause", NONE, null, Arrays.asList("(null)"));
+        return new PlanNode("Getnextval", NONE, null, Arrays.asList(drawnSequence(source))).over(under)
+            .named(plan == null ? Collections.<String>emptySet() : plan.getNames());
+    }
+
+    /** The sequence a GETNEXTVAL item names, as a plan spells it. */
+    private static String drawnSequence(final FrostlakeParser.TableSourceContext source) {
+        final ParseTree call = source.expression();
+        for (int i = 0; call != null && i < call.getChildCount(); i++) {
+            final ParseTree child = call.getChild(i);
+            ParseTree argument = null;
+            if (child instanceof FrostlakeParser.FunctionArgListContext
+                    && ((FrostlakeParser.FunctionArgListContext) child).functionArg().size() == 1) {
+                argument = ((FrostlakeParser.FunctionArgListContext) child).functionArg(0).booleanExpr();
+                if (argument instanceof FrostlakeParser.ValueExprContext) {
+                    argument = ((FrostlakeParser.ValueExprContext) argument).expression();
+                }
+            } else if (child instanceof FrostlakeParser.NamedArgumentListContext
+                    && ((FrostlakeParser.NamedArgumentListContext) child).namedArgument().size() == 1) {
+                argument = ((FrostlakeParser.NamedArgumentListContext) child).namedArgument(0).expression();
+            }
+            if (argument instanceof FrostlakeParser.QualifiedNameExprContext) {
+                final String[] parts = ParseTreeText.qualifiedNameParts(
+                    ((FrostlakeParser.QualifiedNameExprContext) argument).qualifiedName());
+                return SqlIdentifiers.spellCanonical(parts[parts.length - 1]);
+            }
+            if (argument instanceof ParserRuleContext) {
+                return ParseTreeText.getOriginalText((ParserRuleContext) argument);
+            }
+        }
+        return "";
+    }
+
     private static PlanNode flattened(final PlanNode plan) {
         return operator("Flatten").over(plan == null ? operator("ValuesClause") : plan)
             .named(plan == null ? Collections.<String>emptySet() : plan.getNames());
@@ -2573,8 +2683,7 @@ final class PlanBuilder {
             return;
         }
         if (node instanceof FrostlakeParser.MultiInsertIntoContext) {
-            into.add(qualified(ParseTreeText.getQualifiedName(
-                ((FrostlakeParser.MultiInsertIntoContext) node).qualifiedName())));
+            into.add(qualified(executor.resolveObjectName(((FrostlakeParser.MultiInsertIntoContext) node).objectName())));
             return;
         }
         for (int i = 0; i < node.getChildCount(); i++) {
@@ -2607,13 +2716,12 @@ final class PlanBuilder {
         if (deletes) {
             counts.add("number of rows deleted");
         }
-        final String object = qualified(ParseTreeText.getQualifiedName(merge.qualifiedName()));
+        final String object = qualified(executor.resolveObjectName(merge.objectName()));
         final PlanNode target = scan(object, null);
         final FrostlakeParser.MergeSourceContext written = merge.mergeSource();
         final PlanNode source;
         if (written instanceof FrostlakeParser.MergeSourceTableContext) {
-            final String name = ParseTreeText.getQualifiedName(
-                ((FrostlakeParser.MergeSourceTableContext) written).qualifiedName());
+            final String name = executor.resolveObjectName(((FrostlakeParser.MergeSourceTableContext) written).objectName());
             final PlanNode viewed = viewPlan(name);
             source = viewed != null ? viewed : scan(qualified(name), null);
         } else if (written instanceof FrostlakeParser.MergeSourceSubqueryContext) {
@@ -2640,7 +2748,7 @@ final class PlanBuilder {
      */
     private PlanNode copied(final FrostlakeParser.CopyIntoStatementContext copy,
                             final Map<String, FrostlakeParser.SelectStatementContext> named) {
-        if (copy.qualifiedName() != null) {
+        if (copy.objectName() != null) {
             FrostlakeParser.StageRefContext stage = null;
             for (final FrostlakeParser.CopyIntoTableClauseContext clause : copy.copyIntoTableClause()) {
                 if (clause.copySource() != null) {
@@ -2652,7 +2760,7 @@ final class PlanBuilder {
             final String kind = stage == null ? null : stage.TILDE() != null ? "USER STAGE"
                 : stage.PERCENT() != null ? "TABLE STAGE" : "INTERNAL STAGE";
             return counted(Arrays.asList("number of rows inserted")).over(new PlanNode("Insert",
-                Arrays.asList(qualified(ParseTreeText.getQualifiedName(copy.qualifiedName()))), null, NONE)
+                Arrays.asList(qualified(executor.resolveObjectName(copy.objectName()))), null, NONE)
                 .over(new PlanNode("ExternalScan", NONE, null, kind == null ? NONE : Arrays.asList(kind))));
         }
         PlanNode read = null;

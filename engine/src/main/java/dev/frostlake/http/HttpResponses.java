@@ -45,6 +45,18 @@ final class HttpResponses {
         os.close();
     }
 
+    /**
+     * Answers 413: the request's body is larger than the server takes. What is left of the body is read and dropped
+     * first, within a bound (see {@link BoundedRequestStream#discardRest}).
+     */
+    static void tooLarge(final HttpExchange exchange, final int status, final String response) throws IOException {
+        final InputStream body = exchange.getRequestBody();
+        if (body instanceof BoundedRequestStream) {
+            ((BoundedRequestStream) body).discardRest();
+        }
+        send(exchange, status, response);
+    }
+
     /** The sentence for a session id the server holds no session under. */
     static String unknownSession(final String sessionId) {
         return "Session '" + sessionId + "' does not exist or has expired.";

@@ -19,6 +19,7 @@ package dev.frostlake.executor.commands;
 import dev.frostlake.executor.CommonTableExpressions;
 import dev.frostlake.executor.ProcedureTokenCalls;
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.ViewExpansionJudgement;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.ResultSet;
@@ -159,6 +160,8 @@ public class QueryCommandHandler implements CommandHandler {
     }
 
     public ResultSet handleSelectStatement(final FrostlakeParser.SelectStatementContext ctx) {
+        // A statement that reads no row of a view is still judged for the view's body (see ViewExpansionJudgement).
+        ViewExpansionJudgement.require(queryExecutor, ctx);
         // Delegate to QueryExecutor which has the full SELECT logic
         return queryExecutor.executeSelectFromContext(ctx);
     }

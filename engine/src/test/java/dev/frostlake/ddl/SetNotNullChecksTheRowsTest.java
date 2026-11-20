@@ -27,9 +27,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * SET NOT NULL looks at the rows. Snowflake documents that it fails over a column holding NULLs, changing nothing,
- * and that a semi-structured column takes it only while the table is empty. The flag used to flip over any data,
- * so a column reported NOT NULL while it held NULLs.
+ * SET NOT NULL looks at the rows: it fails over a column holding NULLs, changing nothing, with
+ * {@code Column 'A' contains null values. Not null constraint cannot be added.}, and a semi-structured column holding
+ * none takes it over a non-empty table like any other (live-verified). The flag used to flip over any data, so a
+ * column reported NOT NULL while it held NULLs.
  */
 public class SetNotNullChecksTheRowsTest {
 
@@ -69,9 +70,10 @@ public class SetNotNullChecksTheRowsTest {
     public void aColumnHoldingNullsKeepsItsNullability() {
         engine.execute("CREATE TABLE t (a VARCHAR NULL, k INT)");
         engine.execute("INSERT INTO t VALUES (NULL, 1)");
-        assertTrue(refusal("ALTER TABLE t ALTER COLUMN a SET NOT NULL").contains("contains NULL values"));
+        assertTrue(refusal("ALTER TABLE t ALTER COLUMN a SET NOT NULL")
+            .contains("Column 'A' contains null values. Not null constraint cannot be added."));
         assertTrue(refusal("ALTER TABLE t ALTER (COLUMN k SET NOT NULL, COLUMN a NOT NULL)")
-            .contains("contains NULL values"));
+            .contains("Column 'A' contains null values."));
         assertEquals("A=YES K=YES", nullability("T"), "a refused list changes nothing, its first item included");
 
         engine.execute("UPDATE t SET a = 'v'");
@@ -80,11 +82,13 @@ public class SetNotNullChecksTheRowsTest {
     }
 
     @Test
-    public void aSemiStructuredColumnTakesNotNullOnlyWhileTheTableIsEmpty() {
-        engine.execute("CREATE TABLE s (o OBJECT, v VARIANT)");
+    public void aSemiStructuredColumnTakesNotNullOverRowsHoldingNoNull() {
+        engine.execute("CREATE TABLE s (o OBJECT, v VARIANT, a ARRAY)");
         engine.execute("ALTER TABLE s ALTER COLUMN o SET NOT NULL");
-        engine.execute("INSERT INTO s SELECT OBJECT_CONSTRUCT('x', 1), PARSE_JSON('1')");
-        assertTrue(refusal("ALTER TABLE s ALTER COLUMN v SET NOT NULL").contains("table is not empty"));
-        assertEquals("O=NO V=YES", nullability("S"));
+        engine.execute("INSERT INTO s SELECT OBJECT_CONSTRUCT('x', 1), PARSE_JSON('1'), NULL");
+        engine.execute("ALTER TABLE s ALTER COLUMN v SET NOT NULL");
+        assertTrue(refusal("ALTER TABLE s ALTER COLUMN a SET NOT NULL")
+            .contains("Column 'A' contains null values."));
+        assertEquals("O=NO V=NO A=YES", nullability("S"));
     }
 }

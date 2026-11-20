@@ -321,6 +321,17 @@ public class CreateRelationalHandler implements CommandHandler {
         return null;
     }
 
+    /**
+     * The owner and future grants of a new view or materialized view. With COPY GRANTS the view inherits none of the
+     * future grants of its schema or database: the creating role owns it and holds only the privileges copied onto
+     * it (documented).
+     */
+    private CreationGrants grantsOfNew(final String objectKind, final Schema schema, final String name,
+                                       final FrostlakeParser.CreateStatementContext ctx) {
+        final CreationGrants grants = FutureGrants.ofNew(catalog, objectKind, schema, name);
+        return ctx.copyGrants().isEmpty() ? grants : grants.withoutFutureGrants();
+    }
+
     private void rejectFromLessMaterializedView(final FrostlakeParser.SelectStatementContext select) {
         if (select == null || select.selectOperand().isEmpty()) {
             return;
@@ -498,7 +509,7 @@ public class CreateRelationalHandler implements CommandHandler {
                 grantsSetAside = schema.qualifiedName(schema.getView(viewName).getName());
                 GrantNames.setAside(catalog, "VIEW", grantsSetAside);
             }
-            final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "VIEW", schema, viewName);
+            final CreationGrants grantsOfNew = grantsOfNew("VIEW", schema, viewName, ctx);
             view.setOwner(grantsOfNew.owner());
             view.setLastDdlBy(catalog.currentUserForDdl());
             if (ctx.tagList() != null) {
@@ -725,6 +736,19 @@ public class CreateRelationalHandler implements CommandHandler {
         if (!ChangeTrackedQuery.readsBaseTable(ctx.selectStatement())) {
             throw new RuntimeException(SqlCompilationError.inline("Dynamic Tables must have at least one base table."));
         }
+        // An INCREMENTAL table is refused a query its incremental refresh does not follow, and an AUTO one settles on
+        // FULL for it, before its first refresh runs (live-verified).
+        if (dt.getRefreshMode() == RefreshMode.INCREMENTAL) {
+            final String refusal = DynamicTableRefreshReason.incrementalRefusal(catalog,
+                queryExecutor.getFunctionRegistry(), catalog.getCurrentDatabase(), catalog.getCurrentSchema(),
+                ctx.selectStatement());
+            if (refusal != null) {
+                throw new RuntimeException(refusal);
+            }
+        } else if (dt.getRefreshMode() == RefreshMode.AUTO) {
+            dt.setFullRefreshReason(DynamicTableRefreshReason.of(catalog, queryExecutor.getFunctionRegistry(),
+                catalog.getCurrentDatabase(), catalog.getCurrentSchema(), ctx.selectStatement()));
+        }
         // The table's own column list is judged against the query's columns once the query compiles, and the
         // columns are kept as they resolved, for the listings that tell them.
         dt.setResolvedColumns(queryExecutor.dynamicTableColumns(schema, dt));
@@ -883,6 +907,8 @@ public class CreateRelationalHandler implements CommandHandler {
         rejectSourcelessCopyGrants(ctx);
         // A refusal of the body itself, which IF NOT EXISTS never forgives while the view is being created.
         RuntimeException bodyRefusal = null;
+        // The replaced view's privileges, set aside while its replacement takes the name.
+        String grantsSetAside = null;
 
         try {
             final Schema schema;
@@ -904,7 +930,8 @@ public class CreateRelationalHandler implements CommandHandler {
             // Snowflake plans it as a VALUES table — with this exact sentence
             // (CREATE MATERIALIZED VIEW tmv AS SELECT 1 AS c).
             rejectFromLessMaterializedView(ctx.selectStatement());
-
+            // What a materialized view's definition may not hold is refused before the body compiles.
+            new MaterializedViewDefinition(catalog, queryExecutor.getFunctionRegistry(), ctx).validate();
 
             final String selectQuery = ddl.getOriginalText(ctx.selectStatement());
 
@@ -940,9 +967,9 @@ public class CreateRelationalHandler implements CommandHandler {
                 mv.setComment(comment);
             }
 
-            // The future grants of the schema or its database cover the new view (live-verified).
-            final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "MATERIALIZED_VIEW", schema,
-                mvName);
+            // The future grants of the schema or its database cover the new view (live-verified), unless it
+            // copies the replaced view's grants.
+            final CreationGrants grantsOfNew = grantsOfNew("MATERIALIZED_VIEW", schema, mvName, ctx);
             mv.setOwner(grantsOfNew.owner());
             mv.setLastDdlBy(catalog.currentUserForDdl());
             // Live POPULATES a materialized view at CREATE, as a CTAS fills its table. The body compiles,
@@ -986,16 +1013,24 @@ public class CreateRelationalHandler implements CommandHandler {
                         // Same rule as the plain view: a FAILED CREATE OR REPLACE leaves the existing materialized
             // view standing on live (measured over an uncompilable body, a missing base table and an
             // invalid identifier), so the drop waits until the replacement has resolved.
-            if (orReplace) {
-                try {
-                    schema.dropMaterializedView(mvName);
-                    logger.trace("Dropped existing materialized view for OR REPLACE: {}", qualifiedName);
-                } catch (final RuntimeException noExistingMv) {
-                    logger.trace("No existing materialized view to replace: {}", qualifiedName);
-                }
+            if (orReplace && schema.hasMaterializedView(mvName)) {
+                // The replaced view's privileges are set aside while the name changes hands: COPY GRANTS gives
+                // them all but OWNERSHIP to the replacement, a plain OR REPLACE drops them.
+                grantsSetAside = schema.qualifiedName(schema.getMaterializedView(mvName).getName());
+                GrantNames.setAside(catalog, "MATERIALIZED_VIEW", grantsSetAside);
+                schema.dropMaterializedView(mvName);
+                logger.trace("Dropped existing materialized view for OR REPLACE: {}", qualifiedName);
             }
             schema.addMaterializedView(mv);
             grantsOfNew.apply();
+            if (grantsSetAside != null) {
+                if (ctx.copyGrants().isEmpty()) {
+                    GrantNames.discard(catalog, "MATERIALIZED_VIEW", grantsSetAside);
+                } else {
+                    GrantNames.takeBack(catalog, "MATERIALIZED_VIEW", grantsSetAside, true);
+                }
+                grantsSetAside = null;
+            }
             logger.trace("Created materialized view: {}", qualifiedName);
         } catch (final RuntimeException e) {
             if (e == bodyRefusal) {
@@ -1003,6 +1038,10 @@ public class CreateRelationalHandler implements CommandHandler {
             }
             ddl.handleIfNotExists(ifNotExists, DDLCommandHandler.namedAsWritten(e, parts), "object");
             logger.debug("Materialized view already exists (IF NOT EXISTS): {}", qualifiedName);
+        } finally {
+            if (grantsSetAside != null) {
+                GrantNames.takeBack(catalog, "MATERIALIZED_VIEW", grantsSetAside, false);
+            }
         }
         return null;
     }
@@ -1162,10 +1201,7 @@ public class CreateRelationalHandler implements CommandHandler {
             // An AUTO refresh mode settles on FULL where the query holds a construct an incremental refresh does not
             // follow, and the status sentence says why (live-verified).
             if (refreshMode == RefreshMode.AUTO && creates) {
-                final String reason = DynamicTableRefreshReason.of(catalog, queryExecutor.getFunctionRegistry(),
-                    catalog.getCurrentDatabase(),
-                    catalog.getCurrentSchema(), ctx.selectStatement());
-                dt.setFullRefreshReason(reason);
+                final String reason = dt.getFullRefreshReason();
                 if (reason != null) {
                     DdlStatusNote.add("FULL refresh mode was selected because: " + reason);
                 }

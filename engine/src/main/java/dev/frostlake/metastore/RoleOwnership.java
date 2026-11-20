@@ -126,6 +126,9 @@ public final class RoleOwnership {
         reownSecurityObjects(catalog.getSecurityObjects(), from, to);
         reownAll(catalog.getIntegrations().all(), from, to);
         reownAll(catalog.getExternalVolumes().all(), from, to);
+        reownAll(catalog.getResourceMonitors().all(), from, to);
+        reownAll(catalog.getShares().all(), from, to);
+        reownAll(catalog.getFailoverGroups().all(), from, to);
         reownAll(catalog.getComputePools(), from, to);
         for (final Warehouse warehouse : catalog.getAllWarehouses()) {
             if (owns(from, warehouse.getOwner())) {

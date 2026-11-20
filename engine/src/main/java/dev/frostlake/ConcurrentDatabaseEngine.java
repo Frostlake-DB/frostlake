@@ -96,6 +96,27 @@ public class ConcurrentDatabaseEngine {
         // blocks barging readers when a writer is queued, so writers are not badly starved.
         this.engineLock = new ReentrantReadWriteLock();
         this.sessionStates = new ConcurrentHashMap<>();
+        if (!sharesMonitor) {
+            // What the engine runs on a thread of its own - a scheduled task run, an alert's evaluation, a dynamic
+            // table's refresh, a checkpoint - runs alone as a request that writes does, rather than beside one.
+            final ReentrantReadWriteLock lock = engineLock;
+            engine.setExclusiveLock(new ExclusiveEngineLock() {
+                @Override
+                public boolean acquire() {
+                    if (lock.getReadHoldCount() > 0 && !lock.isWriteLockedByCurrentThread()) {
+                        // A read-only request cannot take the lock alone; it runs on under the shared one.
+                        return false;
+                    }
+                    lock.writeLock().lock();
+                    return true;
+                }
+
+                @Override
+                public void release() {
+                    lock.writeLock().unlock();
+                }
+            });
+        }
         // An expired session is ended the way a released one is — its transaction rolled back and the
         // engine's state for it dropped — rather than merely forgotten by the manager.
         this.sessionManager.setExpiredSessionListener(new ExpiredSessionListener() {
@@ -551,6 +572,22 @@ public class ConcurrentDatabaseEngine {
         try {
             final Object zone = engine.getSecurityManager().getSessionContext().getSessionParameter("TIMEZONE");
             return zone == null ? null : zone.toString();
+        } finally {
+            engine.getSecurityManager().getSessionContext().unbindSettings();
+        }
+    }
+
+    /**
+     * A session's primary role, read from the session's own settings: its own once a USE ROLE set one, else the
+     * engine's.
+     *
+     * @param session the session
+     * @return the role's name
+     */
+    public String sessionRole(final SessionContext session) {
+        engine.getSecurityManager().getSessionContext().bindSettings(session.getSettings());
+        try {
+            return engine.getSecurityManager().getSessionContext().getCurrentRole();
         } finally {
             engine.getSecurityManager().getSessionContext().unbindSettings();
         }

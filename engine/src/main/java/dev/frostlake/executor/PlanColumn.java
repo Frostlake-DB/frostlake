@@ -17,6 +17,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.metastore.model.Table;
 import dev.frostlake.types.DataType;
 
 import java.util.ArrayList;
@@ -36,6 +37,12 @@ final class PlanColumn {
     private final List<PlanRead> reads;
     private final List<String> windows;
     private final boolean constantNull;
+    /** Whether the text spells an operation or a computed call, which stands in parentheses as an operand. */
+    private boolean compound;
+    /** The catalog table a scanned column is stored in, or null. */
+    private Table storedTable;
+    /** The scanned column's name in that table, or null. */
+    private String storedColumn;
     private String owner;
 
     /**
@@ -79,6 +86,9 @@ final class PlanColumn {
     PlanColumn named(final String renamed) {
         final PlanColumn column = new PlanColumn(renamed, text, type, reads, windows, constantNull);
         column.owner = owner;
+        column.compound = compound;
+        column.storedTable = storedTable;
+        column.storedColumn = storedColumn;
         return column;
     }
 
@@ -91,7 +101,49 @@ final class PlanColumn {
     PlanColumn ownedBy(final String relation) {
         final PlanColumn column = new PlanColumn(name, text, type, reads, windows, constantNull);
         column.owner = relation;
+        column.compound = compound;
+        column.storedTable = storedTable;
+        column.storedColumn = storedColumn;
         return column;
+    }
+
+    /**
+     * This column, read from a column of a catalog table, whose stored values its plan may weigh.
+     *
+     * @param table  the table
+     * @param column the column's name
+     * @return this column
+     */
+    PlanColumn storedIn(final Table table, final String column) {
+        storedTable = table;
+        storedColumn = column;
+        return this;
+    }
+
+    /** The catalog table the column is read from (see {@link #storedIn}), or null. */
+    Table getStoredTable() {
+        return storedTable;
+    }
+
+    /** The column's name in that table, or null. */
+    String getStoredColumn() {
+        return storedColumn;
+    }
+
+    /**
+     * This column, its text spelling an operation or a computed call: a column of a view or a derived table that
+     * stands for one is in parentheses wherever such an operation is, {@code (FZ.ID + 1) % 2} (live-verified).
+     *
+     * @return this column
+     */
+    PlanColumn markCompound() {
+        compound = true;
+        return this;
+    }
+
+    /** Whether the text spells an operation or a computed call (see {@link #markCompound}). */
+    boolean isCompound() {
+        return compound;
     }
 
     /** The relation of the FROM list that answers this column, upper-cased; null for a select item. */

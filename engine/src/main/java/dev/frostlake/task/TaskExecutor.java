@@ -106,4 +106,16 @@ public interface TaskExecutor {
     default void runAsOwner(final Runnable run, final Map<String, String> parameters, final String owner) {
         runInOwnSession(run, parameters);
     }
+
+    /**
+     * Run what the scheduler starts on a thread of its own - a task's scheduled run, an alert's scheduled evaluation,
+     * a dynamic table's scheduled refresh - holding the engine as a session's statement holds it, so that no
+     * statement of a session runs meanwhile and the run's own checkpoint sees no session's work half done. This
+     * default just runs it.
+     *
+     * @param work what the scheduler runs
+     */
+    default void runScheduled(final Runnable work) {
+        work.run();
+    }
 }

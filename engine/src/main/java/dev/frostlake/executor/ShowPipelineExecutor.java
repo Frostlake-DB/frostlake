@@ -168,7 +168,7 @@ final class ShowPipelineExecutor {
                 baseTablesText(stream, source, tableGone),
                 "DELTA",
                 stale ? "true" : "false",
-                stream.getStreamType() == StreamType.APPEND_ONLY ? "APPEND_ONLY" : "DEFAULT",
+                stream.getStreamType() == StreamType.STANDARD ? "DEFAULT" : stream.getStreamType().name(),
                 stale ? null : ShowResultHelpers.createdOn(staleAfter(stream, home)),
                 "N/A",
                 ShowResultHelpers.OWNER_ROLE_TYPE
@@ -482,10 +482,16 @@ final class ShowPipelineExecutor {
             || StreamSources.missingBaseOf(catalog, stream) != null;
     }
 
-    /** Live capitalises the source kind as words (Table, View, Stage, Dynamic Table), not as the enum constant. */
+    /**
+     * Live capitalises the source kind as words (Table, View, Stage, Dynamic Table, External Table), not as the enum
+     * constant. An insert-only stream is an external table's, the one kind of table that takes one.
+     */
     private String sourceTypeText(final Stream stream) {
         if (stream.getSourceType() == null) {
             return null;
+        }
+        if (stream.getStreamType() == StreamType.INSERT_ONLY) {
+            return "External Table";
         }
         if (stream.getSourceType() == StreamSourceType.DYNAMIC_TABLE) {
             return "Dynamic Table";
@@ -679,6 +685,22 @@ final class ShowPipelineExecutor {
         final List<Row> rows = new ArrayList<>();
         rows.add(taskRow(task, written.database().getName(), schema.getName()));
         return new ResultSet(taskColumns(), rows);
+    }
+
+    /**
+     * The pipe a statement names, by its exact name, when the session sees it; one it does not see is refused as a
+     * missing one is.
+     *
+     * @param written the pipe as written
+     * @return the pipe
+     */
+    Pipe seenPipe(final SchemaObjectName written) {
+        final Schema schema = written.schema();
+        final Pipe pipe = schema.getPipeExact(written.name());
+        if (pipe == null || !seen("PIPE", schema, pipe.getName(), pipe.getOwner())) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Pipe", written.fullName()));
+        }
+        return pipe;
     }
 
     /** DESCRIBE PIPE returns the pipe's SHOW PIPES row — live gives the two commands one shape. */
@@ -952,16 +974,16 @@ final class ShowPipelineExecutor {
     }
 
     /**
-     * The refresh_mode CELL reports the RESOLVED mode: a dynamic table configured AUTO runs (and
-     * reads back) INCREMENTAL, or FULL where its query holds a construct an incremental refresh does
-     * not follow (see DynamicTableRefreshReason), live-verified, while configured_refresh_mode keeps
-     * the declared word.
+     * The refresh_mode CELL reports the RESOLVED mode: a dynamic table configured AUTO reads back
+     * ADAPTIVE, or FULL where its query holds a construct an incremental refresh does not follow (see
+     * DynamicTableRefreshReason), live-verified, while configured_refresh_mode keeps the declared word.
+     * Its refreshes are INCREMENTAL in the refresh history all the same.
      */
     private static String resolvedRefreshMode(final DynamicTable dt) {
         if (dt.getRefreshMode() != RefreshMode.AUTO) {
             return dt.getRefreshMode().name();
         }
-        return dt.getFullRefreshReason() != null ? RefreshMode.FULL.name() : RefreshMode.INCREMENTAL.name();
+        return dt.getFullRefreshReason() != null ? RefreshMode.FULL.name() : "ADAPTIVE";
     }
 
     /** SHOW DYNAMIC TABLES in live's column order — the definition column is named {@code text}. */

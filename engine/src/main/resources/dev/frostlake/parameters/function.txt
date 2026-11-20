@@ -1,0 +1,6 @@
+# The parameters SHOW PARAMETERS IN FUNCTION lists, in name order: the schema's logging, metric and tracing levels.
+ENABLE_CONSOLE_OUTPUT
+LOG_EVENT_LEVEL
+LOG_LEVEL
+METRIC_LEVEL
+TRACE_LEVEL

@@ -29,11 +29,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * What a snapshot keeps besides an object's definition: when DDL and DML last changed it, a tag's PROPAGATE and
- * ON_CONFLICT, and the width of a masking policy's RETURNS type. A clone or a restore reported its own moment as
+ * ON_CONFLICT and the masking policies it carries, and the width of a masking policy's RETURNS type. A clone or a restore reported its own moment as
  * every table's LAST_ALTERED and every object's LAST_DDL, a tag that propagated as one that did not, and
  * {@code RETURNS VARCHAR(5)} as {@code RETURNS VARCHAR}. UNDROP is a DDL of its own, and moves LAST_DDL.
  */
@@ -104,6 +105,31 @@ public class SnapshotKeepsChangeTimesTest {
                 "SELECT last_altered::VARCHAR AS r FROM ct.INFORMATION_SCHEMA.DATABASES WHERE database_name = 'CT'",
                 "R"));
             assertEquals(token, column(copy, "SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('ct.s.w')::VARCHAR AS r", "R"));
+        }
+    }
+
+    private static final String IDS = "SELECT table_name || ' ' || id || ' ' || clone_group_id AS r"
+        + " FROM ci.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS WHERE table_schema = 'PUBLIC' ORDER BY table_name";
+
+    @Test
+    public void tableIdsAndCloneGroupsSurviveACloneAndARestore() throws Exception {
+        final DatabaseEngine original = track(new DatabaseEngine());
+        original.execute("USE ROLE ACCOUNTADMIN");
+        original.execute("CREATE DATABASE ci");
+        original.execute("CREATE TABLE ci.public.t (a INT)");
+        original.execute("CREATE TABLE ci.public.c CLONE ci.public.t");
+        final List<String> ids = column(original, IDS, "R");
+        assertEquals(2, ids.size());
+
+        for (final DatabaseEngine copy : copies(original)) {
+            copy.execute("USE ROLE ACCOUNTADMIN");
+            assertEquals(ids, column(copy, IDS, "R"));
+            copy.execute("CREATE TABLE ci.public.n (a INT)");
+            final List<String> grown = column(copy, IDS, "R");
+            for (final String earlier : ids) {
+                // A table made after the restore draws a number no restored table holds.
+                assertNotEquals(earlier.split(" ")[1], grown.get(1).split(" ")[1]);
+            }
         }
     }
 
@@ -190,6 +216,24 @@ public class SnapshotKeepsChangeTimesTest {
         for (final DatabaseEngine copy : copies(original)) {
             copy.execute("USE SCHEMA tg.PUBLIC");
             assertEquals(shown, tagOptions(copy));
+        }
+    }
+
+    @Test
+    public void aTagKeepsTheMaskingPoliciesItCarries() throws Exception {
+        final DatabaseEngine original = track(new DatabaseEngine());
+        original.execute("CREATE DATABASE tm");
+        original.execute("USE SCHEMA tm.PUBLIC");
+        original.execute("CREATE TABLE t (s STRING)");
+        original.execute("INSERT INTO t VALUES ('secret')");
+        original.execute("CREATE TAG pii");
+        original.execute("CREATE MASKING POLICY sm AS (x STRING) RETURNS STRING -> 'MASKED'");
+        original.execute("ALTER TAG pii SET MASKING POLICY sm");
+        original.execute("ALTER TABLE t MODIFY COLUMN s SET TAG pii = 'y'");
+        assertEquals("MASKED", String.valueOf(original.executeQuery("SELECT s FROM t").getRows().get(0).getValue(0)));
+        for (final DatabaseEngine copy : copies(original)) {
+            copy.execute("USE SCHEMA tm.PUBLIC");
+            assertEquals("MASKED", String.valueOf(copy.executeQuery("SELECT s FROM t").getRows().get(0).getValue(0)));
         }
     }
 

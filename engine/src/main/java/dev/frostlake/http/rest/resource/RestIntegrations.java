@@ -32,6 +32,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,7 +101,10 @@ final class RestIntegrations {
         node.set(property, items);
     }
 
-    /** A value DESCRIBE shows as a JSON object, parsed; an empty object when it is absent or not JSON. */
+    /**
+     * A value DESCRIBE shows as an object, parsed: a JSON object, or the members of a nested property list,
+     * {@code {NAME=value, LIST=[a, b]}}; an empty object when it is absent or neither.
+     */
     static JsonNode object(final String value) {
         if (value == null || value.isEmpty()) {
             return RestJson.object();
@@ -109,8 +113,58 @@ final class RestIntegrations {
             final JsonNode parsed = RestJson.mapper().readTree(value);
             return parsed != null && parsed.isObject() ? parsed : RestJson.object();
         } catch (final JacksonException notJson) {
-            return RestJson.object();
+            return members(value);
         }
+    }
+
+    /**
+     * The members of a nested property list as DESCRIBE shows them, {@code {NAME=value, LIST=[a, b]}}: each a text,
+     * a bracketed one an array of texts, and one shown as {@code null} left out.
+     */
+    private static ObjectNode members(final String value) {
+        final ObjectNode out = RestJson.object();
+        if (!value.startsWith("{") || !value.endsWith("}")) {
+            return out;
+        }
+        for (final String member : outerItems(value.substring(1, value.length() - 1))) {
+            final int equals = member.indexOf('=');
+            if (equals <= 0) {
+                continue;
+            }
+            final String text = member.substring(equals + 1);
+            if (text.startsWith("[") && text.endsWith("]")) {
+                final ArrayNode items = RestJson.array();
+                for (final String item : outerItems(text.substring(1, text.length() - 1))) {
+                    if (!item.isEmpty()) {
+                        items.add(item);
+                    }
+                }
+                out.set(member.substring(0, equals), items);
+            } else if (!"null".equals(text)) {
+                out.put(member.substring(0, equals), text);
+            }
+        }
+        return out;
+    }
+
+    /** The items between the commas that stand outside every bracket, each trimmed. */
+    private static List<String> outerItems(final String list) {
+        final List<String> items = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < list.length(); i++) {
+            final char c = list.charAt(i);
+            if (c == '[') {
+                depth++;
+            } else if (c == ']') {
+                depth--;
+            } else if (c == ',' && depth <= 0) {
+                items.add(list.substring(start, i).trim());
+                start = i + 1;
+            }
+        }
+        items.add(list.substring(start).trim());
+        return items;
     }
 
     /** A JSON object's text member, or null. */

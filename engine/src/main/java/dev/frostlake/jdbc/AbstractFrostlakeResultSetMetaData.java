@@ -138,9 +138,11 @@ public abstract class AbstractFrostlakeResultSetMetaData implements ResultSetMet
     }
 
     /**
-     * The driver's rule (live-measured against the account's own driver): {@code columnNullable} only for a column
-     * KNOWN to accept NULL, {@code columnNoNulls} for a NOT NULL column and for every expression and literal alike —
-     * so {@code SELECT UPPER(v)} reads {@code columnNoNulls} here while INFORMATION_SCHEMA reports it nullable.
+     * The driver's rule (live-measured against the account's own driver): {@code columnNullable} for a column that
+     * can answer NULL — a nullable column, an expression over one, a NULL literal or a NULL-yielding call —
+     * {@code columnNoNulls} for a NOT NULL column, an expression over one and a non-NULL literal, so
+     * {@code SELECT UPPER(v)} over a NOT NULL {@code v} reads {@code columnNoNulls} here while INFORMATION_SCHEMA
+     * reports it nullable.
      */
     @Override
     public int isNullable(final int column) throws SQLException {

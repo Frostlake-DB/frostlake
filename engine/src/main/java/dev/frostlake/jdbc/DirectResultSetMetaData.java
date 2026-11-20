@@ -107,7 +107,6 @@ class DirectResultSetMetaData extends AbstractFrostlakeResultSetMetaData {
 
     @Override
     protected int nullability(final int column) {
-        final ResultSetColumn described = columns.get(column - 1);
-        return described.isNullabilityKnown() && described.isNullable() ? columnNullable : columnNoNulls;
+        return columns.get(column - 1).isDescribedNullable() ? columnNullable : columnNoNulls;
     }
 }

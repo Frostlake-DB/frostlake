@@ -175,7 +175,8 @@ final class StageQueryExecutor {
                     // every format reads under its own options.
                     final List<JsonNode> records = recordReader instanceof JsonStageReader
                         ? ((JsonStageReader) recordReader).readRecords(file, options.stripsOuterArray(),
-                            options.replacesInvalidCharacters(), storedName(staged, relativeName), readsPositions)
+                            options.replacesInvalidCharacters(), storedName(staged, relativeName), readsPositions,
+                            options.allowsDuplicate(), options.getCompression())
                         : recordReader.readRecords(file, options, storedName(staged, relativeName));
                     for (final JsonNode record : records) {
                         if (options.stripsNullValues()) {
@@ -198,7 +199,8 @@ final class StageQueryExecutor {
                     // The file is read in its format's ENCODING, and a byte that set cannot read refuses its field
                     // unless REPLACE_INVALID_CHARACTERS reads it as U+FFFD (live-verified).
                     final CsvRecordReader reader = new CsvRecordReader(
-                        new StringReader(StagedFileIo.readMarked(file, csvCharset(options.getEncoding()))),
+                        new StringReader(StagedFileIo.readMarked(file, csvCharset(options.getEncoding()),
+                            options.getCompression())),
                         relativeName, options, true).settlingUnreadable(options.replacesInvalidCharacters());
                     reader.skipLines(options.getSkipHeader());
                     final List<Boolean> enclosed = new ArrayList<>();

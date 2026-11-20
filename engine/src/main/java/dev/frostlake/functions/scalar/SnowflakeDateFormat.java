@@ -17,18 +17,20 @@
 package dev.frostlake.functions.scalar;
 
 import dev.frostlake.executor.SessionZone;
-import dev.frostlake.values.TemporalText;
 
+import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.Month;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
@@ -40,130 +42,268 @@ import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Formats a temporal value with a subset of Snowflake's date/time format model (TO_CHAR / TO_VARCHAR
- * with a date format). Snowflake elements are translated to a {@link DateTimeFormatter} pattern:
- * YYYY/UUUU/YY/Y, MMMM/MON/MM/MO, DD/DY/D, HH24/HH12/H24/H12/HH/H, MI/ME, SS/S, FF[0-9], AM/PM/P, TZH/TZM pairs,
- * TZD. The scan is greedy
- * longest-match at each position; any UNMATCHED character is emitted as a quoted literal, so
- * separators (-, /, :, spaces) pass through unchanged and unsupported elements degrade to literal
- * text rather than throwing. Snowflake has NO full-name 'DAY'/'MONTH' elements (live-verified on
- * DATE '2020-01-15'): 'DAY' tokenizes as D+A+Y — unpadded day-of-month, literal A, 2-digit year —
- * giving "15A20", and 'MONTH' as MON+T+H — "Jan", literal T, unpadded hour — giving "JanT0".
- * Month/day names use the English (US) locale in title case (e.g. "Jan", "January", "Wed"); the
- * format element's own case is not propagated to the output. TZH/TZM render the NTZ zero offset
- * ("Z" for the pair). Not modeled: HH is treated as 24-hour, and era / quarter / week elements.
+ * Formats a temporal value with Snowflake's date/time format model (TO_CHAR / TO_VARCHAR with a date
+ * format): YYYY/UUUU/YY/Y, MMMM/MON/MM/MO, DD/DY/D, HH24/HH12/H24/H12/HH/H, MI/ME, SS/S, FF[0-9], AM/PM/P,
+ * TZH/TZM pairs, TZD. The scan is greedy longest-match at each position; any UNMATCHED character is literal
+ * text, so separators (-, /, :, spaces) pass through unchanged. There is no MMM element: 'MMM' is MM and a
+ * literal M. Snowflake has NO full-name 'DAY'/'MONTH' elements (live-verified on DATE '2020-01-15'): 'DAY'
+ * tokenizes as D+A+Y — unpadded day-of-month, literal A, 2-digit year — giving "15A20", and 'MONTH' as
+ * MON+T+H — "Jan", literal T, unpadded hour — giving "JanT0". Month/day names use the English (US) locale in
+ * title case (e.g. "Jan", "January", "Wed"); the format element's own case is not propagated to the output.
+ * TZH/TZM render the NTZ zero offset ("Z"). A TIME renders as a time on 1970-01-01. Not modeled: HH is
+ * treated as 24-hour, and era / quarter / week elements.
+ *
+ * <p>★ ADJACENT ELEMENTS OF ONE FIELD RENDER AS ONE (live-verified). Each element stands for a field and a
+ * width — DD is the day at two, D the day at one, MON the month at three, MMMM at four, DY the weekday at
+ * three — and elements of one field with no text between them add their widths: 'DDD' is the day at three
+ * (005), 'HH24H' the hour at three (013), 'YYYYYY' the year at six (002024), 'MONMM' the month at five, which
+ * like any month of four or more is the full name (March), and 'DYDY' the full weekday (Tuesday). A run of
+ * meridiem elements prints one meridiem ('AMPM' is PM), a run of fraction elements prints the last one's
+ * digits ('FF9FF1' is one digit), and offset elements join only up to the width of TZH:TZM ('TZHTZHTZM' is
+ * +05:30, 'TZH:TZMTZH' +05:30+05). A format holding Y, P or UUUU joins nothing: every element renders on its
+ * own there ('DDD Y' is 055 24, 'MONMM Y' Mar03 24).
  */
 public final class SnowflakeDateFormat {
 
     private SnowflakeDateFormat() {
     }
 
+    /** The year's field. */
+    private static final char YEAR = 'y';
+    /** The UUUU element's field, which joins nothing. */
+    private static final char PROLEPTIC_YEAR = 'u';
+    /** The Y element's field: the year's last two digits unpadded; it joins nothing. */
+    private static final char SHORT_YEAR = 'Y';
+    private static final char MONTH = 'M';
+    private static final char DAY = 'd';
+    private static final char WEEKDAY = 'E';
+    private static final char HOUR = 'H';
+    private static final char CLOCK_HOUR = 'h';
+    private static final char MINUTE = 'm';
+    private static final char SECOND = 's';
+    private static final char FRACTION = 'F';
+    private static final char MERIDIEM = 'a';
+    /** The P element's field: the meridiem's letter, A or P; it joins nothing. */
+    private static final char MERIDIEM_LETTER = 'P';
+    private static final char OFFSET = 'X';
+    private static final char ZONE_NAME = 'Z';
+
+    /** The widest run the offset elements join into: TZH:TZM. */
+    private static final int WIDEST_OFFSET = 3;
+
     // Ordered longest-first so the greedy scan matches MMMM before MON before MM, HH24 before HH
-    // before H, DD/DY before D, YYYY before YY before Y, etc.
+    // before H, DD/DY before D, YYYY before YY before Y, etc. Each element names its field and width.
     private static final String[][] TOKENS = {
         // The offset elements, which render the value's OWN offset — a zero one as the ISO "Z", which is
         // what a TIMESTAMP_NTZ always shows. Live: TZH:TZM over an LTZ under America/Los_Angeles is
-        // -08:00, over a TIMESTAMP_TZ written +0530 it is +05:30, and over an NTZ it is Z.
+        // -08:00, over a TIMESTAMP_TZ written +0530 it is +05:30, and over an NTZ it is Z. TZH alone is the
+        // hours only: +05 for +05:30.
         //
         // ★ A BARE TZM IS NOT AN ELEMENT. Live renders the format 'TZM' as the literal text TZM, so it
         // is absent from this table on purpose and falls through to the literal path; only the pair
-        // (with or without the colon) and TZH alone are read. As Java offset patterns these also PARSE
-        // the matching text, so an explicit-format TO_TIMESTAMP over an ISO string with an offset — or
-        // with Z — works too.
-        {"TZH:TZM", "XXX"}, {"TZHTZM", "XX"}, {"TZH", "X"},
+        // (with or without the colon) and TZH alone are read.
+        {"TZH:TZM", "X", "3"}, {"TZHTZM", "X", "2"}, {"TZH", "X", "1"},
         // ★ TZD IS THE STANDARD-TIME ABBREVIATION, NOT THE INSTANT'S (live-verified across eleven
         // session zones in January and July): an LTZ under America/Los_Angeles renders PST in July
         // too — never PDT, never BST, never a daylight name of any zone. A TIMESTAMP_TZ has no zone,
         // only its written offset, and spells it GMT±HH:MM — the zero offset included, GMT+00:00 —
         // while a value with no zone at all (NTZ, DATE) says the bare GMT. A session zone with no
-        // English abbreviation (Etc/GMT+5) uses the spelled-offset form as well. The abbreviation
-        // depends on the VALUE and the session, so the pattern carries a sentinel literal that
-        // format() replaces after the formatter has run.
-        {"TZD", "\uE000"},
-        // ★ YYYY IS NO JAVA PATTERN: 'yyyy' signs a year past 9999 (+20201) where live prints the digits,
-        // so the pattern carries a sentinel (YEAR_SENTINEL) that formatterFor builds as the era year.
-        {"YYYY", "\uE001"}, {"UUUU", "uuuu"}, {"HH24", "HH"}, {"HH12", "hh"},
+        // English abbreviation (Etc/GMT+5) uses the spelled-offset form as well.
+        {"TZD", "Z", "0"},
+        // ★ YYYY PRINTS THE DIGITS OF A YEAR PAST 9999 (20201), never a sign.
+        {"YYYY", "y", "4"}, {"UUUU", "u", "4"}, {"HH24", "H", "2"}, {"HH12", "h", "2"},
         // The unpadded elements (live-verified on 2005-04-05 17:08:09): H24:ME:S is 17:8:9, H12 is 5, MO is 4.
-        {"H24", "H"}, {"H12", "h"}, {"MMMM", "MMMM"},
-        {"FF9", "SSSSSSSSS"}, {"FF8", "SSSSSSSS"}, {"FF7", "SSSSSSS"}, {"FF6", "SSSSSS"},
-        {"FF5", "SSSSS"}, {"FF4", "SSSS"}, {"FF3", "SSS"}, {"FF2", "SS"}, {"FF1", "S"},
+        {"H24", "H", "1"}, {"H12", "h", "1"}, {"MMMM", "M", "4"},
+        {"FF9", "F", "9"}, {"FF8", "F", "8"}, {"FF7", "F", "7"}, {"FF6", "F", "6"},
+        {"FF5", "F", "5"}, {"FF4", "F", "4"}, {"FF3", "F", "3"}, {"FF2", "F", "2"}, {"FF1", "F", "1"},
         // FF0 asks for no fraction digits: SS.FF0 is 09. (live-verified).
-        {"FF0", ""},
-        {"MON", "MMM"}, {"MMM", "MMM"},
-        {"YY", "yy"}, {"MM", "MM"}, {"DD", "dd"}, {"DY", "EEE"}, {"HH", "HH"},
-        {"MI", "mm"}, {"SS", "ss"}, {"FF", "SSSSSSSSS"}, {"AM", "a"}, {"PM", "a"},
-        {"MO", "M"}, {"ME", "m"},
+        {"FF0", "F", "0"},
+        {"MON", "M", "3"},
+        {"YY", "y", "2"}, {"MM", "M", "2"}, {"DD", "d", "2"}, {"DY", "E", "3"}, {"HH", "H", "2"},
+        // A bare FF prints the value's scale, nine digits when it is not known.
+        {"MI", "m", "2"}, {"SS", "s", "2"}, {"FF", "F", "-1"}, {"AM", "a", "1"}, {"PM", "a", "1"},
+        {"MO", "M", "1"}, {"ME", "m", "1"},
         // Single-letter elements (live-verified): Y = the year's last two digits UNPADDED ('Y' on 2020-01-15 →
         // "20", on 2005-04-05 → "5", so 'YYY' is YY then Y, "055"), D = day-of-month UNPADDED ('D' → "15"),
         // H = hour UNPADDED (the H in 'MONTH' rendered "0" for a DATE), S = second UNPADDED, and P = the
         // meridiem's letter, A or P. These are what make 'DAY' and 'MONTH' come out as "15A20" / "JanT0".
-        {"Y", "\uE003"}, {"D", "d"}, {"H", "H"}, {"S", "s"}, {"P", "\uE002"},
+        {"Y", "Y", "1"}, {"D", "d", "1"}, {"H", "H", "1"}, {"S", "s", "1"}, {"P", "P", "1"},
     };
 
-    private static final char TZD_SENTINEL = '\uE000';
+    /** The Y element: the year's last two digits, unpadded. */
+    private static final DateTimeFormatter SHORT_YEAR_FORMAT = new DateTimeFormatterBuilder()
+        .appendValueReduced(ChronoField.YEAR, 1, 2, 2000).toFormatter(Locale.US);
 
-    /** Where a YYYY element sits in a Java pattern, built as the era year by {@link #withEraYears}. */
-    private static final char YEAR_SENTINEL = '\uE001';
+    /** The UUUU element: the proleptic year, four digits at least and signed past them. */
+    private static final DateTimeFormatter PROLEPTIC_YEAR_FORMAT = DateTimeFormatter.ofPattern("uuuu", Locale.US);
 
-    /** Where a P element sits in a Java pattern, built as the meridiem's letter by {@link #withEraYears}. */
-    private static final char MERIDIEM_LETTER_SENTINEL = '\uE002';
-
-    /** Where a Y element sits in a Java pattern, built as the unpadded last two year digits. */
-    private static final char SHORT_YEAR_SENTINEL = '\uE003';
-
-    /** The meridiem's letters, as P renders and reads them. */
-    private static final Map<Long, String> MERIDIEM_LETTERS = Map.of(0L, "A", 1L, "P");
+    // Format strings are query constants but format runs per ROW; the pieces are immutable.
+    private static final int PIECES_CACHE_CAPACITY = 256;
+    private static final Map<String, List<FormatPiece>> PIECES_CACHE = new ConcurrentHashMap<>();
 
     /**
-     * A Java pattern whose YYYY elements are built as the era year \u2014 four digits at least, never signed \u2014
-     * so a year past 9999 prints its digits as live prints them: {@code TO_CHAR(d, 'YYYY')} over
-     * 20201-01-15 is {@code 20201} (live-verified), where the pattern letters print {@code +20201}. A
-     * sentinel never sits inside a quoted literal, so each piece between two is a pattern of its own.
+     * Renders a temporal value under a format model.
+     *
+     * @param value           the value: a date, time or timestamp, or the text of one
+     * @param snowflakeFormat the format model
+     * @return the text
      */
-    private static DateTimeFormatter withEraYears(final String javaPattern) {
-        final DateTimeFormatterBuilder builder = new DateTimeFormatterBuilder();
-        int from = 0;
-        int at = nextBuiltElement(javaPattern, 0);
-        while (at >= 0) {
-            if (at > from) {
-                builder.appendPattern(javaPattern.substring(from, at));
-            }
-            final char sentinel = javaPattern.charAt(at);
-            if (sentinel == YEAR_SENTINEL) {
-                TemporalText.appendEraYear(builder);
-            } else if (sentinel == MERIDIEM_LETTER_SENTINEL) {
-                builder.appendText(ChronoField.AMPM_OF_DAY, MERIDIEM_LETTERS);
-            } else {
-                builder.appendValueReduced(ChronoField.YEAR, 1, 2, 2000);
-            }
-            from = at + 1;
-            at = nextBuiltElement(javaPattern, from);
-        }
-        if (from < javaPattern.length()) {
-            builder.appendPattern(javaPattern.substring(from));
-        }
-        return builder.toFormatter(Locale.US);
-    }
-
-    /** Where the next element built by the builder rather than a pattern letter sits, or -1. */
-    private static int nextBuiltElement(final String javaPattern, final int from) {
-        for (int i = from; i < javaPattern.length(); i++) {
-            final char c = javaPattern.charAt(i);
-            if (c == YEAR_SENTINEL || c == MERIDIEM_LETTER_SENTINEL || c == SHORT_YEAR_SENTINEL) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     public static String format(final Object value, final String snowflakeFormat) {
-        final int scale = FractionScale.current();
-        final String text = (scale < 0 ? formatterFor(snowflakeFormat) : scaledFormatterFor(snowflakeFormat, scale))
-            .format(toTemporal(value));
-        if (text.indexOf(TZD_SENTINEL) < 0) {
-            return text;
+        final TemporalAccessor temporal = toTemporal(value);
+        final List<FormatPiece> scanned = cachedPieces(snowflakeFormat);
+        final boolean joins = joinsElements(scanned);
+        final StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < scanned.size()) {
+            final FormatPiece piece = scanned.get(i);
+            if (!piece.isElement()) {
+                out.append(piece.literal());
+                i++;
+                continue;
+            }
+            final char field = fieldOf(piece.element());
+            int end = i + 1;
+            int width = widthOf(piece.element());
+            if (joins && field != ZONE_NAME) {
+                while (end < scanned.size() && scanned.get(end).isElement()
+                        && fieldOf(scanned.get(end).element()) == field) {
+                    width += widthOf(scanned.get(end).element());
+                    end++;
+                }
+                if (field == OFFSET && width > WIDEST_OFFSET) {
+                    end = i + 1;
+                    width = widthOf(piece.element());
+                }
+            }
+            if (field == FRACTION) {
+                width = widthOf(scanned.get(end - 1).element());
+            }
+            out.append(render(field, width, temporal, value));
+            i = end;
         }
-        return text.replace(String.valueOf(TZD_SENTINEL), tzdText(value));
+        return out.toString();
+    }
+
+    /** Whether a format's adjacent elements of one field join: not when it holds Y, P or UUUU. */
+    private static boolean joinsElements(final List<FormatPiece> scanned) {
+        for (final FormatPiece piece : scanned) {
+            if (piece.isElement()) {
+                final char field = fieldOf(piece.element());
+                if (field == SHORT_YEAR || field == MERIDIEM_LETTER || field == PROLEPTIC_YEAR) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** One field at one width. */
+    private static String render(final char field, final int width, final TemporalAccessor temporal,
+                                 final Object value) {
+        switch (field) {
+            case YEAR:
+                final int year = temporal.get(ChronoField.YEAR_OF_ERA);
+                return width == 2 ? padded(year % 100, 2) : padded(year, width);
+            case PROLEPTIC_YEAR:
+                return PROLEPTIC_YEAR_FORMAT.format(temporal);
+            case SHORT_YEAR:
+                return SHORT_YEAR_FORMAT.format(temporal);
+            case MONTH:
+                final int month = temporal.get(ChronoField.MONTH_OF_YEAR);
+                if (width >= 4) {
+                    return Month.of(month).getDisplayName(TextStyle.FULL, Locale.US);
+                }
+                return width == 3 ? Month.of(month).getDisplayName(TextStyle.SHORT, Locale.US) : padded(month, width);
+            case DAY:
+                return padded(temporal.get(ChronoField.DAY_OF_MONTH), width);
+            case WEEKDAY:
+                return DayOfWeek.of(temporal.get(ChronoField.DAY_OF_WEEK))
+                    .getDisplayName(width >= 4 ? TextStyle.FULL : TextStyle.SHORT, Locale.US);
+            case HOUR:
+                return padded(temporal.get(ChronoField.HOUR_OF_DAY), width);
+            case CLOCK_HOUR:
+                return padded(temporal.get(ChronoField.CLOCK_HOUR_OF_AMPM), width);
+            case MINUTE:
+                return padded(temporal.get(ChronoField.MINUTE_OF_HOUR), width);
+            case SECOND:
+                return padded(temporal.get(ChronoField.SECOND_OF_MINUTE), width);
+            case FRACTION:
+                return fraction(temporal.get(ChronoField.NANO_OF_SECOND), width);
+            case MERIDIEM:
+                return temporal.get(ChronoField.AMPM_OF_DAY) == 0 ? "AM" : "PM";
+            case MERIDIEM_LETTER:
+                return temporal.get(ChronoField.AMPM_OF_DAY) == 0 ? "A" : "P";
+            case OFFSET:
+                return offset(temporal.get(ChronoField.OFFSET_SECONDS), width);
+            default:
+                return tzdText(value);
+        }
+    }
+
+    /** A number zero-padded to a width. */
+    private static String padded(final int number, final int width) {
+        final String digits = Integer.toString(number);
+        if (digits.length() >= width) {
+            return digits;
+        }
+        final StringBuilder out = new StringBuilder(width);
+        for (int i = digits.length(); i < width; i++) {
+            out.append('0');
+        }
+        return out.append(digits).toString();
+    }
+
+    /** The fraction of a second at a number of digits, cut rather than rounded; a bare FF the value's scale. */
+    private static String fraction(final int nanos, final int digits) {
+        final int wanted = digits >= 0 ? digits : FractionScale.current() >= 0 ? FractionScale.current() : 9;
+        return padded(nanos, 9).substring(0, Math.min(wanted, 9));
+    }
+
+    /** An offset: Z when zero, else the hours (TZH), hours and minutes (TZHTZM), or both with a colon. */
+    private static String offset(final int seconds, final int width) {
+        if (seconds == 0) {
+            return "Z";
+        }
+        final int magnitude = Math.abs(seconds);
+        final String hours = (seconds < 0 ? "-" : "+") + padded(magnitude / 3600, 2);
+        if (width <= 1) {
+            return hours;
+        }
+        return hours + (width == 2 ? "" : ":") + padded((magnitude % 3600) / 60, 2);
+    }
+
+    private static char fieldOf(final String element) {
+        return tokenOf(element)[1].charAt(0);
+    }
+
+    private static int widthOf(final String element) {
+        return Integer.parseInt(tokenOf(element)[2]);
+    }
+
+    private static String[] tokenOf(final String element) {
+        for (final String[] token : TOKENS) {
+            if (token[0].equals(element)) {
+                return token;
+            }
+        }
+        throw new IllegalArgumentException("Not a format element: " + element);
+    }
+
+    private static List<FormatPiece> cachedPieces(final String format) {
+        final List<FormatPiece> existing = PIECES_CACHE.get(format);
+        if (existing != null) {
+            return existing;
+        }
+        final List<FormatPiece> scanned = pieces(format);
+        if (PIECES_CACHE.size() >= PIECES_CACHE_CAPACITY) {
+            final Iterator<String> it = PIECES_CACHE.keySet().iterator();
+            if (it.hasNext()) {
+                it.next();
+                it.remove();
+            }
+        }
+        PIECES_CACHE.put(format, scanned);
+        return scanned;
     }
 
     /**
@@ -203,60 +343,6 @@ public final class SnowflakeDateFormat {
             magnitude / 3600, (magnitude % 3600) / 60);
     }
 
-    // Format strings are query constants but formatterFor runs per ROW — and
-    // DateTimeFormatter.ofPattern re-parses the pattern every time. DateTimeFormatter is
-    // immutable and thread-safe, so a bounded shared cache is sound.
-    private static final int FORMATTER_CACHE_CAPACITY = 256;
-    private static final Map<String, DateTimeFormatter> FORMATTER_CACHE = new ConcurrentHashMap<>();
-
-    /**
-     * A {@link DateTimeFormatter} (US locale) built from a Snowflake format string, usable for both
-     * formatting a temporal and parsing a string (TO_DATE / TO_TIMESTAMP with an explicit format).
-     * Cached by the Snowflake format text.
-     */
-    public static DateTimeFormatter formatterFor(final String snowflakeFormat) {
-        final DateTimeFormatter existing = FORMATTER_CACHE.get(snowflakeFormat);
-        if (existing != null) {
-            return existing;
-        }
-        final String javaPattern = toJavaPattern(snowflakeFormat);
-        final DateTimeFormatter built = nextBuiltElement(javaPattern, 0) < 0
-            ? DateTimeFormatter.ofPattern(javaPattern, Locale.US) : withEraYears(javaPattern);
-        if (FORMATTER_CACHE.size() >= FORMATTER_CACHE_CAPACITY) {
-            final Iterator<String> it = FORMATTER_CACHE.keySet().iterator();
-            if (it.hasNext()) {
-                it.next();
-                it.remove();
-            }
-        }
-        FORMATTER_CACHE.put(snowflakeFormat, built);
-        return built;
-    }
-
-    /**
-     * A formatter whose bare FF prints {@code scale} fraction digits, none for a scale of 0 (see FractionScale).
-     * Cached by the format text and the scale.
-     */
-    private static DateTimeFormatter scaledFormatterFor(final String snowflakeFormat, final int scale) {
-        final String key = snowflakeFormat + "\u0000" + scale;
-        final DateTimeFormatter existing = FORMATTER_CACHE.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        final String javaPattern = toJavaPattern(snowflakeFormat, scale);
-        final DateTimeFormatter built = nextBuiltElement(javaPattern, 0) < 0
-            ? DateTimeFormatter.ofPattern(javaPattern, Locale.US) : withEraYears(javaPattern);
-        if (FORMATTER_CACHE.size() >= FORMATTER_CACHE_CAPACITY) {
-            final Iterator<String> it = FORMATTER_CACHE.keySet().iterator();
-            if (it.hasNext()) {
-                it.next();
-                it.remove();
-            }
-        }
-        FORMATTER_CACHE.put(key, built);
-        return built;
-    }
-
     /**
      * Whether the format string contains at least one recognized date/time element — used to decide
      * whether a plain string value should be interpreted as a temporal (a DATE/TIMESTAMP value can
@@ -276,12 +362,13 @@ public final class SnowflakeDateFormat {
     private static TemporalAccessor toTemporal(final Object v) {
         // The zoned values keep their own offset for the TZH / TZM elements; a naive one is widened to
         // a ZERO offset rather than left without one, because the offset elements have to render
-        // SOMETHING for it and live renders Z.
+        // SOMETHING for it and live renders Z. A TIME is a time on 1970-01-01 (live-verified: 'YYYY-MM-DD'
+        // over a TIME is 1970-01-01).
         if (v instanceof ZonedDateTime) return (ZonedDateTime) v;
         if (v instanceof OffsetDateTime) return (OffsetDateTime) v;
         if (v instanceof LocalDateTime) return ((LocalDateTime) v).atOffset(ZoneOffset.UTC);
         if (v instanceof LocalDate) return ((LocalDate) v).atStartOfDay().atOffset(ZoneOffset.UTC);
-        if (v instanceof LocalTime) return (LocalTime) v;
+        if (v instanceof LocalTime) return ((LocalTime) v).atDate(LocalDate.EPOCH).atOffset(ZoneOffset.UTC);
         if (v instanceof Instant) return ((Instant) v).atOffset(ZoneOffset.UTC);
         return SharedFunctionHelpers.toLocalDateTime(v).atOffset(ZoneOffset.UTC);
     }
@@ -333,47 +420,6 @@ public final class SnowflakeDateFormat {
         return out;
     }
 
-    private static String toJavaPattern(final String format) {
-        return toJavaPattern(format, -1);
-    }
-
-    /** {@link #toJavaPattern(String)} with a bare FF printing {@code scale} digits, or nine for a scale of -1. */
-    private static String toJavaPattern(final String format, final int scale) {
-        final StringBuilder out = new StringBuilder();
-        final StringBuilder literal = new StringBuilder();
-        for (final FormatPiece piece : pieces(format)) {
-            if (!piece.isElement()) {
-                literal.append(piece.literal());
-                continue;
-            }
-            final String pattern = scale >= 0 && "FF".equals(piece.element()) ? "S".repeat(scale)
-                : javaPatternFor(piece.element());
-            if (pattern.isEmpty()) {
-                continue;
-            }
-            // The TZD sentinel is literal TEXT, not a pattern letter — it joins the surrounding
-            // literal run so the quoting stays a single well-formed span.
-            if (pattern.length() == 1 && pattern.charAt(0) == TZD_SENTINEL) {
-                literal.append(TZD_SENTINEL);
-                continue;
-            }
-            flushLiteral(out, literal);
-            out.append(pattern);
-        }
-        flushLiteral(out, literal);
-        return out.toString();
-    }
-
-    /** The {@link DateTimeFormatter} pattern an element renders with. */
-    private static String javaPatternFor(final String element) {
-        for (final String[] token : TOKENS) {
-            if (token[0].equals(element)) {
-                return token[1];
-            }
-        }
-        throw new IllegalArgumentException("Not a format element: " + element);
-    }
-
     private static String[] matchToken(final String format, final int pos) {
         for (final String[] token : TOKENS) {
             if (format.regionMatches(true, pos, token[0], 0, token[0].length())) {
@@ -381,12 +427,5 @@ public final class SnowflakeDateFormat {
             }
         }
         return null;
-    }
-
-    private static void flushLiteral(final StringBuilder out, final StringBuilder literal) {
-        if (literal.length() > 0) {
-            out.append('\'').append(literal.toString().replace("'", "''")).append('\'');
-            literal.setLength(0);
-        }
     }
 }

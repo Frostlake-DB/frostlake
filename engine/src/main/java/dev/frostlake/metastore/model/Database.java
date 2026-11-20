@@ -51,6 +51,8 @@ public class Database extends SqlObject {
     /** The database's own roles, by name, in the order they were created. */
     private final Map<String, DatabaseRole> databaseRoles = new LinkedHashMap<>();
     private boolean readOnly = false;
+    /** The primary a secondary database was declared a replica of, {@code ORG.ACCOUNT.DATABASE}; null otherwise. */
+    private String replicaOf;
 
     /** TRANSIENT, as written on the CREATE; every schema inside inherits it. */
     private boolean transientObject;
@@ -316,6 +318,16 @@ public class Database extends SqlObject {
         CloneReferences.repoint(scope, new String[] {source.getDatabaseName(), source.getName()},
             new String[] {clone.getDatabaseName(), clone.getName()});
         TagAssignments.mapToClones(scope, null);
+    }
+
+    /** The primary this database was declared a replica of, or null for a database that is no secondary. */
+    public String getReplicaOf() {
+        return replicaOf;
+    }
+
+    /** Makes the database a secondary of that primary. */
+    public void setReplicaOf(final String replicaOf) {
+        this.replicaOf = replicaOf;
     }
 
     public boolean isReadOnly() {

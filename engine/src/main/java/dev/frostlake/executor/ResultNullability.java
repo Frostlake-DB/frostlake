@@ -26,6 +26,7 @@ import dev.frostlake.executor.expressions.ColumnReferenceExpression;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
 import dev.frostlake.executor.expressions.InExpression;
+import dev.frostlake.executor.expressions.IntervalExpression;
 import dev.frostlake.executor.expressions.IsNullExpression;
 import dev.frostlake.executor.expressions.LikeAnyAllExpression;
 import dev.frostlake.executor.expressions.LiteralExpression;
@@ -54,7 +55,7 @@ import java.util.Set;
  * <pre>
  *   a column                                   its own NOT NULL, or nullable on a side an outer join extends;
  *                                              a derived relation's as the projection that made it judged
- *   NULL, TRUE, FALSE                          nullable; a number or a string is not
+ *   NULL, TRUE, FALSE                          nullable; a number, a string or an interval constant is not
  *   +, -, *, /, %, ||, a sign, a cast          nullable when an operand is; TRY_CAST always
  *   a comparison, AND, OR, NOT, IS [NOT] NULL,
  *   BETWEEN, LIKE, IN, EQUAL_NULL               nullable
@@ -183,6 +184,11 @@ final class ResultNullability {
         }
         if (expression instanceof ColumnReferenceExpression) {
             return column((ColumnReferenceExpression) expression);
+        }
+        if (expression instanceof IntervalExpression) {
+            // An interval is made of its text: INTERVAL '1' YEAR is a value as a number or a string is.
+            final Expression text = ((IntervalExpression) expression).getValueExpression();
+            return text == null || of(text);
         }
         if (expression instanceof CastExpression) {
             final CastExpression cast = (CastExpression) expression;

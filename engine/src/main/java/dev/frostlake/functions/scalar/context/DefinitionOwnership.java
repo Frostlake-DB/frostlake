@@ -38,4 +38,16 @@ public interface DefinitionOwnership {
      * @return whether the session sees the object
      */
     boolean sees(String objectType, String objectName, String owner);
+
+    /**
+     * The first container of a schema's object the session may neither use nor see, which an object it does not see is
+     * refused as: the database, then the schema (documented).
+     *
+     * @param databaseName the object's database
+     * @param schemaName   the object's schema
+     * @return "DATABASE" or "SCHEMA", or null when both are used or seen, or no container is judged
+     */
+    default String missedContainer(final String databaseName, final String schemaName) {
+        return null;
+    }
 }

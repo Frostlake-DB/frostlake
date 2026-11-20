@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 /**
  * The security integration types beside API_AUTHENTICATION: Snowflake OAuth, External OAuth, SAML2 and SCIM, each
  * created with the properties its page documents, listed with its type — a custom OAuth client's as
- * {@code OAUTH - CUSTOM} (live-verified) — and described by what it was written with; and an OAuth secret's
+ * {@code OAUTH - CUSTOM} (live-verified) — and described by its type's properties; and an OAuth secret's
  * scopes, which an ALTER may set only to scopes its integration allows, as a CREATE may. Engine only: integrations
  * are not created on the live account.
  */
@@ -84,8 +84,10 @@ public class SecurityIntegrationTypesTest extends BaseDatabaseTest {
         engine.execute("CREATE SECURITY INTEGRATION so_tableau TYPE = OAUTH OAUTH_CLIENT = tableau_desktop"
             + " OAUTH_REFRESH_TOKEN_VALIDITY = 36000 COMMENT = 'bi'");
         assertEquals("SO_TABLEAU|OAUTH - TABLEAU_DESKTOP|SECURITY|true|bi", listed("SO_TABLEAU"));
-        assertEquals("[ENABLED=true, OAUTH_CLIENT=TABLEAU_DESKTOP, OAUTH_REFRESH_TOKEN_VALIDITY=36000, COMMENT=bi]",
-            described("so_tableau").toString());
+        final List<String> tableau = described("so_tableau");
+        assertEquals("ENABLED=true", tableau.get(0));
+        assertEquals("OAUTH_REFRESH_TOKEN_VALIDITY=36000", tableau.get(3));
+        assertEquals("COMMENT=bi", tableau.get(tableau.size() - 1));
         assertEquals(PREFIX + "Missing option(s): [OAUTH_CLIENT_TYPE, OAUTH_REDIRECT_URI]",
             refusal("CREATE SECURITY INTEGRATION so_bad TYPE = OAUTH OAUTH_CLIENT = CUSTOM"));
         assertEquals(PREFIX + "Missing option(s): [OAUTH_REDIRECT_URI]",
@@ -130,12 +132,39 @@ public class SecurityIntegrationTypesTest extends BaseDatabaseTest {
     }
 
     @Test
+    public void aSaml2OrScimIntegrationMayLeaveEnabledOut() {
+        engine.execute("CREATE SECURITY INTEGRATION so_saml_def TYPE = SAML2 SAML2_ISSUER = 'https://idp'"
+            + " SAML2_SSO_URL = 'https://idp/sso' SAML2_PROVIDER = 'CUSTOM' SAML2_X509_CERT = 'MIIC'");
+        assertEquals("SO_SAML_DEF|SAML2|SECURITY|true|null", listed("SO_SAML_DEF"));
+        assertEquals(PREFIX + "Missing option(s): [SAML2_ISSUER, SAML2_SSO_URL, SAML2_PROVIDER, SAML2_X509_CERT]",
+            refusal("CREATE SECURITY INTEGRATION so_bad TYPE = SAML2"));
+        engine.execute("CREATE SECURITY INTEGRATION so_scim_def TYPE = SCIM SCIM_CLIENT = 'AZURE'"
+            + " RUN_AS_ROLE = 'AAD_PROVISIONER'");
+        assertEquals("SO_SCIM_DEF|SCIM - AZURE|SECURITY|true|null", listed("SO_SCIM_DEF"));
+    }
+
+    @Test
+    public void alterSetMaySeparateItsPropertiesWithCommas() {
+        engine.execute("CREATE SECURITY INTEGRATION so_comma TYPE = OAUTH OAUTH_CLIENT = CUSTOM"
+            + " OAUTH_CLIENT_TYPE = 'CONFIDENTIAL' OAUTH_REDIRECT_URI = 'https://example.com/cb'");
+        assertEquals("Statement executed successfully.", status("ALTER SECURITY INTEGRATION so_comma"
+            + " SET OAUTH_ENFORCE_PKCE = TRUE, COMMENT = 'two'"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|true|two", listed("SO_COMMA"));
+        assertEquals("Statement executed successfully.", status("ALTER SECURITY INTEGRATION so_comma"
+            + " SET OAUTH_ENFORCE_PKCE = FALSE, ENABLED = FALSE COMMENT = 'three'"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|false|three", listed("SO_COMMA"));
+        assertEquals("Statement executed successfully.",
+            status("ALTER SECURITY INTEGRATION so_comma UNSET ENABLED, COMMENT"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|true|null", listed("SO_COMMA"));
+    }
+
+    @Test
     public void alterSetsWhatTheTypeTakes() {
         engine.execute("CREATE SECURITY INTEGRATION so_alter TYPE = SCIM ENABLED = TRUE SCIM_CLIENT = 'GENERIC'"
             + " RUN_AS_ROLE = 'GENERIC_SCIM_PROVISIONER'");
         assertEquals("Statement executed successfully.",
             status("ALTER SECURITY INTEGRATION so_alter SET SYNC_PASSWORD = TRUE COMMENT = 'c'"));
-        assertEquals("[ENABLED=true, SCIM_CLIENT=GENERIC, RUN_AS_ROLE=GENERIC_SCIM_PROVISIONER, SYNC_PASSWORD=true,"
+        assertEquals("[ENABLED=true, NETWORK_POLICY=, RUN_AS_ROLE=GENERIC_SCIM_PROVISIONER, SYNC_PASSWORD=true,"
             + " COMMENT=c]", described("so_alter").toString());
         assertEquals(PREFIX + "invalid property 'OAUTH_CLIENT_ID' for 'INTEGRATION'",
             refusal("ALTER SECURITY INTEGRATION so_alter SET OAUTH_CLIENT_ID = 'x'"));

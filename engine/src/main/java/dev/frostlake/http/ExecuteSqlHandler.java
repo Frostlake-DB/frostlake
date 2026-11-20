@@ -167,6 +167,9 @@ final class ExecuteSqlHandler implements HttpHandler {
             // payload for the exact same parsed content.
             HttpResponses.send(exchange, 200, MAPPER.writeValueAsString(response));
 
+        } catch (final RequestTooLargeException tooLarge) {
+            // Answered 413 where the handler is wrapped (see ErrorAnsweringHandler).
+            throw tooLarge;
         } catch (final Exception | Error e) {
             // An Error is a server fault like any other: a class that cannot be loaded or an exhausted stack
             // is answered here, where escaping would end the pool thread with the exchange still open and

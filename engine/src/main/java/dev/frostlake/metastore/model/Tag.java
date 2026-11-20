@@ -46,6 +46,41 @@ public class Tag extends SqlObject {
     private String id = ID_PREFIX + UUID.randomUUID().toString().toUpperCase(Locale.ROOT);
     /** The identity of the tag this one was cloned from, until the clone's assignments are mapped to it. */
     private String clonedFromId;
+    /**
+     * The masking policies the tag carries, each named in full: at most one per data type, which masks every column
+     * of that type the tag is set on, directly or by the table, schema or database holding the column.
+     */
+    private final List<String> maskingPolicies = new ArrayList<>();
+
+    /**
+     * The masking policies the tag carries.
+     *
+     * @return each policy's name in full, in the order they were set
+     */
+    public List<String> getMaskingPolicies() {
+        return new ArrayList<>(maskingPolicies);
+    }
+
+    /**
+     * Replaces the masking policies the tag carries.
+     *
+     * @param policies each policy's name in full, or null for none
+     */
+    public void setMaskingPolicies(final List<String> policies) {
+        maskingPolicies.clear();
+        if (policies != null) {
+            maskingPolicies.addAll(policies);
+        }
+    }
+
+    /**
+     * Whether the tag carries a masking policy.
+     *
+     * @return whether it does
+     */
+    public boolean hasMaskingPolicies() {
+        return !maskingPolicies.isEmpty();
+    }
 
     public Tag(final String name) {
         this(name, new ArrayList<>(), null);

@@ -65,7 +65,8 @@ import java.util.jar.JarFile;
  * from Maven — so the stage directory doubles as the function's dependency set: drop the missing
  * dependency JARs beside the handler JAR and they link. Loading is child-first (see
  * {@link ChildFirstUdfClassLoader}): the jar's own dependency versions win over the engine's classpath,
- * while JDK/engine/Snowpark/SLF4J classes stay shared so handlers can reference them. See docs/functions.md.
+ * while JDK/engine/Snowpark/SLF4J classes stay shared so handlers can reference them - Snowpark's only for a routine
+ * whose PACKAGES name it (live-verified). See docs/functions.md.
  */
 public final class JarHandlerLoader {
 
@@ -85,7 +86,23 @@ public final class JarHandlerLoader {
     /** Load {@code className} (trying the Scala {@code object} singleton {@code className$} first) from the IMPORTS jar(s). */
     public static Class<?> load(final List<String> written, final String className,
                                 final Catalog catalog, final S3PathResolver s3Resolver) {
-        return load(written, className, catalog, s3Resolver, true);
+        return load(written, className, catalog, s3Resolver, true, -1);
+    }
+
+    /**
+     * Load {@code className} from the IMPORTS jar(s), shared with every caller that loads it alike, for a routine
+     * that may not be supplied Snowpark (see {@link ChildFirstUdfClassLoader}).
+     *
+     * @param written       the IMPORTS entries
+     * @param className     the handler's class
+     * @param catalog       the catalog the stages are named in
+     * @param s3Resolver    maps an S3 location to a local path, or null
+     * @param withheldLevel the routine's Java level where its packages do not name Snowpark, else -1
+     * @return the handler's class
+     */
+    public static Class<?> load(final List<String> written, final String className, final Catalog catalog,
+                                final S3PathResolver s3Resolver, final int withheldLevel) {
+        return load(written, className, catalog, s3Resolver, true, withheldLevel);
     }
 
     /**
@@ -100,7 +117,23 @@ public final class JarHandlerLoader {
      */
     public static Class<?> loadAnew(final List<String> written, final String className,
                                     final Catalog catalog, final S3PathResolver s3Resolver) {
-        return load(written, className, catalog, s3Resolver, false);
+        return load(written, className, catalog, s3Resolver, false, -1);
+    }
+
+    /**
+     * As {@link #loadAnew(List, String, Catalog, S3PathResolver)}, for a routine that may not be supplied Snowpark
+     * (see {@link ChildFirstUdfClassLoader}).
+     *
+     * @param written       the IMPORTS entries
+     * @param className     the handler's class
+     * @param catalog       the catalog the stages are named in
+     * @param s3Resolver    maps an S3 location to a local path, or null
+     * @param withheldLevel the routine's Java level where its packages do not name Snowpark, else -1
+     * @return the handler's class
+     */
+    public static Class<?> loadAnew(final List<String> written, final String className, final Catalog catalog,
+                                    final S3PathResolver s3Resolver, final int withheldLevel) {
+        return load(written, className, catalog, s3Resolver, false, withheldLevel);
     }
 
     /**
@@ -122,13 +155,12 @@ public final class JarHandlerLoader {
     }
 
     /**
-     * A loader of the classes jars hold, ahead of its parent's.
+     * The places of jars, as a class loader reads them.
      *
-     * @param jars   the jars
-     * @param parent the loader every other class comes from
-     * @return the loader
+     * @param jars the jars
+     * @return their URLs, in the same order
      */
-    public static ClassLoader jarLoader(final List<File> jars, final ClassLoader parent) {
+    public static URL[] urlsOf(final List<File> jars) {
         final List<URL> urls = new ArrayList<>();
         for (final File jar : jars) {
             try {
@@ -137,7 +169,7 @@ public final class JarHandlerLoader {
                 throw new RuntimeException("Invalid IMPORTS path: " + jar.getPath(), e);
             }
         }
-        return new ChildFirstUdfClassLoader(urls.toArray(new URL[0]), parent);
+        return urls.toArray(new URL[0]);
     }
 
     private static List<String> localPaths(final List<String> written, final Catalog catalog,
@@ -183,14 +215,15 @@ public final class JarHandlerLoader {
     }
 
     private static Class<?> load(final List<String> written, final String className,
-                                 final Catalog catalog, final S3PathResolver s3Resolver, final boolean cached) {
+                                 final Catalog catalog, final S3PathResolver s3Resolver, final boolean cached,
+                                 final int withheldLevel) {
         if (written == null || written.isEmpty()) {
             throw new RuntimeException("No IMPORTS jar specified for handler class " + className);
         }
         final ImportLocalizer localizer = LOCALIZER.get();
         final List<String> imports = localizer != null ? localizer.localImports(written) : written;
         final List<String> localPaths = localPaths(written, catalog, s3Resolver);
-        final StringBuilder cacheKey = new StringBuilder(className);
+        final StringBuilder cacheKey = new StringBuilder(className).append('#').append(withheldLevel);
         for (final String localPath : localPaths) {
             final File jar = new File(localPath);
             cacheKey.append('|').append(localPath).append(':').append(jar.length()).append(':').append(jar.lastModified());
@@ -209,7 +242,7 @@ public final class JarHandlerLoader {
             }
         }
         final URLClassLoader loader = new ChildFirstUdfClassLoader(
-            urls.toArray(new URL[0]), Thread.currentThread().getContextClassLoader());
+            urls.toArray(new URL[0]), Thread.currentThread().getContextClassLoader(), withheldLevel);
         try {
             final Class<?> scalaObject = loader.loadClass(className + "$");   // Scala object singleton, if present
             if (cached) {

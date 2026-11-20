@@ -93,8 +93,8 @@ public class CreateRoutineHandler implements CommandHandler {
 
     /**
      * The RUNTIME_VERSION values each language offers, matched as written: {@code '3.11'} and the number
-     * {@code 3.11} are one, {@code ' 3.11'} and {@code '3.11.0'} are not (live-verified). Python 3.8 and 3.9 are
-     * decommissioned rather than unknown on the account, so they are not refused as invalid values here.
+     * {@code 3.11} are one, {@code ' 3.11'} and {@code '3.11.0'} are not (live-verified). Python 3.8, 3.9 and 3.10
+     * are decommissioned rather than unknown, so they are not refused as invalid values here.
      */
     private static final Map<String, Set<String>> RUNTIME_VERSIONS = Map.of(
         "PYTHON", Set.of("3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"),
@@ -106,11 +106,11 @@ public class CreateRoutineHandler implements CommandHandler {
      * pass the invalid-value rule and are refused afterwards by their own sentence.
      */
     private static final Map<String, Set<String>> DECOMMISSIONED_RUNTIMES = Map.of(
-        "PYTHON", Set.of("3.8", "3.9"));
+        "PYTHON", Set.of("3.8", "3.9", "3.10"));
 
     /** The lowest RUNTIME_VERSION a language still runs, as the decommissioned sentence names it. */
     private static final Map<String, String> LOWEST_RUNTIME = Map.of(
-        "PYTHON", "3.10");
+        "PYTHON", "3.11");
 
     /** A LANGUAGE as the decommissioned sentence spells it. */
     private static final Map<String, String> RUNTIME_LANGUAGE_NAMES = Map.of(

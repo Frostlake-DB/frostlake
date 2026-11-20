@@ -94,7 +94,7 @@ public class ShowInDatabaseTest extends BaseDatabaseTest {
     }
 
     @Test
-    public void showProceduresInDatabaseSpansSchemasAndOmitsBuiltins() {
+    public void showProceduresInDatabaseSpansSchemasAndListsBuiltins() {
         engine.execute("CREATE SCHEMA s1");
         engine.execute("CREATE SCHEMA s2");
         engine.execute("""
@@ -108,12 +108,12 @@ public class ShowInDatabaseTest extends BaseDatabaseTest {
         final Set<String> all = names(rs);
         assertTrue(all.contains("P1"), all.toString());
         assertTrue(all.contains("P2"), all.toString());
-        // The listing appends the built-in catalog as SHOW FUNCTIONS IN DATABASE does; every row is
-        // is_builtin = N only because Frostlake dispatches no built-in PROCEDURES (a real account ships
-        // 32 and answers 34 here, live-verified with these same two user procedures).
+        // The listing holds the built-in catalog as SHOW FUNCTIONS IN DATABASE does: the one built-in procedure
+        // Frostlake answers a CALL of, where a real account ships more (live-verified).
         Assumptions.assumeFalse(isLiveSnowflake(), LISTS_EVERY_ROW);
         for (final Row row : rs.getRows()) {
-            assertEquals("N", row.getValue(IS_BUILTIN), "IN DATABASE should list only user procedures");
+            assertEquals("SYSTEM$SEND_EMAIL".equals(row.getValue(1)) ? "Y" : "N", row.getValue(IS_BUILTIN),
+                "IN DATABASE lists the user procedures and the built-in ones the engine runs");
         }
     }
 

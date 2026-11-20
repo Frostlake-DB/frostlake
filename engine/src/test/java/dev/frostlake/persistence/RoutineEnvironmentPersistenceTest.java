@@ -21,6 +21,7 @@ import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.Procedure;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Task;
+import dev.frostlake.storage.Row;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,7 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * What a routine is given to run with survives a save and a reload - its packages, artifact repository, target
- * path and secrets, and a procedure's restricted caller's rights - and so do the contacts and tags of a task.
+ * path and secrets, and a procedure's restricted caller's rights - and so do the contacts and tags of a task and
+ * the parameters an ALTER set on a routine or a pipe.
  */
 public class RoutineEnvironmentPersistenceTest {
 
@@ -100,6 +102,35 @@ public class RoutineEnvironmentPersistenceTest {
         final Procedure procedure = schema(second).getProcedureOverloads("RE_PROC").get(0);
         assertEquals("RESTRICTED CALLER", procedure.getExecuteAs());
         second.shutdown();
+    }
+
+    @Test
+    public void theParametersSetOnARoutineAndAPipeSurviveAReload() {
+        final DatabaseEngine first = open(true);
+        first.execute("CREATE FUNCTION rp_f(x FLOAT) RETURNS FLOAT AS 'x'");
+        first.execute("CREATE PROCEDURE rp_p(x VARCHAR) RETURNS VARCHAR LANGUAGE SQL AS 'BEGIN RETURN x; END;'");
+        first.execute("CREATE TABLE rp_t(id INT)");
+        first.execute("CREATE STAGE rp_st");
+        first.execute("CREATE PIPE rp_pipe AS COPY INTO rp_t FROM @rp_st");
+        first.execute("ALTER FUNCTION rp_f(FLOAT) SET LOG_LEVEL = 'INFO'");
+        first.execute("ALTER PROCEDURE rp_p(VARCHAR) SET AUTO_EVENT_LOGGING = 'ALL'");
+        first.execute("ALTER PIPE rp_pipe SET LOG_EVENT_LEVEL = 'WARN'");
+        first.shutdown();
+
+        final DatabaseEngine second = open(false);
+        assertEquals("LOG_LEVEL|INFO|FUNCTION",
+            parameter(second, "SHOW PARAMETERS LIKE 'LOG_LEVEL' IN FUNCTION rp_f(FLOAT)"));
+        assertEquals("AUTO_EVENT_LOGGING|ALL|PROCEDURE",
+            parameter(second, "SHOW PARAMETERS LIKE 'AUTO_EVENT_LOGGING' IN PROCEDURE rp_p(VARCHAR)"));
+        assertEquals("LOG_EVENT_LEVEL|WARN|PIPE",
+            parameter(second, "SHOW PARAMETERS LIKE 'LOG_EVENT_LEVEL' IN PIPE rp_pipe"));
+        second.shutdown();
+    }
+
+    /** The one row a parameter listing answers: its key, value and level. */
+    private static String parameter(final DatabaseEngine engine, final String sql) {
+        final Row row = engine.executeQuery(sql).getRows().get(0);
+        return row.getValue(0) + "|" + row.getValue(1) + "|" + row.getValue(3);
     }
 
     @Test

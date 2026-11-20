@@ -71,10 +71,11 @@ final class StageListing {
      * @return the listing
      */
     ResultSet list(final FrostlakeParser.ListStatementContext ctx) {
-        final FrostlakeParser.StageRefContext stage = ctx.stageRef();
+        final StageLocation listed = StageLocation.of(ctx.stageLocation());
+        final FrostlakeParser.StageRefContext stage = listed.stage();
         StageReferenceShape.refuseEmptyParts(stage, executor.getCatalog());
         executor.requireStagePrivilege(null, stage);
-        final String prefix = stage.stagePath() == null ? "" : stage.stagePath().getText().substring(1);
+        final String prefix = listed.path().isEmpty() ? "" : listed.path().substring(1);
         final String shownStage;
         final String location;
         // An internal stage keeps its files encrypted, and a listing shows the size they are stored at; one
@@ -114,7 +115,7 @@ final class StageListing {
                 // The stage path that NAMED the file: a '.' or '..' segment is encoded on disk so it
                 // cannot climb out of the stage, and a listing shows what its writer wrote.
                 final String relative =
-                    StagePathSegments.written(root.relativize(file).toString().replace('\\', '/'));
+                    StagePathSegments.written(StagePathSegments.relativeText(root, file));
                 if (!relative.startsWith(prefix)) {
                     continue;
                 }

@@ -74,6 +74,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedOutputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
@@ -81,6 +82,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -103,14 +106,22 @@ final class CatalogSnapshotWriter {
     static void writeCatalogTo(final Path catalogPath, final Path tablesDir,
                                 final Catalog catalog, final StorageEngine storageEngine) throws IOException {
         logger.debug("Saving catalog to: {}", catalogPath);
-        final CatalogSnapshot snapshot = buildSnapshot(catalog, storageEngine, new DiskTableDataStore(tablesDir));
-        // Write to a temp file then atomically rename in, so a crash can't leave a half-written snapshot.
+        final DiskTableDataStore tableData = new DiskTableDataStore(tablesDir);
+        final CatalogSnapshot snapshot = buildSnapshot(catalog, storageEngine, tableData);
+        // The table files are forced to disk as each is written; their names are, once all are.
+        tableData.syncDirectories();
+        // Write to a temp file then atomically rename in, so a crash can't leave a half-written snapshot. Both the file
+        // and the rename are forced to disk before this returns: a write-ahead log checkpoint marks the snapshot as
+        // the place recovery starts from once it has, and truncates the log behind it.
         final Path tmp = catalogPath.resolveSibling(catalogPath.getFileName() + ".tmp");
-        try (ObjectOutputStream oos = new ObjectOutputStream(
-                new BufferedOutputStream(Files.newOutputStream(tmp)))) {
+        try (FileOutputStream file = new FileOutputStream(tmp.toFile());
+             ObjectOutputStream oos = new ObjectOutputStream(new BufferedOutputStream(file))) {
             oos.writeObject(snapshot);
+            oos.flush();
+            file.getFD().sync();
         }
         Files.move(tmp, catalogPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        DurableFiles.syncDirectory(catalogPath.toAbsolutePath().getParent());
         logger.info("Catalog saved successfully");
     }
 
@@ -286,6 +297,8 @@ final class CatalogSnapshotWriter {
             tableSnapshot.shadowed = shadowed;
             tableSnapshot.comment = table.getComment();
             tableSnapshot.lastDdlBy = table.getLastDdlBy();
+            tableSnapshot.tableId = table.getTableId();
+            tableSnapshot.cloneGroupId = table.getCloneGroupId();
             tableSnapshot.createdAt = table.getCreatedTime();
             tableSnapshot.lastDdlAt = table.getLastDdlTime();
             tableSnapshot.lastDataChange = table.getLastDataChange();
@@ -557,7 +570,8 @@ final class CatalogSnapshotWriter {
             taskSnapshot.comment = task.getComment();
             taskSnapshot.condition = task.getCondition();
             taskSnapshot.owner = task.getOwner();
-            taskSnapshot.createdAt = task.getCreatedAt();
+            taskSnapshot.createdOn = task.getCreatedAt();
+            taskSnapshot.createdAt = LocalDateTime.ofInstant(task.getCreatedAt(), ZoneId.systemDefault());
             taskSnapshot.suspendTaskAfterNumFailures = task.getSuspendTaskAfterNumFailures();
             taskSnapshot.taskAutoRetryAttempts = task.getTaskAutoRetryAttempts();
             taskSnapshot.allowOverlappingExecution = task.isAllowOverlappingExecution();
@@ -581,6 +595,9 @@ final class CatalogSnapshotWriter {
                 run.scheduledTime = execution.getScheduledTime();
                 run.startTime = execution.getStartTime();
                 run.endTime = execution.getEndTime();
+                run.scheduledAt = execution.getScheduledInstant();
+                run.startedAt = execution.getStartInstant();
+                run.endedAt = execution.getEndInstant();
                 run.state = execution.getState();
                 run.errorMessage = execution.getErrorMessage();
                 run.rowsAffected = execution.getRowsAffected();
@@ -732,6 +749,7 @@ final class CatalogSnapshotWriter {
             fnSnapshot.imports = new ArrayList<>(fn.getImports());
             fnSnapshot.environment = fn.getEnvironment().copy();
             fnSnapshot.comment = fn.getComment();
+            fnSnapshot.ownParameters = new HashMap<>(fn.getOwnParameters().entries());
             fnSnapshot.owner = fn.getOwner();
             fnSnapshot.createdAt = fn.getCreatedTime();
             fnSnapshot.lastDdlAt = fn.getLastDdlTime();
@@ -766,6 +784,7 @@ final class CatalogSnapshotWriter {
             procSnapshot.imports = new ArrayList<>(proc.getImports());
             procSnapshot.environment = proc.getEnvironment().copy();
             procSnapshot.comment = proc.getComment();
+            procSnapshot.ownParameters = new HashMap<>(proc.getOwnParameters().entries());
             procSnapshot.owner = proc.getOwner();
             procSnapshot.createdAt = proc.getCreatedTime();
             procSnapshot.lastDdlAt = proc.getLastDdlTime();
@@ -793,6 +812,7 @@ final class CatalogSnapshotWriter {
             pipeSnapshot.lastLoadedFileCount = pipe.getLastLoadedFileCount();
             pipeSnapshot.lastLoadedTime = pipe.getLastLoadedTime();
             pipeSnapshot.comment = pipe.getComment();
+            pipeSnapshot.ownParameters = new HashMap<>(pipe.getOwnParameters().entries());
             pipeSnapshot.owner = pipe.getOwner();
             pipeSnapshot.createdAt = pipe.getCreatedTime();
             pipeSnapshot.lastDdlAt = pipe.getLastDdlTime();
@@ -901,6 +921,7 @@ final class CatalogSnapshotWriter {
             tagSnapshot.createdAt = tag.getCreatedTime();
             tagSnapshot.propagate = tag.getPropagate();
             tagSnapshot.onConflict = tag.getOnConflict();
+            tagSnapshot.maskingPolicies = new ArrayList<>(tag.getMaskingPolicies());
             schemaSnapshot.tags.add(tagSnapshot);
         }
         return schemaSnapshot;

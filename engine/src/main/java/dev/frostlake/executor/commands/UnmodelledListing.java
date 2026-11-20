@@ -89,6 +89,9 @@ enum UnmodelledListing {
     DELEGATED_AUTHORIZATIONS("""
         created_on@ user_name role_name consented_roles integration_name integration_status can_switch_roles
         """, false),
+    USER_WORKLOAD_IDENTITY_METHODS("""
+        name type comment last_used@ created_on@ additional_info status
+        """, false),
     CONNECTIONS("""
         snowflake_region created_on@ account_name name comment primary replication_group external_id connection_url
         """, false),

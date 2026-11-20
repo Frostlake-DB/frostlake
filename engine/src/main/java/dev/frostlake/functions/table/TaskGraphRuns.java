@@ -36,7 +36,6 @@ import dev.frostlake.types.StringType;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -217,8 +216,8 @@ public final class TaskGraphRuns {
         tasks.addAll(TaskGraphs.descendants(schema, root, true));
         for (int i = 0; i < graphRuns.size(); i++) {
             final TaskExecution run = graphRuns.get(i);
-            final LocalDateTime start = run.getStartTime();
-            final LocalDateTime until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartTime() : null;
+            final Instant start = run.getStartInstant();
+            final Instant until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartInstant() : null;
             final int attempts = TaskGraphs.lastAttempt(schema, root, start, until);
             for (int attempt = 1; attempt <= attempts; attempt++) {
                 addAttempt(rows, root, schema, tasks, run, until, attempt, errorOnly);
@@ -227,22 +226,22 @@ public final class TaskGraphRuns {
     }
 
     private static void addAttempt(final List<Row> rows, final Task root, final Schema schema, final List<Task> tasks,
-                                   final TaskExecution graphRun, final LocalDateTime until, final int attempt,
+                                   final TaskExecution graphRun, final Instant until, final int attempt,
                                    final boolean errorOnly) {
         TaskExecution first = null;
         TaskExecution firstError = null;
         String firstErrorTask = null;
-        LocalDateTime completed = null;
+        Instant completed = null;
         for (final Task task : tasks) {
-            final TaskExecution last = TaskGraphs.lastRunWithin(task, graphRun.getStartTime(), until, attempt);
+            final TaskExecution last = TaskGraphs.lastRunWithin(task, graphRun.getStartInstant(), until, attempt);
             if (last == null) {
                 continue;
             }
             if (first == null || before(last, first)) {
                 first = last;
             }
-            if (last.getEndTime() != null && (completed == null || last.getEndTime().isAfter(completed))) {
-                completed = last.getEndTime();
+            if (last.getEndInstant() != null && (completed == null || last.getEndInstant().isAfter(completed))) {
+                completed = last.getEndInstant();
             }
             if (FAILED.equals(last.getState()) && (firstError == null || before(last, firstError))) {
                 firstError = last;
@@ -254,19 +253,20 @@ public final class TaskGraphRuns {
         }
         final String state = firstError != null ? FAILED : TaskExecutionState.SUCCEEDED.name();
         final boolean retry = attempt > 1;
-        final LocalDateTime queryStart = retry ? first.getStartTime() : graphRun.getStartTime();
+        final Instant queryStart = retry ? first.getStartInstant() : graphRun.getStartInstant();
         rows.add(row(true, root, schema, state,
             retry ? first.getScheduledFrom() : graphRun.getScheduledFrom(), firstErrorTask,
             firstError == null ? null : firstError.getErrorCode(),
             firstError == null ? null : firstError.getErrorMessage(),
-            ShowResultHelpers.createdOn(retry ? first.getScheduledTime() : graphRun.getScheduledTime()),
+            ShowResultHelpers.createdOn(retry ? first.getScheduledInstant() : graphRun.getScheduledInstant()),
             ShowResultHelpers.createdOn(queryStart), ShowResultHelpers.createdOn(completed),
-            TaskGraphs.runId(graphRun.getScheduledTime()), attempt,
+            TaskGraphs.runId(graphRun.getScheduledInstant()), attempt,
             (retry ? first : graphRun).getScheduledByUser()));
     }
 
     private static boolean before(final TaskExecution a, final TaskExecution b) {
-        return a.getStartTime() != null && b.getStartTime() != null && a.getStartTime().isBefore(b.getStartTime());
+        return a.getStartInstant() != null && b.getStartInstant() != null
+            && a.getStartInstant().isBefore(b.getStartInstant());
     }
 
     private static boolean named(final Task task, final String rootTaskName) {

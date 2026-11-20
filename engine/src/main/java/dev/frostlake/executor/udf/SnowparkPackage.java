@@ -37,6 +37,18 @@ public final class SnowparkPackage {
      * @param packages the packages a routine names, or null
      * @return whether one of them is Snowpark
      */
+    /**
+     * The Java level at which a JAR handler is denied Snowpark's classes: the routine's own where its packages do not
+     * name Snowpark, else -1 (see {@link ChildFirstUdfClassLoader}).
+     *
+     * @param packages       the packages the routine names, or null
+     * @param runtimeVersion the routine's RUNTIME_VERSION, or null
+     * @return the level, or -1
+     */
+    public static int withheldLevel(final List<String> packages, final String runtimeVersion) {
+        return isNamed(packages) ? -1 : JavaRuntimeLevel.declared(runtimeVersion);
+    }
+
     public static boolean isNamed(final List<String> packages) {
         if (packages == null) {
             return false;

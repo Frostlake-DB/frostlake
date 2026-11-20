@@ -132,6 +132,12 @@ public class CreateSecurityHandler implements CommandHandler {
             queryExecutor.requireOwnership("TAG", queryExecutor.createdNameParts(ctx), null);
             // Asked before the tag a replacement drops is gone.
             ddl.checkCreatePrivilege(Privilege.CREATE_TAG, ddl.resolveSchemaFromQualifiedName(tagName));
+            if (catalog.hasTagExact(tagName) && catalog.getTagExact(tagName).hasMaskingPolicies()) {
+                // A tag carrying a masking policy is neither dropped nor replaced (documented).
+                throw new RuntimeException(SqlCompilationError.PREFIX + " Tag "
+                    + catalog.getTagExact(tagName).getName()
+                    + " cannot be dropped/replaced as it is associated with one or more policies.");
+            }
             try { catalog.dropTagExact(tagName); } catch (final RuntimeException ignored) {}
         }
         try {
@@ -880,15 +886,24 @@ public class CreateSecurityHandler implements CommandHandler {
      * it; then the name: IF NOT EXISTS leaves a user it finds as it is, and without OR REPLACE a user that exists is
      * refused ({@code Object 'U1' already exists.}); last the checks against the new user's type, the ranges and
      * the key policy, all before anything changes, so a refused statement leaves no user behind and a refused OR
-     * REPLACE leaves the old user standing.
+     * REPLACE leaves the old user standing. The session's and the object's parameters written among the properties
+     * are judged and set as ALTER USER … SET judges and sets them (documented).
      */
     public Object handleCreateUser(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         final String userName = getText(ctx.identifier(0));
         final List<FrostlakeParser.UserPropertyContext> properties = ctx.userProperties() != null
             ? ctx.userProperties().userProperty() : new ArrayList<FrostlakeParser.UserPropertyContext>();
+        // The parameters written among the properties are read as ALTER USER … SET reads them (documented).
+        UserParameterList parameters = null;
+        if (ctx.userProperties() != null && !ctx.userProperties().sessionAssignment().isEmpty()) {
+            UserParameterList.requireParameters(ctx.userProperties().sessionAssignment());
+            parameters = new UserParameterList(properties, ctx.userProperties().sessionAssignment());
+            parameters.compile(queryExecutor);
+        }
         UserProperties.checkForm(properties);
         AccountPrivileges.requireOnAccount(queryExecutor, catalog, Privilege.CREATE_USER);
-        if (ctx.userProperties() != null && !ctx.userProperties().createdUserBypass().isEmpty()) {
+        if (ctx.userProperties() != null && !ctx.userProperties().createdUserBypass().isEmpty()
+            || parameters != null && parameters.setsBypass()) {
             // A policy bypass is the account's administrators' alone: CREATE USER u MINS_TO_BYPASS_INGRESS_POLICY = 5
             // is refused on the account, whatever the session holds (live-verified).
             throw new PrivilegeRefusal(SqlAccessControlError.insufficientPrivileges("account",
@@ -903,6 +918,9 @@ public class CreateSecurityHandler implements CommandHandler {
             throw new RuntimeException(SqlCompilationError.of("Object '" + userName + "' already exists."));
         }
         UserProperties.checkNew(properties);
+        if (parameters != null) {
+            parameters.requireTaken(catalog);
+        }
         // A network policy the list names has to exist before the user is made.
         final String networkPolicy = UserNetworkPolicy.named(catalog, properties);
         if (ctx.or_replace() != null && catalog.hasUserExact(userName)) {
@@ -914,6 +932,9 @@ public class CreateSecurityHandler implements CommandHandler {
             catalog.createUser(userName, null, null);
             UserProperties.apply(catalog.getUserExact(userName), properties);
             UserNetworkPolicy.attach(catalog, catalog.getUserExact(userName), networkPolicy);
+            if (parameters != null) {
+                parameters.apply(catalog.getUserExact(userName));
+            }
         } else {
             catalog.createUser(userName);
         }

@@ -56,6 +56,8 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  *                                                           the select list is read as the item's alias
  *   WHERE n IN (SELECT COUNT(*) FROM TABLE(…))              'SELECT', then the FROM after the first ')': the list
  *                                                           runs to the first closing bracket
+ *   SELECT (WITH q AS (SELECT 1) SELECT … FROM TABLE(…))    'WITH', then the AS after the first name, an operand of
+ *                                                           the item's value alike
  * </pre>
  *
  * A call in any other query written in brackets is refused too, its lines worked out as for the statement's own.
@@ -133,7 +135,8 @@ public final class TableFunctionSubqueryArgument {
     /**
      * The lines of a call in the FROM of a query written in brackets as a value: a select item's value, whole or an
      * operand of it, or the list of an IN. Null for a call in any other query. A select item's whole value whose list
-     * opens with no name reads on from the query's fault as the statement's own FROM does (live-verified).
+     * opens with no name reads on from the query's fault as the statement's own FROM does, and a query opening with
+     * WITH is refused at its WITH and the AS after its first name (live-verified).
      */
     private static List<String> enclosedLines(final TokenStream tokens, final ParserRuleContext reference,
                                               final ParserRuleContext subquery, final Token close,
@@ -142,12 +145,19 @@ public final class TableFunctionSubqueryArgument {
         while (node != null && !(node instanceof FrostlakeParser.SelectStatementContext)) {
             node = node.getParent();
         }
-        if (node == null || ((FrostlakeParser.SelectStatementContext) node).getStart().getType()
-                != FrostlakeLexer.SELECT) {
+        if (node == null) {
             return null;
         }
         final Token first = ((FrostlakeParser.SelectStatementContext) node).getStart();
         final ParseTree bracket = node.getParent();
+        // A query opening with WITH is read as a SELECT is in a select item's value: the WITH, then the AS after the
+        // first name, as a fault of any kind in it reads (live-verified).
+        final boolean with = first.getType() == FrostlakeLexer.WITH;
+        if (first.getType() != FrostlakeLexer.SELECT && !with
+                || with && !(bracket instanceof FrostlakeParser.ScalarSubqueryExprContext
+                    && (isWholeItem((ParserRuleContext) bracket) || inItem((ParserRuleContext) bracket)))) {
+            return null;
+        }
         final int second;
         if (bracket instanceof FrostlakeParser.ScalarSubqueryExprContext
                 && isWholeItem((ParserRuleContext) bracket)) {

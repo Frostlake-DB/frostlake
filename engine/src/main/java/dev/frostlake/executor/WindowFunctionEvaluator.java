@@ -29,6 +29,7 @@ import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FoldedValues;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
+import dev.frostlake.executor.expressions.GroupingKeys;
 import dev.frostlake.executor.expressions.IsNullExpression;
 import dev.frostlake.executor.expressions.LiteralExpression;
 import dev.frostlake.executor.expressions.LiteralType;
@@ -1332,6 +1333,14 @@ final class WindowFunctionEvaluator {
      * @param row           the row being valued
      * @param resultContext the context to supply them in
      */
+    /**
+     * The grouping set a grouped row was computed for, read through the grouped values in force (see
+     * {@link GroupedExpressionValues#groupingKeysOf}); null outside a grouped stage or for a plain GROUP BY.
+     */
+    GroupingKeys groupingKeysOf(final Row row) {
+        return state().groupedValues == null ? null : state().groupedValues.groupingKeysOf(row);
+    }
+
     void putGroupAggregateValues(final Map<String, String> calls, final Row row,
                                  final Map<String, Object> resultContext) {
         for (final Map.Entry<String, String> call : calls.entrySet()) {
@@ -1811,19 +1820,9 @@ final class WindowFunctionEvaluator {
                                              final List<Row> sortedPartition, final int position,
                                              final FrostlakeParser.OverClauseContext overClause,
                                              final Table table) {
-        final String argExpr = conditionalEventArg(funcCtx);
         readOrderKeys(sortedPartition, overClause, table);
-        final int pos = anchorOrLast(position, sortedPartition);
-        final Object[] vector = frameArgVector(sortedPartition, argExpr, table, VECTOR_MODE_EXPRESSION);
-        long count = 0L;
-        for (int i = 0; i <= pos; i++) {
-            final Object v = vector != null ? vector[i]
-                : argumentValue(argExpr, sortedPartition.get(i), table);
-            if (isTruthy(v)) {
-                count++;
-            }
-        }
-        return count;
+        return Long.valueOf(runningEventCounts(funcCtx, sortedPartition, table, false)[
+            anchorOrLast(position, sortedPartition)]);
     }
 
     /**
@@ -1849,22 +1848,48 @@ final class WindowFunctionEvaluator {
                                                final List<Row> sortedPartition, final int position,
                                                final FrostlakeParser.OverClauseContext overClause,
                                                final Table table) {
-        final String argExpr = conditionalEventArg(funcCtx);
         readOrderKeys(sortedPartition, overClause, table);
-        final int pos = anchorOrLast(position, sortedPartition);
-        final Object[] vector = frameArgVector(sortedPartition, argExpr, table, VECTOR_MODE_EXPRESSION);
+        return Long.valueOf(runningEventCounts(funcCtx, sortedPartition, table, true)[
+            anchorOrLast(position, sortedPartition)]);
+    }
+
+    /**
+     * Every row's running count of a CONDITIONAL_TRUE_EVENT or CONDITIONAL_CHANGE_EVENT call over one partition,
+     * computed in one walk on the call's first row and kept for the rest: a TRUE argument counts one, and so does a
+     * value differing from the previous row's when neither is NULL.
+     *
+     * @param funcCtx the call
+     * @param partition the sorted partition
+     * @param table the relation the argument reads
+     * @param change whether the call counts changes rather than TRUE values
+     * @return each row's count, by its place in the partition
+     */
+    private long[] runningEventCounts(final FrostlakeParser.FunctionCallExprContext funcCtx,
+                                      final List<Row> partition, final Table table, final boolean change) {
+        final Map<Long, Object> answers = frameAnswersFor(partition, funcCtx);
+        final Object known = answers.get(RUNNING_COUNTS);
+        if (known != null) {
+            return (long[]) known;
+        }
+        final String argExpr = conditionalEventArg(funcCtx);
+        final Object[] vector = frameArgVector(partition, argExpr, table, VECTOR_MODE_EXPRESSION);
+        final long[] counts = new long[partition.size()];
         long count = 0L;
-        Object prev = sortedPartition.isEmpty() ? null
-            : (vector != null ? vector[0] : argumentValue(argExpr, sortedPartition.get(0), table));
-        for (int i = 1; i <= pos; i++) {
-            final Object cur = vector != null ? vector[i]
-                : argumentValue(argExpr, sortedPartition.get(i), table);
-            if (prev != null && cur != null && ValueComparisons.compareValues(cur, prev) != 0) {
+        Object prev = null;
+        for (int i = 0; i < counts.length; i++) {
+            final Object v = vector != null ? vector[i] : argumentValue(argExpr, partition.get(i), table);
+            if (change) {
+                if (i > 0 && prev != null && v != null && ValueComparisons.compareValues(v, prev) != 0) {
+                    count++;
+                }
+                prev = v;
+            } else if (isTruthy(v)) {
                 count++;
             }
-            prev = cur;
+            counts[i] = count;
         }
-        return count;
+        answers.put(RUNNING_COUNTS, counts);
+        return counts;
     }
 
     /** The single argument expression text of a CONDITIONAL_*_EVENT window call. */
@@ -2424,6 +2449,7 @@ final class WindowFunctionEvaluator {
         frameSummaries.get().clear();
         partitionOrderCache.get().clear();
         frameArgVectors.get().clear();
+        valueArgCells.get().clear();
         argumentFactMemo.get().clear();
         windowKeyRules.get().clear();
         state().ratioDeclaredScales.clear();
@@ -2435,6 +2461,9 @@ final class WindowFunctionEvaluator {
     // every frame row of every output row — the quadratic expression walks behind a running
     // SUM(x) OVER (ORDER BY …). Cells hold the EXACT objects the row path would produce (no
     // canonicalization); the function-dependent JSON-null mapping stays at read time.
+    /** The key a conditional event call's running counts are kept under among its frame answers. */
+    private static final Long RUNNING_COUNTS = Long.valueOf(Long.MIN_VALUE);
+
     private final ThreadLocal<Map<List<Row>, Map<String, Object[]>>> frameArgVectors =
         new ThreadLocal<Map<List<Row>, Map<String, Object[]>>>() {
             @Override
@@ -2453,6 +2482,49 @@ final class WindowFunctionEvaluator {
                 return new HashMap<String, Boolean>();
             }
         };
+
+    // Per-batch, per-thread: each sorted partition's argument cells for the value functions (FIRST_VALUE,
+    // LAST_VALUE, NTH_VALUE, LAG, LEAD), keyed by the partition list's identity and then by the argument's text.
+    private final ThreadLocal<Map<List<Row>, Map<String, WindowValueCells>>> valueArgCells =
+        new ThreadLocal<Map<List<Row>, Map<String, WindowValueCells>>>() {
+            @Override
+            protected Map<List<Row>, Map<String, WindowValueCells>> initialValue() {
+                return new IdentityHashMap<List<Row>, Map<String, WindowValueCells>>();
+            }
+        };
+
+    /**
+     * A value function's argument over one sorted partition, evaluated once per row on first use and kept for the
+     * batch, or null when the frame-vector path is off. Every row's argument is evaluated, those no frame and no step
+     * reaches too, as the account evaluates it: {@code LAG(1 / (id - 5)) OVER (ORDER BY id)} over ids 1 to 5 fails
+     * on the division by zero although no row reads the last one, and {@code FIRST_VALUE(RANDOM()) OVER (ORDER BY id)}
+     * is one value on every row (both live-verified).
+     */
+    private WindowValueCells valueCellsFor(final List<Row> partition, final String argExpr, final Table table) {
+        if (argExpr == null || !frameVectorsEnabled()) {
+            return null;
+        }
+        final Map<List<Row>, Map<String, WindowValueCells>> byPartition = valueArgCells.get();
+        Map<String, WindowValueCells> byArg = byPartition.get(partition);
+        if (byArg == null) {
+            byArg = new HashMap<String, WindowValueCells>();
+            byPartition.put(partition, byArg);
+        }
+        WindowValueCells cells = byArg.get(argExpr);
+        if (cells == null) {
+            final Object[] safeVector = frameArgVector(partition, argExpr, table, VECTOR_MODE_ORDER_KEY);
+            Object[] values = safeVector;
+            if (values == null) {
+                values = new Object[partition.size()];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = extractColumnValue(partition.get(i), argExpr, table);
+                }
+            }
+            cells = new WindowValueCells(values);
+            byArg.put(argExpr, cells);
+        }
+        return cells;
+    }
 
     /** Argument-vector mode: cells evaluated like ORDER BY keys (a select alias or a grouped value resolves). */
     private static final String VECTOR_MODE_ORDER_KEY = "K:";
@@ -2737,10 +2809,14 @@ final class WindowFunctionEvaluator {
 
         // Calculate the LAG position (backward)
         final int lagPosition = currentPosition - offset;
+        final WindowValueCells cells = valueCellsFor(sortedRows, columnExpr, table);
 
         // If out of bounds, return default value
         if (lagPosition < 0 || lagPosition >= sortedRows.size()) {
             return FoldedValues.presented(defaultValue, declared);
+        }
+        if (cells != null) {
+            return FoldedValues.presented(cells.at(lagPosition), declared);
         }
 
         // Get the row at LAG position
@@ -2800,10 +2876,14 @@ final class WindowFunctionEvaluator {
 
         // Calculate the LEAD position (forward)
         final int leadPosition = currentPosition + offset;
+        final WindowValueCells cells = valueCellsFor(sortedRows, columnExpr, table);
 
         // If out of bounds, return default value
         if (leadPosition < 0 || leadPosition >= sortedRows.size()) {
             return FoldedValues.presented(defaultValue, declared);
+        }
+        if (cells != null) {
+            return FoldedValues.presented(cells.at(leadPosition), declared);
         }
 
         // Get the row at LEAD position
@@ -2829,6 +2909,10 @@ final class WindowFunctionEvaluator {
      */
     private Object nthNonNullAway(final List<Row> sortedRows, final int from, final int direction,
                                   final int count, final String columnExpr, final Table table) {
+        final WindowValueCells cells = valueCellsFor(sortedRows, columnExpr, table);
+        if (cells != null) {
+            return cells.nthNonNullAway(from, direction, count);
+        }
         final Object[] vector = frameArgVector(sortedRows, columnExpr, table, VECTOR_MODE_ORDER_KEY);
         int remaining = count;
         for (int i = from + direction; i >= 0 && i < sortedRows.size(); i += direction) {
@@ -3024,6 +3108,13 @@ final class WindowFunctionEvaluator {
                                       final List<Row> partition, final int from, final int to, final Table table) {
         final String colExpr = !windowArgs(funcCtx).isEmpty()
             ? ParseTreeText.getOriginalText(windowArgs(funcCtx).get(0)) : null;
+        final WindowValueCells cells = valueCellsFor(partition, colExpr, table);
+        if (cells != null) {
+            if (from > to) {
+                return null;
+            }
+            return ignoreNulls(funcCtx) ? cells.firstNonNull(from, to) : cells.at(from);
+        }
         return WindowFunctionHelper.firstValue(
             frameValues(partition, from, to, colExpr, table), ignoreNulls(funcCtx));
     }
@@ -3043,6 +3134,13 @@ final class WindowFunctionEvaluator {
                                      final List<Row> partition, final int from, final int to, final Table table) {
         final String colExpr = !windowArgs(funcCtx).isEmpty()
             ? ParseTreeText.getOriginalText(windowArgs(funcCtx).get(0)) : null;
+        final WindowValueCells cells = valueCellsFor(partition, colExpr, table);
+        if (cells != null) {
+            if (from > to) {
+                return null;
+            }
+            return ignoreNulls(funcCtx) ? cells.lastNonNull(from, to) : cells.at(to);
+        }
         return WindowFunctionHelper.lastValue(
             frameValues(partition, from, to, colExpr, table), ignoreNulls(funcCtx));
     }
@@ -3071,6 +3169,16 @@ final class WindowFunctionEvaluator {
         if (n < 0) {
             throw new RuntimeException("Invalid parameter value: " + n
                 + ". Reason: Second argument of the function must be a positive integer.");
+        }
+        final WindowValueCells cells = valueCellsFor(partition, colExpr, table);
+        if (cells != null) {
+            if (ignoreNulls(funcCtx)) {
+                return cells.nthNonNull(from, to, n, funcCtx.LAST() != null);
+            }
+            if (n <= 0 || n > to - from + 1) {
+                return null;
+            }
+            return cells.at(funcCtx.LAST() != null ? to - n + 1 : from + n - 1);
         }
         List<Object> vals = frameValues(partition, from, to, colExpr, table);
         if (ignoreNulls(funcCtx)) {
@@ -4308,6 +4416,12 @@ final class WindowFunctionEvaluator {
                 || acc instanceof PairStatisticAccumulator && secondExpr != null
                 && NumericType.isDecfloat(declaredArgumentType(secondExpr, table));
             ((DecfloatAwareAccumulator) acc).setDecfloatArgument(decfloat);
+            if (acc instanceof RegrAccumulator && secondExpr != null) {
+                // REGR_SXY and REGR_R2 read a side declared an exact NUMBER exactly.
+                ((RegrAccumulator) acc).setExactArguments(
+                    NumericType.isExactNumber(declaredArgumentType(argExpr, table)),
+                    NumericType.isExactNumber(declaredArgumentType(secondExpr, table)));
+            }
             final boolean partitioned = funcCtx.overClause() != null
                 && funcCtx.overClause().partitionByClause() != null;
             if (acc instanceof PercentileContAccumulator) {
@@ -4344,7 +4458,15 @@ final class WindowFunctionEvaluator {
             && (acc instanceof MaxByMinByAccumulator || acc instanceof ObjectAggAccumulator
                 || acc instanceof CorrAccumulator || acc instanceof CovarAccumulator
                 || acc instanceof RegrAccumulator);
-        final Set<Object> seen = funcCtx.DISTINCT() != null ? new HashSet<>() : null;
+        // The counted MAX_BY / MIN_BY answers the ARRAY of the whole partition's best values, as the grouped call
+        // does, and its DISTINCT drops a repeated (value, key) pair rather than a repeated value (live-verified).
+        final boolean counted = acc instanceof MaxByMinByAccumulator && args.size() > 2;
+        if (counted) {
+            ((MaxByMinByAccumulator) acc).setLimit(
+                MaxByCountRule.count(ParseTreeText.getOriginalText(args.get(2))));
+        }
+        final Set<Object> seen = funcCtx.DISTINCT() != null && !counted ? new HashSet<>() : null;
+        final Set<Object> seenPairs = funcCtx.DISTINCT() != null && counted ? new HashSet<>() : null;
         for (final Row r : fed) {
             // Same JSON-null rule as the grouped path: a VARIANT JSON null is missing input for a
             // value-computing aggregate (live: COUNT ignores it, SUM over {JSON null, 3}
@@ -4358,6 +4480,9 @@ final class WindowFunctionEvaluator {
             if (pairFed) {
                 final Object second = extractColumnValue(r, secondExpr, table);
                 if (acc instanceof MaxByMinByAccumulator) {
+                    if (seenPairs != null && !seenPairs.add(MaxByCountRule.distinctPair(v, second))) {
+                        continue;
+                    }
                     ((MaxByMinByAccumulator) acc).accumulate(v, second);
                 } else if (acc instanceof ObjectAggAccumulator) {
                     ((ObjectAggAccumulator) acc).accumulate(v, second);
@@ -4373,7 +4498,7 @@ final class WindowFunctionEvaluator {
                     } else if (acc instanceof CovarAccumulator) {
                         ((CovarAccumulator) acc).accumulate(dy, dx);
                     } else {
-                        ((RegrAccumulator) acc).accumulate(dy, dx);
+                        ((RegrAccumulator) acc).accumulate(dy, dx, v, second);
                     }
                 }
             } else {

@@ -234,7 +234,9 @@ public final class ParameterReferences {
                 ((FrostlakeParser.QualifiedNameExprContext) node).qualifiedName();
             if (name.getChildCount() == 1) {
                 final String[] parts = SqlIdentifiers.canonicalTextParts(name.getText());
-                final int which = parts.length == 1 ? names.indexOf(parts[0]) : -1;
+                // Of parameters whose names fold alike, ("a" INT, "A" INT), the last declared is the one read
+                // (live-verified).
+                final int which = parts.length == 1 ? names.lastIndexOf(parts[0]) : -1;
                 if (which >= 0) {
                     found.add(new int[] {name.getStart().getStartIndex(), name.getStop().getStopIndex() + 1, which});
                 }

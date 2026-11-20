@@ -17,12 +17,18 @@
 package dev.frostlake.metastore.model;
 
 import dev.frostlake.task.TaskTrigger;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
+/**
+ * One run of a task. Its stamps are instants, so a run in the repeated hour of a fall-back night keeps its own offset;
+ * their views on the host's wall clock are what a snapshot also holds, for a reader that predates the instants.
+ */
 public class TaskExecution {
-    private final LocalDateTime scheduledTime;
-    private final LocalDateTime startTime;
-    private final LocalDateTime endTime;
+    private final Instant scheduledAt;
+    private final Instant startedAt;
+    private final Instant endedAt;
     private final TaskExecutionState state;
     private final String errorMessage;
     private final int rowsAffected;
@@ -37,46 +43,24 @@ public class TaskExecution {
     /** The user the run was scheduled by: who ran EXECUTE TASK, or who resumed the task. */
     private String scheduledByUser;
 
-    public TaskExecution(final LocalDateTime scheduledTime, final LocalDateTime startTime,
-                       final LocalDateTime endTime, final TaskExecutionState state, final String errorMessage, final int rowsAffected) {
-        this(scheduledTime, startTime, endTime, state, errorMessage, rowsAffected, TaskTrigger.SCHEDULE);
-    }
-
     /**
-     * The same, recording what started the run.
+     * A run stamped by instants.
      *
-     * @param scheduledTime the time the run was scheduled for
-     * @param startTime     when it began
-     * @param endTime       when it ended
-     * @param state         its outcome
-     * @param errorMessage  the failure's message, or null
-     * @param rowsAffected  the rows its body wrote
-     * @param trigger       what started it
+     * @param scheduledAt  the instant the run was scheduled for
+     * @param startedAt    when it began
+     * @param endedAt      when it ended, or null while it runs
+     * @param state        its outcome
+     * @param errorMessage the failure's message, or null
+     * @param rowsAffected the rows its body wrote
+     * @param trigger      what started it
+     * @param attempt      the attempt of its graph run: 1 for the run itself, one more for each retry
      */
-    public TaskExecution(final LocalDateTime scheduledTime, final LocalDateTime startTime,
-                       final LocalDateTime endTime, final TaskExecutionState state, final String errorMessage,
-                       final int rowsAffected, final TaskTrigger trigger) {
-        this(scheduledTime, startTime, endTime, state, errorMessage, rowsAffected, trigger, 1);
-    }
-
-    /**
-     * The same, recording which attempt of its graph run the run belongs to.
-     *
-     * @param scheduledTime the time the run was scheduled for
-     * @param startTime     when it began
-     * @param endTime       when it ended
-     * @param state         its outcome
-     * @param errorMessage  the failure's message, or null
-     * @param rowsAffected  the rows its body wrote
-     * @param trigger       what started it
-     * @param attempt       the attempt of its graph run: 1 for the run itself, one more for each retry
-     */
-    public TaskExecution(final LocalDateTime scheduledTime, final LocalDateTime startTime,
-                       final LocalDateTime endTime, final TaskExecutionState state, final String errorMessage,
-                       final int rowsAffected, final TaskTrigger trigger, final int attempt) {
-        this.scheduledTime = scheduledTime;
-        this.startTime = startTime;
-        this.endTime = endTime;
+    public TaskExecution(final Instant scheduledAt, final Instant startedAt, final Instant endedAt,
+                         final TaskExecutionState state, final String errorMessage, final int rowsAffected,
+                         final TaskTrigger trigger, final int attempt) {
+        this.scheduledAt = scheduledAt;
+        this.startedAt = startedAt;
+        this.endedAt = endedAt;
         this.state = state;
         this.errorMessage = errorMessage;
         this.rowsAffected = rowsAffected;
@@ -146,16 +130,38 @@ public class TaskExecution {
         return scheduledFrom;
     }
 
+    /** The instant the run was scheduled for, on the host's wall clock. */
     public LocalDateTime getScheduledTime() {
-        return scheduledTime;
+        return wallClock(scheduledAt);
     }
 
+    /** When the run began, on the host's wall clock. */
     public LocalDateTime getStartTime() {
-        return startTime;
+        return wallClock(startedAt);
     }
 
+    /** When the run ended, on the host's wall clock, or null while it runs. */
     public LocalDateTime getEndTime() {
-        return endTime;
+        return wallClock(endedAt);
+    }
+
+    /** The instant the run was scheduled for. */
+    public Instant getScheduledInstant() {
+        return scheduledAt;
+    }
+
+    /** The instant the run began. */
+    public Instant getStartInstant() {
+        return startedAt;
+    }
+
+    /** The instant the run ended, or null while it runs. */
+    public Instant getEndInstant() {
+        return endedAt;
+    }
+
+    private static LocalDateTime wallClock(final Instant instant) {
+        return instant == null ? null : LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
     }
 
     public String getState() {

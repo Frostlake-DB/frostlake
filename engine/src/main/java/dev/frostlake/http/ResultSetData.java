@@ -104,10 +104,11 @@ public class ResultSetData {
                 colData.setPrecision(Integer.valueOf(0));
                 colData.setScale(Integer.valueOf(((DateTimeType) col.getDataType()).getPrecision()));
             }
-            // The field means "KNOWN to accept NULL", and is ALWAYS sent: a NOT NULL column, an
-            // expression and a literal all send false, which is what the driver reports as
-            // columnNoNulls. Absent therefore means only one thing — a server predating the field.
-            colData.setNullable(Boolean.valueOf(col.isNullabilityKnown() && col.isNullable()));
+            // The field says whether the column can hold NULL, and is ALWAYS sent: a NOT NULL column, an
+            // expression over one and a non-NULL literal send false, which the driver reports as
+            // columnNoNulls; a NULL literal or an expression over a nullable column sends true. Absent
+            // therefore means only one thing — a server predating the field.
+            colData.setNullable(Boolean.valueOf(col.isDescribedNullable()));
             // A text or binary column's length, as the account's driver reports it; every other family
             // leaves the field out.
             colData.setLength(ColumnLengths.of(col.getDataType()));

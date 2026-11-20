@@ -232,9 +232,11 @@ public abstract class AbstractFrostlakeConnection implements Connection {
         throw new SQLFeatureNotSupportedException();
     }
 
+    /** A CLOB that starts empty, to be written and then bound with {@code setClob}. */
     @Override
     public Clob createClob() throws SQLException {
-        throw new SQLFeatureNotSupportedException();
+        checkClosed();
+        return new FrostlakeClob();
     }
 
     @Override

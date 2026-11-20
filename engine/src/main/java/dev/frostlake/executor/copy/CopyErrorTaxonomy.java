@@ -22,7 +22,8 @@ package dev.frostlake.executor.copy;
  * {@code conversion / 100038 / 22018}; a record whose field count misses the table is
  * {@code parsing / 22000} with code 100080 (short or long record) or 100068 (end of record reached
  * mid-column, the blank-line case); a FILES entry the stage does not hold is
- * {@code other / 100112 / 22000}. Families not yet measured ride the conversion triple.
+ * {@code other / 100112 / 22000}; a malformed JSON record carries the code and SQLSTATE a staged-file query
+ * refuses it with, {@code parsing / 100069 / 22P02} (the category not yet measured). Families not yet measured ride the conversion triple.
  */
 public final class CopyErrorTaxonomy {
 
@@ -43,6 +44,11 @@ public final class CopyErrorTaxonomy {
             return new CopyErrorTaxonomy("parsing", endOfRecord ? 100068 : 100080, "22000");
         }
         return new CopyErrorTaxonomy("conversion", 100038, "22018");
+    }
+
+    /** The triple for a JSON file's malformed record, the code and SQLSTATE a staged-file query refuses it with. */
+    public static CopyErrorTaxonomy jsonParsing() {
+        return new CopyErrorTaxonomy("parsing", 100069, "22P02");
     }
 
     /** The triple for a {@code FILES = (…)} entry the stage does not hold. */

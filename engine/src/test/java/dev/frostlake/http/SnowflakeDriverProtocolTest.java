@@ -700,6 +700,113 @@ public class SnowflakeDriverProtocolTest {
         }
     }
     @Test
+    public void anAsynchronousTextOfSeveralStatementsIsFollowedByItsId() throws Exception {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement();
+             Statement other = connection.createStatement()) {
+            final SnowflakeConnection snowflake = connection.unwrap(SnowflakeConnection.class);
+            statement.unwrap(SnowflakeStatement.class).setParameter("MULTI_STATEMENT_COUNT", 2);
+            final ResultSet async = statement.unwrap(SnowflakeStatement.class).executeAsyncQuery("select 11; select 22");
+            final String asyncId = async.unwrap(SnowflakeResultSet.class).getQueryID();
+            QueryStatus status = snowflake.getQueryStatus(asyncId);
+            for (int i = 0; i < 300 && status.isStillRunning(); i++) {
+                Thread.sleep(20);
+                status = snowflake.getQueryStatus(asyncId);
+            }
+            // The text runs as one request under the ID the driver was told, the parent of its statements, as the
+            // account runs it (live-verified).
+            assertEquals("SUCCESS", status.getName());
+            assertEquals("select 11; select 22", status.getSqlText());
+            final String[] children = snowflake.getChildQueryIds(asyncId);
+            assertEquals(2, children.length);
+            assertEquals(List.of("11"), rows(snowflake.createResultSet(children[0])));
+            assertEquals(List.of("22"), rows(snowflake.createResultSet(children[1])));
+            assertEquals(List.of("Multiple statements executed successfully."),
+                rows(snowflake.createResultSet(asyncId)));
+            assertEquals(List.of("select 11; select 22|SUCCESS"), rows(other.executeQuery(
+                "SELECT query_text, execution_status FROM TABLE(information_schema.query_history_by_session()) "
+                    + "WHERE query_id = '" + asyncId + "'")));
+            // The driver reads the async result set with RESULT_SCAN on the statement that still asks for two.
+            final SQLException counted = assertThrows(SQLException.class, new Executable() {
+                @Override
+                public void execute() throws SQLException {
+                    async.next();
+                }
+            });
+            assertEquals(8, counted.getErrorCode());
+            // A single statement started asynchronously is its own only child.
+            final ResultSet single = other.unwrap(SnowflakeStatement.class).executeAsyncQuery("SELECT 5");
+            assertEquals(List.of("5"), rows(single));
+            final String singleId = single.unwrap(SnowflakeResultSet.class).getQueryID();
+            assertArrayEquals(new String[] {singleId}, snowflake.getChildQueryIds(singleId));
+        }
+    }
+
+    @Test
+    public void aLoginNamingARoleTheSessionCannotTakeIsRefused() throws SQLException {
+        try (Connection connection = connect(null);
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE OR REPLACE ROLE sfp_ungranted");
+        }
+        // Refused at login, the role named as the account names it, as the account refuses it (live-verified for a
+        // role that does not exist); a role that exists but is not the user's is refused alike.
+        for (final String[] role : new String[][] {{"no_such_role", "NO_SUCH_ROLE"}, {"\"Mixed Role\"", "Mixed Role"},
+                {"sfp_ungranted", "SFP_UNGRANTED"}}) {
+            final SQLException refused = assertThrows(SQLException.class, new Executable() {
+                @Override
+                public void execute() throws SQLException {
+                    connectAs(role[0]).close();
+                }
+            });
+            assertEquals(390189, refused.getErrorCode(), refused.getMessage());
+            assertEquals("08001", refused.getSQLState());
+            assertEquals("Role '" + role[1] + "' specified in the connect string does not exist or not authorized. "
+                + "Contact your local system administrator, or attempt to login with another role, e.g. PUBLIC.",
+                refused.getMessage());
+        }
+    }
+
+    private static Connection connectAs(final String role) throws SQLException {
+        final Properties properties = new Properties();
+        properties.put("user", "any_user");
+        properties.put("password", "any_password");
+        properties.put("disablePlatformDetection", "true");
+        properties.put("role", role);
+        return DriverManager.getConnection(url, properties);
+    }
+
+    @Test
+    public void theDriverIsToldTheRoleTheSessionRunsAs() throws SQLException {
+        try (Connection connection = connectAs("public");
+             Statement statement = connection.createStatement()) {
+            final SnowflakeConnection snowflake = connection.unwrap(SnowflakeConnection.class);
+            assertEquals("PUBLIC", snowflake.getRole());
+            assertEquals(List.of("PUBLIC"), rows(statement.executeQuery("SELECT CURRENT_ROLE()")));
+        }
+        try (Connection connection = connect(null);
+             Statement statement = connection.createStatement()) {
+            final SnowflakeConnection snowflake = connection.unwrap(SnowflakeConnection.class);
+            // With no role named, the session's own; each statement tells the role it leaves the session in.
+            assertEquals(rows(statement.executeQuery("SELECT CURRENT_ROLE()")), List.of(snowflake.getRole()));
+            statement.execute("USE ROLE PUBLIC");
+            assertEquals("PUBLIC", snowflake.getRole());
+        }
+    }
+
+    @Test
+    public void getFunctionsReadsEveryRowTheListingAnswers() throws SQLException {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA s1");
+            statement.execute("CREATE FUNCTION s1.f1() RETURNS INT AS '1'");
+            // The driver matches each listed row's schema name, a built-in's empty one included.
+            try (ResultSet functions = connection.getMetaData().getFunctions("SFP_DB", "S1", "%")) {
+                assertEquals(List.of("SFP_DB|S1|F1|user-defined function|1|F1"), rows(functions));
+            }
+        }
+    }
+
+    @Test
     public void vectorsIntervalsAndStructuredValuesReadAsOnTheAccount() throws SQLException {
         try (Connection connection = connect("sfp_db");
              Statement statement = connection.createStatement()) {

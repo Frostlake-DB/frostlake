@@ -64,6 +64,32 @@ final class SendEmailProcedure {
     }
 
     /**
+     * The procedure's overloads as SHOW PROCEDURES lists them, one for each count of arguments it takes, every
+     * argument a text and the answer a BOOLEAN (live-verified).
+     *
+     * @return each overload's argument count, fewest first
+     */
+    static List<Integer> listedArgumentCounts() {
+        final List<Integer> counts = new ArrayList<>();
+        for (int count = FEWEST; count <= MOST; count++) {
+            counts.add(Integer.valueOf(count));
+        }
+        return counts;
+    }
+
+    /**
+     * @param argumentCount an overload's argument count
+     * @return the overload's signature as SHOW PROCEDURES prints it
+     */
+    static String listedSignature(final int argumentCount) {
+        final StringBuilder signature = new StringBuilder(NAME).append('(');
+        for (int i = 0; i < argumentCount; i++) {
+            signature.append(i == 0 ? "VARCHAR" : ", VARCHAR");
+        }
+        return signature.append(") RETURN BOOLEAN").toString();
+    }
+
+    /**
      * Whether a CALL names the procedure with positional arguments only, which is the form this answers.
      *
      * @param ctx the CALL

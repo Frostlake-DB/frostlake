@@ -49,6 +49,7 @@ import dev.frostlake.executor.udf.JavaHandlerInstance;
 import dev.frostlake.executor.udf.JavaHandlerInstances;
 import dev.frostlake.executor.udf.JavaHandlerMethods;
 import dev.frostlake.executor.udf.JavaRuntimeLevel;
+import dev.frostlake.executor.udf.SnowparkPackage;
 import dev.frostlake.executor.udf.StatementHandlerStates;
 import dev.frostlake.executor.udf.UdfRuntimes;
 import dev.frostlake.functions.FunctionRegistry;
@@ -1155,15 +1156,19 @@ final class UdfInvoker {
      */
     private Class<?> importedClass(final Function function, final String className, final List<String> imports,
                                    final S3PathResolver s3Resolver) {
+        // A handler whose routine's packages do not name Snowpark cannot read it (live-verified).
+        final int withheld = SnowparkPackage.withheldLevel(function.getEnvironment().getPackages(),
+            function.getRuntimeVersion());
         final AutoCloseable kept = StatementHandlerStates.state(function, JAR_HANDLER_CLASS,
             new HandlerStateFactory() {
                 @Override
                 public AutoCloseable create() {
-                    return new JavaHandlerClass(JarHandlerLoader.loadAnew(imports, className, catalog, s3Resolver));
+                    return new JavaHandlerClass(JarHandlerLoader.loadAnew(imports, className, catalog, s3Resolver,
+                        withheld));
                 }
             });
         return kept != null ? ((JavaHandlerClass) kept).handled()
-            : JarHandlerLoader.load(imports, className, catalog, s3Resolver);
+            : JarHandlerLoader.load(imports, className, catalog, s3Resolver, withheld);
     }
 
     /**

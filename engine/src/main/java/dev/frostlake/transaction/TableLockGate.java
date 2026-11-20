@@ -84,6 +84,28 @@ public final class TableLockGate {
     }
 
     /**
+     * Sleeps a while with the engine's lock given up, as a wait for a lock does, where the request running on this
+     * thread may give it up: another session's statements run meanwhile, one that lists or cancels this one among
+     * them. Elsewhere the thread sleeps holding it.
+     *
+     * @param millis how long
+     * @throws InterruptedException when the thread is interrupted
+     */
+    public static void pauseReleased(final long millis) throws InterruptedException {
+        final EngineLockRelease release = RELEASES.get();
+        if (release == null) {
+            Thread.sleep(millis);
+            return;
+        }
+        release.release();
+        try {
+            release.pause(millis);
+        } finally {
+            release.reacquire();
+        }
+    }
+
+    /**
      * Refuses to let the running statement write a table another session's open transaction holds - one a BEGIN
      * opened, or the implicit one of a session with AUTOCOMMIT off: the statement is to wait for the holder and run
      * again (see {@link TableLockWait}).

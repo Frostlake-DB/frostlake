@@ -68,6 +68,10 @@ final class BareCallInFromLines {
         if (before != FrostlakeLexer.FROM && before != FrostlakeLexer.JOIN && before != FrostlakeLexer.COMMA) {
             return null;
         }
+        if (inValueQuery(spoken, fault)) {
+            // A query used as a value is read as one (see ValueSubqueryLines).
+            return null;
+        }
         int depth = 0;
         int arguments = 1;
         int closer = -1;
@@ -131,6 +135,35 @@ final class BareCallInFromLines {
             depth += type == FrostlakeLexer.LPAREN ? 1 : type == FrostlakeLexer.RPAREN ? -1 : 0;
         }
         return lines;
+    }
+
+    /**
+     * Whether the call at {@code fault} stands in the query of an IN or a comparison, written in brackets after the
+     * IN or the operator.
+     */
+    private static boolean inValueQuery(final List<Token> spoken, final int fault) {
+        int depth = 0;
+        for (int i = fault - 1; i >= 1; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.RPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.LPAREN) {
+                if (depth > 0) {
+                    depth--;
+                } else if (spoken.get(i + 1).getType() == FrostlakeLexer.SELECT) {
+                    final int written = spoken.get(i - 1).getType();
+                    return written == FrostlakeLexer.IN || written == FrostlakeLexer.EQ
+                        || written == FrostlakeLexer.GT || written == FrostlakeLexer.LT
+                        || written == FrostlakeLexer.GTE || written == FrostlakeLexer.LTE
+                        || written == FrostlakeLexer.NEQ;
+                } else {
+                    return false;
+                }
+            } else if (type == FrostlakeLexer.SEMI) {
+                return false;
+            }
+        }
+        return false;
     }
 
     /** Whether the call at {@code fault} stands in a common table expression's query: {@code WITH … AS ( … )}. */

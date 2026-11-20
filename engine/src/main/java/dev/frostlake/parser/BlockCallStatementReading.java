@@ -70,7 +70,7 @@ public final class BlockCallStatementReading {
         FrostlakeLexer.CREATE, FrostlakeLexer.ALTER, FrostlakeLexer.DROP, FrostlakeLexer.SHOW,
         FrostlakeLexer.DESCRIBE, FrostlakeLexer.DESC, FrostlakeLexer.USE, FrostlakeLexer.GRANT, FrostlakeLexer.REVOKE,
         FrostlakeLexer.COPY, FrostlakeLexer.TRUNCATE, FrostlakeLexer.COMMIT, FrostlakeLexer.ROLLBACK,
-        FrostlakeLexer.BREAK, FrostlakeLexer.CONTINUE, FrostlakeLexer.SET, FrostlakeLexer.UNSET,
+        FrostlakeLexer.BREAK, FrostlakeLexer.CONTINUE, FrostlakeLexer.ITERATE, FrostlakeLexer.SET, FrostlakeLexer.UNSET,
         FrostlakeLexer.COMMENT, FrostlakeLexer.UNDROP, FrostlakeLexer.EXPLAIN, FrostlakeLexer.KW_IDENTIFIER,
         FrostlakeLexer.END, FrostlakeLexer.ELSE, FrostlakeLexer.ELSEIF, FrostlakeLexer.WHEN, FrostlakeLexer.EXCEPTION,
         FrostlakeLexer.ASYNC, FrostlakeLexer.AWAIT, FrostlakeLexer.LEFT, FrostlakeLexer.RIGHT,

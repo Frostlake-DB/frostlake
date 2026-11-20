@@ -80,7 +80,7 @@ final class DynamicTableColumnClauses {
                 target.setProjectionPolicyName(catalog.qualifiedExactName(policy));
             }
             if (column.maskingPolicy != null) {
-                final String policy = ParseTreeText.getQualifiedName(column.maskingPolicy);
+                final String policy = queryExecutor.resolveObjectName(column.maskingPolicy);
                 if (catalog.findMaskingPolicyExact(policy) == null) {
                     throw new RuntimeException(SqlCompilationError.doesNotExist("Masking policy",
                         catalog.qualifiedExactName(policy)));

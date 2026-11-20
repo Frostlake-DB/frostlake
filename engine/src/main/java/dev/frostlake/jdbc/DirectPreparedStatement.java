@@ -28,7 +28,6 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -90,14 +89,19 @@ public class DirectPreparedStatement extends DirectStatement implements Frostlak
     }
 
     /**
-     * Result-column metadata for a result-returning statement (null for DML / non-queries). Describes the query
-     * by executing a copy with every unbound placeholder set to NULL — for a parameterized SELECT this returns
-     * zero rows (so it is cheap) while still carrying the projection's columns.
+     * Result-column metadata for a result-returning statement (null for DML / non-queries). Uses the open result
+     * set of the last execution if there is one, else describes the query by executing a copy with every unbound
+     * placeholder set to NULL — for a parameterized SELECT this returns zero rows (so it is cheap) while still
+     * carrying the projection's columns.
      */
     private ResultSetMetaData prepareResultMetaData() throws SQLException {
-        final String head = sql.trim().toUpperCase(Locale.ROOT);
-        if (!(head.startsWith("SELECT") || head.startsWith("WITH") || head.startsWith("SHOW")
-                || head.startsWith("DESC") || head.startsWith("EXPLAIN") || head.startsWith("CALL"))) {
+        // The open result set of the last execution describes the statement already; describing afresh would run
+        // on this statement and close it.
+        final ResultSet open = openResultSet();
+        if (open != null) {
+            return open.getMetaData();
+        }
+        if (!JdbcMarshaling.answersRows(sql)) {
             return null;
         }
         final Map<Integer, Object> filled = new HashMap<>(parameters);

@@ -130,9 +130,9 @@ public class HttpMetadataParityTest {
 
     /**
      * ResultSetMetaData.isNullable agrees across the two transports, and says what live says: a NOT
-     * NULL column reads columnNoNulls, a nullable one columnNullable, and an EXPRESSION over either
-     * reads columnNoNulls rather than nullable. The HTTP transport learned this from a wire field; it
-     * used to answer columnNullableUnknown for everything.
+     * NULL column reads columnNoNulls, a nullable one columnNullable, and an EXPRESSION over the
+     * nullable one columnNullable too. The HTTP transport learned this from a wire field; it used to
+     * answer columnNullableUnknown for everything.
      */
     @Test
     public void isNullableAgreesAcrossTransports() throws SQLException {
@@ -145,7 +145,7 @@ public class HttpMetadataParityTest {
         final String expression = "SELECT UPPER(w) AS uw FROM nn_t";
         assertEquals("NoNulls|Nullable", nullabilityOn(direct, columns));
         assertEquals(nullabilityOn(direct, columns), nullabilityOn(http, columns));
-        assertEquals("NoNulls", nullabilityOn(direct, expression));
+        assertEquals("Nullable", nullabilityOn(direct, expression));
         assertEquals(nullabilityOn(direct, expression), nullabilityOn(http, expression));
     }
 

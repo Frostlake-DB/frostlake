@@ -19,6 +19,7 @@ package dev.frostlake.executor.operators;
 import dev.frostlake.executor.DeferredFault;
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.executor.StatementCancellation;
+import dev.frostlake.executor.ValueComparisons;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.storage.Row;
 import dev.frostlake.values.VariantValue;
@@ -27,6 +28,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -62,7 +64,19 @@ public class JoinOperator implements Operator {
     // candidate pair with conditionEvaluator. Null => nested-loop.
     private int[] leftKeyIdx;
     private int[] rightKeyIdx;
+    // Per key position, the expression that computes it for each side, or null where the key is a column.
+    private JoinSideKey[] leftKeyReaders;
+    private JoinSideKey[] rightKeyReaders;
     private static final Object NULL_KEY = new Object();
+    // The kinds of value a computed key position may hold (see computedKeysCompareAlike).
+    private static final int KIND_NONE = 0;
+    private static final int KIND_MIXED = -1;
+    private static final int KIND_NUMBER = 1;
+    private static final int KIND_TEXT = 2;
+    private static final int KIND_BOOLEAN = 3;
+    private static final int KIND_MOMENT = 4;
+    private static final int KIND_TIME = 5;
+    private static final int KIND_VARIANT = 6;
 
     /**
      * Create a JOIN operator with a condition evaluator.
@@ -125,6 +139,20 @@ public class JoinOperator implements Operator {
         return this;
     }
 
+    /**
+     * Compute some of the keys {@link #withEquiKeys} sets up from an expression of each side rather than from a
+     * column: the positions whose reader is not null ignore their column index.
+     *
+     * @param leftReaders  per key position, the left side's expression or null
+     * @param rightReaders per key position, the right side's expression or null
+     * @return this operator
+     */
+    public JoinOperator withKeyExpressions(final JoinSideKey[] leftReaders, final JoinSideKey[] rightReaders) {
+        this.leftKeyReaders = leftReaders;
+        this.rightKeyReaders = rightReaders;
+        return this;
+    }
+
     @Override
     public List<Row> execute(final List<Row> leftRows, final OperatorContext context) {
         rightRows = rightSide.rows();
@@ -172,10 +200,17 @@ public class JoinOperator implements Operator {
         }
         final StringBuilder keys = new StringBuilder(" | HASH ");
         for (int i = 0; i < leftKeyIdx.length; i++) {
-            keys.append(i > 0 ? ", " : "").append(columnName(leftTable, leftKeyIdx[i])).append('=')
-                .append(columnName(rightTable, rightKeyIdx[i]));
+            keys.append(i > 0 ? ", " : "").append(keyName(leftTable, leftKeyIdx, leftKeyReaders, i)).append('=')
+                .append(keyName(rightTable, rightKeyIdx, rightKeyReaders, i));
         }
         return keys.toString();
+    }
+
+    private static String keyName(final Table table, final int[] keyIdx, final JoinSideKey[] readers, final int i) {
+        if (readers != null && readers[i] != null) {
+            return readers[i].describe();
+        }
+        return columnName(table, keyIdx[i]);
     }
 
     private static String columnName(final Table table, final int index) {
@@ -258,9 +293,22 @@ public class JoinOperator implements Operator {
      * regardless of key normalization. Handles all join types like {@link #executeConditionalJoin}.
      */
     private List<Row> executeHashJoin(final List<Row> leftRows) {
+        final List<List<Object>> rightKeys = computedKeys(rightRows, rightKeyIdx, rightKeyReaders);
+        final List<List<Object>> leftKeys = rightKeys == null ? null
+            : computedKeys(leftRows, leftKeyIdx, leftKeyReaders);
+        if (rightKeys == null || leftKeys == null || !computedKeysCompareAlike(leftKeys, rightKeys)) {
+            // A computed key that cannot be read for every row, or whose two sides do not bucket alike, leaves
+            // every pair to the condition, as though no key had been found.
+            if (joinCondition == null && conditionEvaluator == null) {
+                return executeCrossJoin(leftRows);
+            }
+            return executeConditionalJoin(leftRows);
+        }
+        normalizeKeys(rightKeys);
+        normalizeKeys(leftKeys);
         final Map<List<Object>, List<Integer>> rightIndex = new HashMap<>();
         for (int r = 0; r < rightRows.size(); r++) {
-            final List<Object> key = buildKey(rightRows.get(r), rightKeyIdx);
+            final List<Object> key = rightKeys.get(r);
             List<Integer> bucket = rightIndex.get(key);
             if (bucket == null) {
                 bucket = new ArrayList<>();
@@ -272,11 +320,12 @@ public class JoinOperator implements Operator {
         final List<Row> resultRows = new ArrayList<>();
         final boolean[] matchedRight = new boolean[rightRows.size()];
 
-        for (final Row leftRow : leftRows) {
+        for (int l = 0; l < leftRows.size(); l++) {
+            final Row leftRow = leftRows.get(l);
             // Each outer row is where the statement's timeout or cancel ends a join.
             StatementCancellation.check();
             boolean leftMatchFound = false;
-            final List<Integer> candidates = rightIndex.get(buildKey(leftRow, leftKeyIdx));
+            final List<Integer> candidates = rightIndex.get(leftKeys.get(l));
             if (candidates != null) {
                 for (final int idx : candidates) {
                     final Row rightRow = rightRows.get(idx);
@@ -305,11 +354,113 @@ public class JoinOperator implements Operator {
         return resultRows;
     }
 
-    private List<Object> buildKey(final Row row, final int[] keyIdx) {
+    /**
+     * Every row's key, or null when a computed key cannot be read for some row: its refusal, if the pair it belongs
+     * to is ever judged, is then the condition's to raise.
+     */
+    private static List<List<Object>> computedKeys(final List<Row> rows, final int[] keyIdx,
+                                                   final JoinSideKey[] readers) {
+        final List<List<Object>> keys = new ArrayList<>(rows.size());
+        if (readers == null) {
+            for (final Row row : rows) {
+                keys.add(buildKey(row, keyIdx, null));
+            }
+            return keys;
+        }
+        try {
+            for (final Row row : rows) {
+                keys.add(buildKey(row, keyIdx, readers));
+            }
+        } catch (final RuntimeException notComputable) {
+            return null;
+        }
+        return keys;
+    }
+
+    /**
+     * Whether every computed key position holds values of one kind on both sides, so the buckets part no pair the
+     * condition would keep: numbers beside numbers, texts beside texts, dates and timestamps beside each other, and
+     * so on. A text beside a number, or a VARIANT beside anything else, is converted by the comparison and is left
+     * to it, as is a value of a kind the buckets do not know.
+     */
+    private boolean computedKeysCompareAlike(final List<List<Object>> leftKeys, final List<List<Object>> rightKeys) {
+        if (leftKeyReaders == null && rightKeyReaders == null) {
+            return true;
+        }
+        for (int i = 0; i < leftKeyIdx.length; i++) {
+            final boolean computed = leftKeyReaders != null && leftKeyReaders[i] != null
+                || rightKeyReaders != null && rightKeyReaders[i] != null;
+            if (!computed) {
+                continue;
+            }
+            int kind = KIND_NONE;
+            for (final List<Object> key : leftKeys) {
+                kind = joinKind(kind, key.get(i));
+            }
+            for (final List<Object> key : rightKeys) {
+                kind = joinKind(kind, key.get(i));
+            }
+            if (kind == KIND_MIXED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Replaces every key value by the bucket it falls in. */
+    private static void normalizeKeys(final List<List<Object>> keys) {
+        for (final List<Object> key : keys) {
+            for (int i = 0; i < key.size(); i++) {
+                key.set(i, normalizeKey(key.get(i)));
+            }
+        }
+    }
+
+    /** The kind a key position holds so far, given one more of its raw values. */
+    private static int joinKind(final int kind, final Object raw) {
+        if (raw == null || kind == KIND_MIXED) {
+            return kind;
+        }
+        final int next = kindOf(raw);
+        if (next == KIND_MIXED || kind != KIND_NONE && kind != next) {
+            return KIND_MIXED;
+        }
+        return next;
+    }
+
+    private static int kindOf(final Object raw) {
+        if (raw instanceof VariantValue) {
+            return KIND_VARIANT;
+        }
+        if (raw instanceof Number) {
+            return KIND_NUMBER;
+        }
+        if (raw instanceof String) {
+            return KIND_TEXT;
+        }
+        if (raw instanceof Boolean) {
+            return KIND_BOOLEAN;
+        }
+        if (raw instanceof LocalDate || raw instanceof LocalDateTime || raw instanceof OffsetDateTime
+                || raw instanceof ZonedDateTime) {
+            return KIND_MOMENT;
+        }
+        if (raw instanceof LocalTime) {
+            return KIND_TIME;
+        }
+        return KIND_MIXED;
+    }
+
+    /** One row's key, its values as read: {@link #normalizeKeys} buckets them once their kinds are known. */
+    private static List<Object> buildKey(final Row row, final int[] keyIdx, final JoinSideKey[] readers) {
         final List<Object> key = new ArrayList<>(keyIdx.length);
         for (int i = 0; i < keyIdx.length; i++) {
-            // Joining reads each key, so a cell a relation deferred raises its fault here.
-            key.add(normalizeKey(DeferredFault.read(row.getValue(keyIdx[i]))));
+            if (readers != null && readers[i] != null) {
+                key.add(readers[i].read(row));
+            } else {
+                // Joining reads each key, so a cell a relation deferred raises its fault here.
+                key.add(DeferredFault.read(row.getValue(keyIdx[i])));
+            }
         }
         return key;
     }
@@ -323,9 +474,19 @@ public class JoinOperator implements Operator {
             return NULL_KEY;
         }
         if (value instanceof VariantValue) {
-            // A semi-structured value buckets by its JSON text so it meets a text-carried equal
-            // (legacy loaders and typed constructors must land in the same bucket).
-            return ((VariantValue) value).text();
+            // A semi-structured value buckets as = compares it: a number by its value whatever its notation
+            // or carrier, so PARSE_JSON('1') meets TO_VARIANT(1::FLOAT) and a number a VARIANT column carries
+            // unwrapped; a string as a string; an array or an object by the VARIANT order's equality, whatever
+            // its key order and its numbers' notation (live-verified).
+            final VariantValue variant = (VariantValue) value;
+            final Number number = ValueComparisons.variantScalarNumber(variant);
+            if (number != null) {
+                return normalizeKey(number);
+            }
+            if (!variant.isContainerValue() && variant.node().isTextual()) {
+                return normalizeKey(variant.node().asText());
+            }
+            return variant;
         }
         if (value instanceof String) {
             // A numeric-looking string buckets like the number it denotes: Snowflake implicitly

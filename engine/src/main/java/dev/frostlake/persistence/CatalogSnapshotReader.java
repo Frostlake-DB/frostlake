@@ -104,6 +104,8 @@ import java.io.ObjectInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -527,6 +529,7 @@ final class CatalogSnapshotReader {
                 table.setHybrid(tableSnapshot.hybrid);
                 table.setComment(tableSnapshot.comment);
                 table.setLastDdlBy(tableSnapshot.lastDdlBy);
+                table.restoreIds(tableSnapshot.tableId, tableSnapshot.cloneGroupId);
                 if (tableSnapshot.owner != null) {
                     table.setOwner(tableSnapshot.owner);
                 }
@@ -836,7 +839,8 @@ final class CatalogSnapshotReader {
                     if (taskSnapshot.owner != null) {
                         task.setOwner(taskSnapshot.owner);
                     }
-                    task.restoreCreatedTime(taskSnapshot.createdAt);
+                    task.restoreCreatedTime(taskSnapshot.createdOn != null ? taskSnapshot.createdOn
+                        : hostInstant(taskSnapshot.createdAt));
                     task.setSuspendTaskAfterNumFailures(taskSnapshot.suspendTaskAfterNumFailures);
                     task.setTaskAutoRetryAttempts(taskSnapshot.taskAutoRetryAttempts);
                     task.setAllowOverlappingExecution(taskSnapshot.allowOverlappingExecution);
@@ -868,7 +872,11 @@ final class CatalogSnapshotReader {
                     // The recorded runs, replayed through the task so its last run and failure count follow.
                     if (taskSnapshot.history != null) {
                         for (final TaskExecutionSnapshot run : taskSnapshot.history) {
-                            task.recordExecution(new TaskExecution(run.scheduledTime, run.startTime, run.endTime,
+                            // A snapshot taken before runs kept instants holds them on the host's wall clock.
+                            task.recordExecution(new TaskExecution(
+                                run.scheduledAt != null ? run.scheduledAt : hostInstant(run.scheduledTime),
+                                run.startedAt != null ? run.startedAt : hostInstant(run.startTime),
+                                run.endedAt != null ? run.endedAt : hostInstant(run.endTime),
                                 TaskExecutionState.valueOf(run.state), run.errorMessage, run.rowsAffected,
                                 taskTrigger(run.scheduledFrom), run.attempt == null ? 1 : run.attempt.intValue())
                                 .ranAs(run.queryId, run.errorCode, run.scheduledByUser));
@@ -1029,6 +1037,11 @@ final class CatalogSnapshotReader {
                     fn.setImports(fnSnapshot.imports);
                     fn.setEnvironment(fnSnapshot.environment == null ? null : fnSnapshot.environment.copy());
                     fn.setComment(fnSnapshot.comment);
+                    if (fnSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : fnSnapshot.ownParameters.entrySet()) {
+                            fn.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     if (fnSnapshot.owner != null) {
                         fn.setOwner(fnSnapshot.owner);
                     }
@@ -1066,6 +1079,11 @@ final class CatalogSnapshotReader {
                     proc.setReturnNotNull(Boolean.TRUE.equals(procSnapshot.returnNotNull));
                     proc.setEnvironment(procSnapshot.environment == null ? null : procSnapshot.environment.copy());
                     proc.setComment(procSnapshot.comment);
+                    if (procSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : procSnapshot.ownParameters.entrySet()) {
+                            proc.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     proc.setReturnsTable(procSnapshot.returnsTable);
                     if (procSnapshot.returnColumns != null) {
                         proc.setReturnColumns(restoreParameters(procSnapshot.returnColumns));
@@ -1102,6 +1120,11 @@ final class CatalogSnapshotReader {
                     pipe.setLastLoadedFileCount(pipeSnapshot.lastLoadedFileCount);
                     pipe.setLastLoadedTime(pipeSnapshot.lastLoadedTime);
                     pipe.setComment(pipeSnapshot.comment);
+                    if (pipeSnapshot.ownParameters != null) {
+                        for (final Map.Entry<String, String> own : pipeSnapshot.ownParameters.entrySet()) {
+                            pipe.getOwnParameters().set(own.getKey(), own.getValue());
+                        }
+                    }
                     if (pipeSnapshot.owner != null) {
                         pipe.setOwner(pipeSnapshot.owner);
                     }
@@ -1238,6 +1261,10 @@ final class CatalogSnapshotReader {
                     tag.restoreId(tagSnapshot.id);
                     tag.setPropagate(tagSnapshot.propagate);
                     tag.setOnConflict(tagSnapshot.onConflict);
+                    tag.setMaskingPolicies(tagSnapshot.maskingPolicies);
+                    if (tag.hasMaskingPolicies()) {
+                        catalog.noteTagMasking();
+                    }
                     schema.addTag(tag);
                 }
             }
@@ -1495,6 +1522,11 @@ final class CatalogSnapshotReader {
     /**
      * Convert string type name to DataType instance
      */
+    /** A time a snapshot kept on the host's wall clock, as the instant it names; null for none. */
+    static Instant hostInstant(final LocalDateTime time) {
+        return time == null ? null : time.atZone(ZoneId.systemDefault()).toInstant();
+    }
+
     static DataType parseDataType(final String typeName) {
         return parseDataType(typeName, null, null, null);
     }

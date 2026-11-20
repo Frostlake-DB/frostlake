@@ -28,7 +28,6 @@ import dev.frostlake.values.DayTimeInterval;
 import dev.frostlake.values.VariantValue;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -109,7 +108,7 @@ public class ToNumber extends BuiltInFunction {
         rejectPastDeclaredWidth(args, value, scale == null ? 0 : scale.intValue(), variant);
         // Snowflake TO_NUMBER / TO_DECIMAL / TO_NUMERIC default to NUMBER(38,0): with no explicit scale the
         // result is a whole number (e.g. TO_NUMBER(405.958) -> 406), rounded HALF_UP.
-        value = value.setScale(scale != null ? scale : 0, RoundingMode.HALF_UP);
+        value = NumericRangeRefusal.atScale(value, scale != null ? scale : 0);
         return value;
     }
 

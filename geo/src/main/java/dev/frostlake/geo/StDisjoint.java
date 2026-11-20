@@ -32,7 +32,7 @@ public class StDisjoint extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null) return null;
         GeoShapes.requireSameKind("ST_DISJOINT", a, b);
-        return Boolean.valueOf(!GeoShapes.intersects(a, b));
+        return Boolean.valueOf(!GeoRelation.intersects(a, b));
     }
 
     @Override

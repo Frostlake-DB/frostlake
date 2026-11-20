@@ -39,7 +39,7 @@ import java.util.List;
  * everything after {@code SELECT '$$';} and cut a multi-line literal at a line-trailing ';'. When
  * the script does not parse whole, falls back to a LEXER-token split at SEMI (literals are single
  * tokens even then), so per-statement execution can still surface the offending statement's own
- * error.
+ * error; a scripting block written without $$ stays one piece even then.
  */
 public final class SqlScriptSplitter {
 
@@ -78,21 +78,17 @@ public final class SqlScriptSplitter {
             }
             return statements;
         }
-        // Unparseable script: lexer-token split at SEMI, so each piece can report its own error.
-        final FrostlakeLexer relexer = new FrostlakeLexer(SqlCharStream.of(script));
-        relexer.removeErrorListeners();
-        final CommonTokenStream stream = new CommonTokenStream(relexer);
-        stream.fill();
+        // Unparseable script: split at the lexer's top-level SEMI tokens, so each piece can report its own error. A
+        // scripting block written without $$ - a procedure's body, an anonymous block - stays whole, its own
+        // statements never run on their own (see StatementCount#statementSeparators).
         final List<String> statements = new ArrayList<>();
         int startIndex = 0;
-        for (final Token token : stream.getTokens()) {
-            if (token.getType() == FrostlakeLexer.SEMI) {
-                final String piece = script.substring(startIndex, token.getStartIndex()).trim();
-                if (!piece.isEmpty()) {
-                    statements.add(piece);
-                }
-                startIndex = token.getStopIndex() + 1;
+        for (final Token separator : StatementCount.statementSeparators(script)) {
+            final String piece = script.substring(startIndex, separator.getStartIndex()).trim();
+            if (!piece.isEmpty()) {
+                statements.add(piece);
             }
+            startIndex = separator.getStopIndex() + 1;
         }
         final String tail = script.substring(Math.min(startIndex, script.length())).trim();
         if (!tail.isEmpty()) {

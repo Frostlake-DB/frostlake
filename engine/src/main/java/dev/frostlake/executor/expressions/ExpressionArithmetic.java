@@ -757,7 +757,7 @@ public final class ExpressionArithmetic {
             final BigDecimal exact = DecimalText.parse(left.toString()).multiply(DecimalText.parse(right.toString()));
             final BigDecimal product = declaredScale != null && exact.scale() > declaredScale.intValue()
                 ? exact.setScale(declaredScale.intValue(), RoundingMode.HALF_UP) : exact;
-            requireRawResultFits(product);
+            requireProductFits(product, exact);
             return product;
         }
         final Number[] multiplyVariant = coerceVariantOperands(left, right);
@@ -880,6 +880,22 @@ public final class ExpressionArithmetic {
         if (NumericRangeRefusal.outsideSb16Window(raw)) {
             throw new RuntimeException(
                 NumericRangeRefusal.typedDouble("SB16", 38, 0, false, new BigDecimal(raw)));
+        }
+    }
+
+    /**
+     * A product's raw at the scale it is presented at must fit the 128-bit window, and the refusal prints the raw
+     * of the EXACT product, the digits the presented scale drops included: a NUMBER(38,7) of 20000000000000
+     * squared is refused at {@code 4e+40}, where its raw at the twelve decimals it declares is 4e+38
+     * (live-verified).
+     */
+    private static void requireProductFits(final BigDecimal product, final BigDecimal exact) {
+        if (product.precision() <= 38) {
+            return;
+        }
+        if (NumericRangeRefusal.outsideSb16Window(product.unscaledValue())) {
+            throw new RuntimeException(
+                NumericRangeRefusal.typedDouble("SB16", 38, 0, false, new BigDecimal(exact.unscaledValue())));
         }
     }
 
@@ -1202,8 +1218,16 @@ public final class ExpressionArithmetic {
         return null;
     }
 
-    /** A temporal as the instant it names, a naive one read in the session's zone; null if not temporal. */
+    /**
+     * A temporal as the instant it names, a naive one read in the session's zone; null if not temporal. Text
+     * reads as a TIMESTAMP_LTZ cast reads it — an offset, an RFC or ISO form and an epoch fix the instant,
+     * a bare wall clock is in the session's zone — and text that is no timestamp is live's refusal,
+     * {@code Timestamp 'abc' is not recognized}, rather than an inequality (live-verified).
+     */
     private static Instant sessionInstant(final Object v) {
+        if (v instanceof CharSequence) {
+            return SharedFunctionHelpers.toSessionOffsetDateTime(v.toString()).toInstant();
+        }
         // A raw instant, as an INFORMATION_SCHEMA time once was, is already the instant it names.
         if (v instanceof Instant) {
             return (Instant) v;

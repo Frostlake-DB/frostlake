@@ -53,12 +53,12 @@ public class GetIgnoreCase extends BuiltInFunction {
                 // An `undefined` element reads as SQL NULL, a JSON null as the NULL_VALUE variant.
                 if (VariantUndefined.isUndefined(v)) return null;
                 if (v.isNull()) return VariantValue.of("null");
-                if (v.isTextual()) return v.asText();
+                if (v.isTextual()) return VariantValue.ofStringMember(v);
                 if (v.isNumber()) {
                     return numberOf(v);
                 }
                 if (v.isBoolean()) return v.asBoolean();
-                return v.toString();
+                return VariantValue.ofNode(v);
             }
         }
         return null;

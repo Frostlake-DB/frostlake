@@ -97,4 +97,28 @@ public class ColumnDefaultToldSnapshotTest {
             assertEquals("7", String.valueOf(inserted.getValue(1)));
         }
     }
+
+    @Test
+    public void aStringDefaultSpellingAKeywordSurvivesACopy() throws Exception {
+        final DatabaseEngine original = new DatabaseEngine();
+        original.execute("CREATE DATABASE cdk");
+        original.execute("CREATE SCHEMA cdk.s");
+        original.execute("CREATE TABLE cdk.s.d (e VARCHAR DEFAULT 'NULL', h VARCHAR DEFAULT 'current_date', "
+            + "t BOOLEAN DEFAULT TRUE, k INT)");
+        final List<String> told = new ArrayList<>();
+        told.add("'NULL'");
+        told.add("'current_date'");
+        told.add("TRUE");
+        told.add("null");
+        assertEquals(told, defaults(original, "cdk.s.d"));
+        for (final DatabaseEngine copy : copiesOf(original)) {
+            assertEquals(told, defaults(copy, "cdk.s.d"));
+            copy.execute("INSERT INTO cdk.s.d (k) VALUES (1)");
+            final Row inserted = copy.executeQuery("SELECT e, e IS NULL, h, t FROM cdk.s.d").getRows().get(0);
+            assertEquals("NULL", inserted.getValue(0));
+            assertEquals(Boolean.FALSE, inserted.getValue(1));
+            assertEquals("current_date", inserted.getValue(2));
+            assertEquals(Boolean.TRUE, inserted.getValue(3));
+        }
+    }
 }

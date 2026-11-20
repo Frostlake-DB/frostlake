@@ -38,7 +38,9 @@ import org.antlr.v4.runtime.Token;
  * refused at its SELECT or WITH instead; live's recovery then closes the list at the first ')' after it, and a fault
  * after that still speaks — unless the query's fault stands inside a call of a later select item, which reads as a
  * query compared in a WHERE does: {@code a IN (SELECT n, ABS(1 2) FROM t)} is 'SELECT', '2', then the 'FROM'
- * ({@link ValueSubqueryLines#inListCallFault}). Where no operator may stand either, the line falls at the IN's own
+ * ({@link ValueSubqueryLines#inListCallFault}); one whose first item holds a window call with a frame is read past
+ * that call, to its OVER: {@code a IN (SELECT SUM(v) OVER (ORDER BY v ROWS …) FROM t)} is 'SELECT', then 'OVER'
+ * (live-verified). Where no operator may stand either, the line falls at the IN's own
  * place, and names the IN as written ({@code SHOW VARIABLES IN ACCOUNT} is {@code unexpected 'IN'} at 15), never the
  * equals sign read in its stead. A SHOW listing that reads no scope is that one line alone, whatever follows its
  * IN.
@@ -88,6 +90,12 @@ final class InListRecovery {
                 && (spoken.get(opener).getType() == FrostlakeLexer.SELECT
                     || spoken.get(opener).getType() == FrostlakeLexer.WITH)) {
             lines.add(SyntaxErrorListener.sentence(spoken.get(opener)));
+            // A window call with a frame in the query's first item is read past the call, to its OVER (live-verified).
+            final int over = framedWindowOver(spoken, opener);
+            if (over >= 0) {
+                lines.add(SyntaxErrorListener.sentence(spoken.get(over)));
+                return lines;
+            }
             final List<String> called = ValueSubqueryLines.inListCallFault(sql, spoken, in + 1);
             if (called != null) {
                 lines.addAll(called);
@@ -148,5 +156,47 @@ final class InListRecovery {
             first--;
         }
         return spoken.get(first).getType() == FrostlakeLexer.SHOW;
+    }
+
+    /**
+     * The OVER after the first window call of the first select item of the query whose SELECT is at {@code select},
+     * when its window has a frame (ROWS or RANGE), or -1.
+     */
+    private static int framedWindowOver(final List<Token> spoken, final int select) {
+        int depth = 0;
+        for (int i = select + 1; i < spoken.size(); i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.LPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.RPAREN) {
+                if (depth == 0) {
+                    return -1;
+                }
+                depth--;
+            } else if (depth == 0 && (type == FrostlakeLexer.COMMA || type == FrostlakeLexer.FROM
+                    || type == FrostlakeLexer.SEMI || type == Token.EOF)) {
+                return -1;
+            } else if (depth == 0 && type == FrostlakeLexer.OVER && spoken.get(i - 1).getType() == FrostlakeLexer.RPAREN
+                    && i + 1 < spoken.size() && spoken.get(i + 1).getType() == FrostlakeLexer.LPAREN) {
+                int inner = 0;
+                for (int j = i + 2; j < spoken.size(); j++) {
+                    final int word = spoken.get(j).getType();
+                    if (word == FrostlakeLexer.LPAREN) {
+                        inner++;
+                    } else if (word == FrostlakeLexer.RPAREN) {
+                        if (inner == 0) {
+                            return -1;
+                        }
+                        inner--;
+                    } else if (inner == 0 && (word == FrostlakeLexer.ROWS || word == FrostlakeLexer.RANGE)) {
+                        return i;
+                    } else if (word == FrostlakeLexer.SEMI || word == Token.EOF) {
+                        return -1;
+                    }
+                }
+                return -1;
+            }
+        }
+        return -1;
     }
 }

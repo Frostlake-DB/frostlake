@@ -17,7 +17,6 @@
 package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.GrantedObject;
-import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.FutureGrants;
@@ -141,10 +140,10 @@ final class OwnershipTransfer {
         final Pipe pipe = pipeOrNull(schema, name);
         final FrostlakeParser.CopyIntoStatementContext copy = pipe == null || !pipe.isPaused() ? null
             : copyOf(pipe.getCopyStatement());
-        if (copy == null || copy.qualifiedName() == null) {
+        if (copy == null || copy.objectName() == null) {
             return;
         }
-        final String[] target = tablePath(schema, ParseTreeText.qualifiedNameParts(copy.qualifiedName()));
+        final String[] target = tablePath(schema, executor.resolveObjectNameParts(copy.objectName()));
         final Table table = tableOrNull(target);
         if (table != null && !security.holdsPrivilege(Privilege.INSERT, "TABLE", QualifiedName.join(target),
                 table.getOwner())) {
@@ -253,7 +252,7 @@ final class OwnershipTransfer {
                     if (privilege == Privilege.OWNERSHIP || revoke) {
                         holder.revokePrivilege(objectType, spelling, privilege);
                     } else {
-                        holder.grantPrivilege(objectType, spelling, privilege, owner);
+                        holder.regrantAs(objectType, spelling, privilege, owner);
                     }
                 }
             }
@@ -264,7 +263,7 @@ final class OwnershipTransfer {
                     if (privilege == Privilege.OWNERSHIP || revoke) {
                         user.revokePrivilege(objectType, spelling, privilege);
                     } else {
-                        user.grantPrivilege(objectType, spelling, privilege, owner);
+                        user.regrantAs(objectType, spelling, privilege, owner);
                     }
                 }
             }

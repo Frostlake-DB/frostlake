@@ -18,6 +18,8 @@ package dev.frostlake.functions.scalar.string;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Reads a regular expression the way the account's matcher reads one, which is not the way
@@ -47,6 +49,11 @@ import java.util.List;
  * no count is a literal brace ({@code a{,2}}, {@code a{x}}), a repetition of a repetition repeats the whole
  * ({@code a**}), {@code \0} is the NUL character, {@code \v} a vertical tab, and a POSIX class keeps its meaning
  * inside brackets.
+ *
+ * <p>The account's lines end at {@code \n} alone, so its anchors are written out by that rule: {@code $} is the
+ * end of the text (not before a final newline), and with the {@code m} parameter {@code ^} and {@code $} stand
+ * after and before each {@code \n} and at either end of the text, a final newline included. {@code \s} is
+ * {@code [\t\n\f\r ]} (no vertical tab) and a word boundary is judged by the ASCII word characters.
  */
 final class Re2PatternReader {
 
@@ -61,13 +68,28 @@ final class Re2PatternReader {
         {"word", "\\w"}, {"xdigit", "\\p{XDigit}"},
     };
 
+    private static final String SPACE = "\\t\\n\\f\\r\\x{20}";
+    private static final String WORD_BOUNDARY = "(?:(?<=\\w)(?!\\w)|(?<!\\w)(?=\\w))";
+    private static final String NOT_WORD_BOUNDARY = "(?:(?<=\\w)(?=\\w)|(?<!\\w)(?!\\w))";
+
     private final String pattern;
+    private final boolean multiLine;
+    private final boolean caseless;
     private final StringBuilder java = new StringBuilder();
     private String fault;
     private int at;
 
-    Re2PatternReader(final String pattern) {
+    /**
+     * Reads a pattern.
+     *
+     * @param pattern   the pattern, as written
+     * @param multiLine whether the {@code m} parameter is given
+     * @param caseless  whether the pattern folds case (the {@code i} parameter)
+     */
+    Re2PatternReader(final String pattern, final boolean multiLine, final boolean caseless) {
         this.pattern = pattern;
+        this.multiLine = multiLine;
+        this.caseless = caseless;
         read();
     }
 
@@ -143,6 +165,16 @@ final class Re2PatternReader {
                 } else if (c == '{') {
                     java.append("\\{");
                     at++;
+                } else if (c == '^') {
+                    java.append(multiLine ? "(?:(?<![^\\n]))" : "(?:^)");
+                    at++;
+                } else if (c == '$') {
+                    java.append(multiLine ? "(?:(?![^\\n]))" : "(?:\\z)");
+                    at++;
+                } else if (caseless && CaseFoldOrbits.orbit(pattern.codePointAt(at)).length > 1) {
+                    final int point = pattern.codePointAt(at);
+                    at += Character.charCount(point);
+                    character(java, point, false);
                 } else {
                     java.append(c);
                     at++;
@@ -205,7 +237,27 @@ final class Re2PatternReader {
             return NO_VALUE;
         }
         final char d = pattern.charAt(at + 1);
-        if ("dDsSwW".indexOf(d) >= 0 || !inClass && (d == 'b' || d == 'B')) {
+        if (caseless && "dDwW".indexOf(d) >= 0) {
+            out.append(foldedNamed(Character.toLowerCase(d) == 'd' ? "\\d" : "\\w", Character.isUpperCase(d),
+                inClass));
+            at += 2;
+            return A_CLASS;
+        }
+        if (d == 's' || d == 'S') {
+            if (d == 's') {
+                out.append(inClass ? SPACE : "[" + SPACE + "]");
+            } else {
+                out.append("[^").append(SPACE).append(']');
+            }
+            at += 2;
+            return A_CLASS;
+        }
+        if (!inClass && (d == 'b' || d == 'B')) {
+            out.append(d == 'b' ? WORD_BOUNDARY : NOT_WORD_BOUNDARY);
+            at += 2;
+            return A_CLASS;
+        }
+        if ("dDwW".indexOf(d) >= 0) {
             out.append('\\').append(d);
             at += 2;
             return A_CLASS;
@@ -213,7 +265,7 @@ final class Re2PatternReader {
         final int control = "afnrtv".indexOf(d);
         if (control >= 0) {
             at += 2;
-            return written(out, new int[] {7, 12, 10, 13, 9, 11}[control]);
+            return character(out, new int[] {7, 12, 10, 13, 9, 11}[control], inClass);
         }
         if (d >= '0' && d <= '7') {
             final boolean more = at + 2 < pattern.length() && isOctal(pattern.charAt(at + 2));
@@ -227,10 +279,10 @@ final class Re2PatternReader {
                 value = value * 8 + (pattern.charAt(at) - '0');
                 at++;
             }
-            return written(out, value);
+            return character(out, value, inClass);
         }
         if (d == 'x') {
-            return hexadecimal(out, start);
+            return hexadecimal(out, start, inClass);
         }
         if (d < 0x80 && !Character.isLetterOrDigit(d)) {
             out.append('\\').append(d);
@@ -240,14 +292,14 @@ final class Re2PatternReader {
         if (d >= 0x80) {
             final int point = pattern.codePointAt(at + 1);
             at += 1 + Character.charCount(point);
-            return written(out, point);
+            return character(out, point, inClass);
         }
         fault = "invalid escape sequence: \\" + d;
         return NO_VALUE;
     }
 
     /** {@code \xHH} or {@code \x{H…}}; a value past the last character is refused where its digits pass it. */
-    private int hexadecimal(final StringBuilder out, final int start) {
+    private int hexadecimal(final StringBuilder out, final int start, final boolean inClass) {
         int i = at + 2;
         int value = 0;
         if (i < pattern.length() && pattern.charAt(i) == '{') {
@@ -267,7 +319,7 @@ final class Re2PatternReader {
                 return NO_VALUE;
             }
             at = i + 1;
-            return written(out, value);
+            return character(out, value, inClass);
         }
         for (int digits = 0; digits < 2; digits++) {
             if (i >= pattern.length() || !isHex(pattern.charAt(i))) {
@@ -278,7 +330,59 @@ final class Re2PatternReader {
             i++;
         }
         at = i;
-        return written(out, value);
+        return character(out, value, inClass);
+    }
+
+    /**
+     * Writes one character the pattern names; outside brackets a caseless pattern writes the characters it folds
+     * with beside it (inside them the class adds those, see {@link #characterClass}).
+     *
+     * @param out       where it is written
+     * @param character the character
+     * @param inClass   whether it stands inside brackets
+     * @return the character
+     */
+    private int character(final StringBuilder out, final int character, final boolean inClass) {
+        final int[] orbit = CaseFoldOrbits.orbit(character);
+        if (inClass || !caseless || orbit.length < 2) {
+            return written(out, character);
+        }
+        out.append('[');
+        for (final int member : orbit) {
+            written(out, member);
+        }
+        out.append(']');
+        return character;
+    }
+
+    /**
+     * A named class of a caseless pattern: the ASCII characters it holds, each with the characters it folds with,
+     * or every other character when it is negated ({@code \W}, {@code [:^lower:]}) — the account folds the class
+     * before negating it.
+     *
+     * @param javaClass the class as {@code java.util.regex} writes it, unnegated
+     * @param negated   whether the class is negated
+     * @param inClass   whether it stands inside brackets
+     * @return the class written out
+     */
+    private static String foldedNamed(final String javaClass, final boolean negated, final boolean inClass) {
+        final Pattern named = Pattern.compile("[" + javaClass + "]");
+        final TreeSet<Integer> members = new TreeSet<>();
+        for (int c = 0; c < 0x80; c++) {
+            if (named.matcher(String.valueOf((char) c)).matches()) {
+                for (final int member : CaseFoldOrbits.orbit(c)) {
+                    members.add(Integer.valueOf(member));
+                }
+            }
+        }
+        final StringBuilder out = new StringBuilder();
+        for (final Integer member : members) {
+            written(out, member.intValue());
+        }
+        if (negated) {
+            return "[^" + out + "]";
+        }
+        return inClass ? out.toString() : "[" + out + "]";
     }
 
     /** Writes one character by its number, which {@code java.util.regex} reads the same anywhere. */
@@ -318,7 +422,8 @@ final class Re2PatternReader {
             if (c == '[' && at + 1 < pattern.length() && pattern.charAt(at + 1) == ':'
                     && pattern.indexOf(":]", at + 2) > 0) {
                 final int end = pattern.indexOf(":]", at + 2) + 2;
-                final String named = posixClass(pattern.substring(at + 2, end - 2));
+                final String named = caseless ? foldedPosixClass(pattern.substring(at + 2, end - 2))
+                    : posixClass(pattern.substring(at + 2, end - 2));
                 if (named == null) {
                     fault = "invalid character class range: " + pattern.substring(at, end);
                     return;
@@ -332,12 +437,18 @@ final class Re2PatternReader {
             if (low == NO_VALUE || low == A_CLASS) {
                 continue;
             }
+            int high = low;
             if (at + 1 < pattern.length() && pattern.charAt(at) == '-' && pattern.charAt(at + 1) != ']') {
                 at++;
                 written.append('-');
-                final int high = member(written);
+                high = member(written);
                 if (high != NO_VALUE && high < low) {
                     fault = "invalid character class range: " + pattern.substring(item, at);
+                }
+            }
+            if (caseless && high >= low) {
+                for (final Integer folded : CaseFoldOrbits.foldedOutside(low, high)) {
+                    written(written, folded.intValue());
                 }
             }
         }
@@ -366,6 +477,13 @@ final class Re2PatternReader {
             }
         }
         return null;
+    }
+
+    /** A POSIX class of a caseless pattern, folded as {@link #foldedNamed} folds one; or null. */
+    private static String foldedPosixClass(final String name) {
+        final boolean negated = name.startsWith("^");
+        final String plain = posixClass(negated ? name.substring(1) : name);
+        return plain == null ? null : foldedNamed(plain, negated, true);
     }
 
     private static boolean isDigit(final char c) {

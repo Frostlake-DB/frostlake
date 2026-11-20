@@ -1007,7 +1007,8 @@ public class GetDdl extends BuiltInFunction {
             if (!col.isNullable()) {
                 c.append(" NOT NULL");
             }
-            if (col.getDefaultValue() != null) {
+            // An explicit DEFAULT NULL leaves the column with no default, and the DDL with no clause (live-verified).
+            if (col.getDefaultValue() != null && !"NULL".equals(col.getDefaultValue())) {
                 c.append(" DEFAULT ").append(renderDefault(col.getDefaultValue()));
             }
         }

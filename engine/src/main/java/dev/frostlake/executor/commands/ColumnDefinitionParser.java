@@ -39,6 +39,7 @@ import dev.frostlake.metastore.model.ForeignKeyConstraint;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Sequence;
 import dev.frostlake.metastore.model.SequenceDefault;
+import dev.frostlake.metastore.model.StringLiteralDefault;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.metastore.model.UniqueConstraint;
@@ -299,8 +300,9 @@ public class ColumnDefinitionParser implements CommandHandler {
     private DataType literalDataType(final FrostlakeParser.LiteralContext literal,
                                      final Object defaultValue) {
         if (literal.STRING_LITERAL() != null || literal.DOLLAR_QUOTED_STRING() != null) {
-            return new StringType("VARCHAR",
-                defaultValue == null ? 0 : CodePointText.length(String.valueOf(defaultValue)));
+            final Object text = defaultValue instanceof StringLiteralDefault
+                ? ((StringLiteralDefault) defaultValue).getValue() : defaultValue;
+            return new StringType("VARCHAR", text == null ? 0 : CodePointText.length(String.valueOf(text)));
         }
         if (literal.INTEGER_LITERAL() != null) {
             return NumericLiteralTypes.forDecimal(DecimalText.parse(literal.INTEGER_LITERAL().getText()));
@@ -779,7 +781,7 @@ public class ColumnDefinitionParser implements CommandHandler {
                 // A masking policy attached in the column definition itself, on CREATE TABLE and on
                 // ALTER TABLE ADD COLUMN alike (live-verified), with the columns a conditional policy's USING
                 // gives its arguments.
-                maskingPolicy = getText(constraint.qualifiedName());
+                maskingPolicy = queryExecutor.resolveObjectName(constraint.objectName());
                 if (constraint.identifierList() != null) {
                     for (final FrostlakeParser.IdentifierContext id : constraint.identifierList().identifier()) {
                         maskingArguments.add(getText(id));
@@ -1762,7 +1764,10 @@ public class ColumnDefinitionParser implements CommandHandler {
                 if (literalCtx.literal().NULL() != null) {
                     return "NULL";
                 }
-                return parseLiteral(literalCtx.literal());
+                // A string literal stays a string however it is spelled: 'NULL' and 'current_date' write and
+                // are told back as the strings they are, never as the keywords they spell.
+                final Object literal = parseLiteral(literalCtx.literal());
+                return literal instanceof String ? new StringLiteralDefault((String) literal) : literal;
             }
 
             // Handle qualified names (identifiers like CURRENT_TIMESTAMP, TRUE, FALSE, NULL)

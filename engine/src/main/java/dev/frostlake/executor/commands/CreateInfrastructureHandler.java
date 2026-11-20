@@ -818,7 +818,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
      */
     private static final Set<String> STAGE_OPTION_NAMES = Set.of(
         "CREDENTIALS", "STORAGE_INTEGRATION", "DIRECTORY", "COPY_OPTIONS",
-        "AWS_ROLE", "AWS_EXTERNAL_ID", "SNOWFLAKE_IAM_USER", "ENCRYPTION");
+        "AWS_ROLE", "AWS_EXTERNAL_ID", "SNOWFLAKE_IAM_USER", "ENCRYPTION", StageEndpoint.PROPERTY);
 
     /** Whether a word names a stage property a CREATE STAGE or an ALTER STAGE … SET takes by a plain name. */
     static boolean isStageOption(final String name) {
@@ -882,6 +882,23 @@ public class CreateInfrastructureHandler implements CommandHandler {
             + " cannot be created: its ORIGIN is not reached from this engine."));
     }
 
+    /** A key of the CREDENTIALS is judged by its shape before the stage's name is (see StageCredentials). */
+    private static void requireWellFormedCredentials(final FrostlakeParser.StagePropertiesContext properties) {
+        if (properties == null) {
+            return;
+        }
+        final List<FrostlakeParser.ParenOptionListContext> credentials = new ArrayList<>();
+        final List<FrostlakeParser.ParenOptionListContext> formats = new ArrayList<>();
+        for (final FrostlakeParser.StageOptionContext option : properties.stageOption()) {
+            if (option.parenOptionList() != null && StageCredentials.names(option.identifier())) {
+                credentials.add(option.parenOptionList());
+            } else if (option.parenOptionList() != null && option.FILE_FORMAT() != null) {
+                formats.add(option.parenOptionList());
+            }
+        }
+        StageCredentials.requireWellFormed(credentials, formats);
+    }
+
     public Object handleCreateStage(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         final String[] stageParts = queryExecutor.createdNameParts(ctx);
         final String stageName = QualifiedName.join(stageParts);
@@ -890,6 +907,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             // Asked before the stage a replacement drops is gone.
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_STAGE, stageName);
         }
+        requireWellFormedCredentials(ctx.stageProperties());
         try {
             DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists
                     && !TemporaryObjectStatements.isTemporary(ctx),
@@ -914,7 +932,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
             boolean sawFileFormat = false;
             boolean sawCloudAccessOption = false;
             Integration storageIntegration = null;
+            String endpoint = null;
             boolean credentials = false;
+            FrostlakeParser.ParenOptionListContext credentialsGroup = null;
             StageDirectoryOptions directory = null;
             final Map<String, String> formatOptions = new LinkedHashMap<>();
             final Map<String, String> copyOptions = new LinkedHashMap<>();
@@ -996,6 +1016,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
                                 : ParseTreeText.getOriginalText(option.copyOptionValue());
                             continue;
                         }
+                        if (StageEndpoint.PROPERTY.equals(key)) {
+                            // Judged once the location, which may be written after it, is known (see StageEndpoint).
+                            endpoint = StageEndpoint.read(option.copyOptionValue());
+                            continue;
+                        }
                         if ("STORAGE_INTEGRATION".equals(key)) {
                             // The integration is looked up before the stage's own shape is judged.
                             storageIntegration = StorageIntegrationReference.require(catalog,
@@ -1004,6 +1029,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
                         if ("CREDENTIALS".equals(key) || "STORAGE_INTEGRATION".equals(key)) {
                             sawCloudAccessOption = true;
                             credentials = credentials || "CREDENTIALS".equals(key);
+                            if ("CREDENTIALS".equals(key)) {
+                                credentialsGroup = option.parenOptionList();
+                            }
                         } else if ("DIRECTORY".equals(key)) {
                             directory = StageDirectoryOptions.read(option.parenOptionList(), true);
                         } else if ("COPY_OPTIONS".equals(key) && option.parenOptionList() != null) {
@@ -1025,12 +1053,14 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
             CloudStageUrls.require(url);
             StorageIntegrationReference.requireLocation(storageIntegration, url);
+            StageCredentials.requireFilled(credentialsGroup, url);
             // A GCS stage reaches its bucket through a storage integration alone (live-verified).
             if (storageIntegration == null && url != null && url.regionMatches(true, 0, "gcs://", 0, 6)) {
                 throw new RuntimeException(SqlCompilationError.of("Creation of stages with direct credentials,"
                     + " including accessing public stages, has been forbidden for GCS stages. See your account"
                     + " administrator for details."));
             }
+            StageEndpoint.require(endpoint, url);
             refuseLocalUrlUnlessEnabled(url);
             // A replacement drops the stage it replaces once the new one is judged whole, so a refused statement
             // leaves that stage as it was (live-verified).
@@ -1059,6 +1089,8 @@ public class CreateInfrastructureHandler implements CommandHandler {
             created.getCopyOptions().putAll(copyOptions);
             created.setEncryptionType(judgedEncryption == null ? null : judgedEncryption.type());
             created.setCredentials(credentials);
+            created.setEndpoint(endpoint);
+            created.setStorageIntegration(storageIntegration == null ? null : storageIntegration.getName());
             created.setEncryptionKey(judgedEncryption != null && judgedEncryption.key());
             if (directory != null) {
                 directory.applyTo(created);
@@ -1384,6 +1416,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
         // full path (live-verified).
         final FileFormat fileFormat = catalog.getFileFormatExact(name);
         if (fileFormat == null) {
+            // The options' names and values are judged before the format is looked for, IF EXISTS or not
+            // (live-verified).
+            if (ctx.fileFormatAction().SET() != null) {
+                FileFormatClause.judgeWithoutFormat(ctx.fileFormatAction().copyFormatOption());
+            }
             if (ctx.if_exists() != null) {
                 return null;
             }

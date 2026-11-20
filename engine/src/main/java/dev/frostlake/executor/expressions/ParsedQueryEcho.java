@@ -359,7 +359,10 @@ final class ParsedQueryEcho {
 
     /** A relation in FROM under its alias; a LATERAL and a SAMPLE written with it are not kept. */
     private String reference(final FrostlakeParser.TableReferenceContext ctx, final ParsedEchoPrinter printer) {
-        unmodelled = unmodelled || ctx.matchRecognizeClause() != null || ctx.pivotAlias() != null;
+        if (ctx.matchRecognizeClause() != null) {
+            return matchRecognize(ctx, printer);
+        }
+        unmodelled = unmodelled || ctx.pivotAlias() != null;
         final String relation = source(ctx.tableSource(), aliasOf(ctx), printer);
         if (ctx.pivotClause() != null) {
             // A pivoted relation is read from as a query over its source, the pivot not printed.
@@ -380,6 +383,31 @@ final class ParsedQueryEcho {
             return text.append(')').toString();
         }
         return relation;
+    }
+
+    /**
+     * A MATCH_RECOGNIZE relation (see {@link MatchRecognizeEcho}): the clause reads {@code SELECT *} of a table under
+     * its alias, or a derived query bare, its alias not kept.
+     */
+    private String matchRecognize(final FrostlakeParser.TableReferenceContext ctx, final ParsedEchoPrinter printer) {
+        final FrostlakeParser.TableSourceContext source = ctx.tableSource();
+        unmodelled = unmodelled || resolved || ctx.LATERAL() != null || ctx.sampleClause() != null;
+        final String input;
+        if (source.tableQualifiedName() != null && source.timeTravelClause() == null) {
+            input = "SELECT * FROM " + table(ParseTreeText.qualifiedNameParts(source.tableQualifiedName()),
+                aliasOf(ctx));
+        } else if (source.selectStatement() != null) {
+            input = statement(source.selectStatement());
+        } else {
+            unmodelled = true;
+            return "";
+        }
+        final MatchRecognizeEcho echo = new MatchRecognizeEcho(this, printer);
+        final FrostlakeParser.PivotAliasContext after = ctx.pivotAlias();
+        final String text = echo.relation(ctx.matchRecognizeClause(), input,
+            after == null ? null : ParseTreeText.getIdentifier(after.identifier()));
+        unmodelled = unmodelled || echo.isUnmodelled();
+        return text;
     }
 
     /** A name as the echo spells it: in quotes only where it needs them. */

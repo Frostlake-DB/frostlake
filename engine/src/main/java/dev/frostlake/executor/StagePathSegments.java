@@ -91,6 +91,26 @@ public final class StagePathSegments {
     }
 
     /**
+     * A file's path below a directory, its names joined by {@code /}. A name is kept whole, so a backslash in it —
+     * the NULL partition {@code \N} of an unload — stays a backslash rather than a separator.
+     *
+     * @param root the directory
+     * @param file a file below it
+     * @return the path, slash-separated
+     */
+    public static String relativeText(final Path root, final Path file) {
+        final Path relative = root.relativize(file);
+        final StringBuilder text = new StringBuilder();
+        for (int i = 0; i < relative.getNameCount(); i++) {
+            if (i > 0) {
+                text.append('/');
+            }
+            text.append(relative.getName(i).toString());
+        }
+        return text.toString();
+    }
+
+    /**
      * A slash-separated on-disk path back as the stage path that NAMED it: the inverse of
      * {@link #safe}, applied segment by segment, so a listing shows the path its writer wrote.
      *

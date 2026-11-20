@@ -29,5 +29,10 @@ enum SetOpColumnCoercion {
     TIMESTAMP,
     DATE,
     TIME,
-    BOOLEAN
+    BOOLEAN,
+    /**
+     * A column holding a semi-structured value: every value keys as the VARIANT order compares it, a number
+     * carried unwrapped beside a VARIANT one by its value.
+     */
+    VARIANT
 }

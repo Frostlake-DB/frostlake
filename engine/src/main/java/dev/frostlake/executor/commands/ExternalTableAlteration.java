@@ -63,6 +63,11 @@ final class ExternalTableAlteration {
         final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
         final Schema owner = catalog.requireOwningSchema(QualifiedName.of(parts));
         final String name = parts[parts.length - 1];
+        if (ExternalTableCommandHandler.find(owner, name) != null) {
+            // An external table that is there: no file is reached, so a refresh finds nothing and a property
+            // changes nothing.
+            return null;
+        }
         final RelationKind found = owner.relationKindOf(name);
         if (found != null) {
             throw new RuntimeException(SqlCompilationError.of("Invalid object type: '" + found.spelling() + "'"));

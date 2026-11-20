@@ -16,6 +16,7 @@
 
 package dev.frostlake.geo;
 
+import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.GeoValue;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -24,19 +25,18 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 /**
- * The shared geospatial engine behind the ST_ functions: WKT and GeoJSON parsing, WKT / WKB / GeoJSON
- * rendering, and the measure / predicate math. Live-verified model: Snowflake's GEOGRAPHY is a pure
- * SPHERE of radius {@code 6371010 m} ({@code ST_DISTANCE} of one degree
+ * The shared geospatial engine behind the ST_ functions: WKT, GeoJSON and (E)WKB parsing, WKT / WKB / GeoJSON
+ * rendering, and the measures (the relations are {@link GeoRelation}'s). Live-verified model: Snowflake's
+ * GEOGRAPHY is a pure SPHERE of radius {@code 6371010 m} ({@code ST_DISTANCE} of one degree
  * is 111195.10117748393 m, reproduced exactly), while {@code HAVERSINE} uses {@code 6371 km}; GEOMETRY is planar.
  * Supported shapes: Point, LineString, Polygon (with holes) and their Multi* forms plus
- * GeometryCollection parsing. Coordinates parsed from text stay BigDecimal (plain rendering, as
- * Snowflake shows for GEOGRAPHY); computed coordinates are doubles.
+ * GeometryCollection parsing. Coordinates parsed from text stay BigDecimal (written as {@link GeoNumbers#wkt}
+ * writes them); computed and WKB-read coordinates are doubles.
  */
 public final class GeoShapes {
 
@@ -58,43 +58,184 @@ public final class GeoShapes {
     private static final JsonNode EMPTY_SHAPE = MAPPER.createObjectNode().put("type", "EMPTY");
 
     /**
-     * Parses WKT or GeoJSON input into a {@link GeoValue}; raises Snowflake's message on anything
-     * else: {@code Error parsing Geo input: <input>. Did not recognize valid GeoJSON, (E)WKT or
-     * (E)WKB.} A WKT holding an EMPTY shape anywhere, {@code POINT EMPTY} or a collection with one among its members,
-     * is no value at all: null (live-verified: TO_GEOMETRY and TO_GEOGRAPHY of such a text are NULL).
+     * Parses the input of TO_GEOGRAPHY / TO_GEOMETRY: a BINARY is read as WKB or EWKB, a text as GeoJSON, (E)WKT or
+     * hex-written (E)WKB (see {@link #parse(String, boolean)}). A BINARY that is no well-formed WKB is refused with the
+     * WKB reader's sentence ({@code Error parsing WKB input: Trailing bytes not recognized.}, live-verified).
      *
-     * @return the value, or null for a WKT holding an EMPTY shape
+     * @return the value, or null for an input holding an EMPTY shape
+     */
+    public static GeoValue parse(final Object input, final boolean geography) {
+        if (input instanceof BinaryValue) {
+            final BinaryValue binary = (BinaryValue) input;
+            return fromWkb(binary.bytes(), binary.toHex(), geography, true);
+        }
+        return parse(input.toString(), geography);
+    }
+
+    /**
+     * Parses WKT, GeoJSON or hex-written (E)WKB input into a {@link GeoValue}; raises Snowflake's message on anything
+     * else: {@code Error parsing Geo input: <input>. Did not recognize valid GeoJSON, (E)WKT or (E)WKB.} A WKT holding
+     * an EMPTY shape anywhere, {@code POINT EMPTY} or a collection with one among its members, is no value at all:
+     * null (live-verified: TO_GEOMETRY and TO_GEOGRAPHY of such a text are NULL), and so is a WKB shape with no points.
+     * A GEOGRAPHY's coordinates must be longitudes in [-180, 180] and latitudes in [-90, 90] (see
+     * {@link #checkCoordinates}).
+     *
+     * @return the value, or null for an input holding an EMPTY shape
      */
     public static GeoValue parse(final String input, final boolean geography) {
         final String trimmed = input.trim();
+        if (isHex(trimmed)) {
+            return fromWkb(hexBytes(trimmed), input, geography, false);
+        }
+        JsonNode model = null;
+        int srid = -1;
         try {
             if (trimmed.startsWith("{")) {
-                final JsonNode json = MAPPER.readTree(trimmed);
-                final JsonNode model = normalizedGeoJson(json);
-                if (model != null) {
-                    return GeoValue.ofNode(model, geography, geography ? 4326 : 0);
-                }
+                model = normalizedGeoJson(MAPPER.readTree(trimmed));
             } else {
                 // EWKT: an SRID written ahead of the WKT, in any case and with blanks after its semicolon, which a
                 // GEOMETRY keeps and a GEOGRAPHY takes as 4326 alone (live-verified).
-                final int srid = ewktSrid(trimmed);
+                srid = ewktSrid(trimmed);
                 final String wkt = srid < 0 ? trimmed : trimmed.substring(trimmed.indexOf(';') + 1).trim();
                 if (srid >= 0 && geography && srid != 4326) {
                     throw new IllegalArgumentException("a GEOGRAPHY is read in SRID 4326 alone");
                 }
-                final JsonNode model = parseWkt(wkt);
+                model = parseWkt(wkt);
                 if (model == EMPTY_SHAPE) {
                     return null;
                 }
-                if (model != null) {
-                    return GeoValue.ofNode(model, geography, geography ? 4326 : Math.max(srid, 0));
-                }
             }
         } catch (final RuntimeException notGeo) {
-            // fall through to the uniform error below
+            model = null;
         }
-        throw new RuntimeException("Error parsing Geo input: " + input
+        if (model == null) {
+            throw unrecognized(input);
+        }
+        checkCoordinates(model, geography);
+        return GeoValue.ofNode(model, geography, geography ? 4326 : Math.max(srid, 0));
+    }
+
+    private static RuntimeException unrecognized(final String input) {
+        return new RuntimeException("Error parsing Geo input: " + input
             + ". Did not recognize valid GeoJSON, (E)WKT or (E)WKB.");
+    }
+
+    /** Reads (E)WKB bytes; {@code text} is how the refusal quotes the input. */
+    private static GeoValue fromWkb(final byte[] bytes, final String text, final boolean geography,
+                                    final boolean binary) {
+        final WkbReader reader = new WkbReader(bytes);
+        final JsonNode model;
+        try {
+            model = reader.read();
+        } catch (final WkbFormatException malformed) {
+            if (binary) {
+                throw malformed;
+            }
+            throw unrecognized(text);
+        } catch (final RuntimeException notGeo) {
+            throw unrecognized(text);
+        }
+        final int srid = reader.srid();
+        if (geography && srid >= 0 && srid != 4326) {
+            throw unrecognized(text);
+        }
+        if (model == null) {
+            return null;
+        }
+        checkCoordinates(model, geography);
+        return GeoValue.ofNode(model, geography, geography ? 4326 : Math.max(srid, 0));
+    }
+
+    /** Whether the text is hex digits alone, an even number of them: (E)WKB written as text. */
+    private static boolean isHex(final String text) {
+        if (text.isEmpty() || text.length() % 2 != 0) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            if (Character.digit(text.charAt(i), 16) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static byte[] hexBytes(final String hex) {
+        final byte[] out = new byte[hex.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            final int high = Character.digit(hex.charAt(2 * i), 16);
+            out[i] = (byte) ((high << 4) | Character.digit(hex.charAt(2 * i + 1), 16));
+        }
+        return out;
+    }
+
+    /**
+     * Refuses coordinates a value cannot hold (live-verified): a GEOGRAPHY's longitude outside [-180, 180] or latitude
+     * outside [-90, 90] ({@code GeoJSON::Polygon::Loop: Invalid Lng/Lat pair: '200,0'.}, the path naming the shapes
+     * down to the pair, the numbers to six significant digits), and a GEOMETRY coordinate that is no number
+     * ({@code Invalid GeoJSON. Coordinate value is not numeric: 'nan'.}).
+     */
+    public static void checkCoordinates(final JsonNode model, final boolean geography) {
+        final String type = model.get("type").asText();
+        if ("GeometryCollection".equals(type)) {
+            for (final JsonNode part : model.get("geometries")) {
+                checkCoordinates(part, geography, "GeometryCollection::");
+            }
+            return;
+        }
+        checkCoordinates(model, geography, "");
+    }
+
+    private static void checkCoordinates(final JsonNode model, final boolean geography, final String prefix) {
+        final String type = model.get("type").asText();
+        final JsonNode coordinates = model.get("coordinates");
+        switch (type) {
+            case "Point":
+                checkPair(coordinates, geography, prefix + "Point");
+                return;
+            case "LineString":
+            case "MultiPoint":
+                for (final JsonNode pt : coordinates) {
+                    checkPair(pt, geography, prefix + ("LineString".equals(type) ? type : "MultiPoint::Point"));
+                }
+                return;
+            case "Polygon":
+            case "MultiLineString":
+                for (final JsonNode line : coordinates) {
+                    for (final JsonNode pt : line) {
+                        checkPair(pt, geography,
+                            prefix + ("Polygon".equals(type) ? "Polygon::Loop" : "MultiLineString::LineString"));
+                    }
+                }
+                return;
+            case "MultiPolygon":
+                for (final JsonNode poly : coordinates) {
+                    for (final JsonNode ring : poly) {
+                        for (final JsonNode pt : ring) {
+                            checkPair(pt, geography, prefix + "MultiPolygon::Polygon::Loop");
+                        }
+                    }
+                }
+                return;
+            case "GeometryCollection":
+                checkCoordinates(model, geography);
+                return;
+            default:
+                // no other shape carries coordinates
+        }
+    }
+
+    private static void checkPair(final JsonNode pt, final boolean geography, final String path) {
+        final double lon = pt.get(0).asDouble();
+        final double lat = pt.get(1).asDouble();
+        if (geography) {
+            if (!(lon >= -180 && lon <= 180 && lat >= -90 && lat <= 90)) {
+                throw new RuntimeException("GeoJSON::" + path + ": Invalid Lng/Lat pair: '"
+                    + GeoNumbers.quoted(lon) + "," + GeoNumbers.quoted(lat) + "'.");
+            }
+        } else if (Double.isNaN(lon) || Double.isNaN(lat)) {
+            throw new RuntimeException("Invalid GeoJSON. Coordinate value is not numeric: '"
+                + GeoNumbers.quoted(Double.isNaN(lon) ? lon : lat) + "'.");
+        }
     }
 
     /** The SRID an EWKT text writes ahead of its WKT ({@code SRID=4326;POINT(1 2)}), or -1 where it writes none. */
@@ -392,16 +533,7 @@ public final class GeoShapes {
     }
 
     private static String coordinateText(final JsonNode c) {
-        if (c.isBigDecimal()) {
-            final BigDecimal stripped = c.decimalValue().stripTrailingZeros();
-            return stripped.scale() <= 0
-                ? stripped.toBigInteger().toString() : stripped.toPlainString();
-        }
-        final double d = c.asDouble();
-        if (d == Math.rint(d) && !Double.isInfinite(d)) {
-            return String.valueOf((long) d);
-        }
-        return String.valueOf(d);
+        return c.isBigDecimal() ? GeoNumbers.wkt(c.decimalValue()) : GeoNumbers.wkt(c.asDouble());
     }
 
     /** Little-endian WKB bytes (the ST_ASWKB form: {@code 0101000000…}). */
@@ -533,13 +665,6 @@ public final class GeoShapes {
         }
     }
 
-    /** Every line segment (pairs of consecutive points in LineString/ring members). */
-    public static List<double[][]> allSegments(final JsonNode model) {
-        final List<double[][]> segments = new ArrayList<double[][]>();
-        collectSegments(model, segments);
-        return segments;
-    }
-
     private static void collectSegments(final JsonNode model, final List<double[][]> out) {
         final String type = model.get("type").asText();
         switch (type) {
@@ -614,197 +739,11 @@ public final class GeoShapes {
         return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    /** The minimum distance between two geo values: spherical meters or planar units. */
-    public static double minDistance(final GeoValue a, final GeoValue b) {
-        final List<double[]> aPts = allPoints(a.node());
-        final List<double[]> bPts = allPoints(b.node());
-        double best = Double.MAX_VALUE;
-        // point-to-point over all vertex pairs …
-        for (final double[] p : aPts) {
-            for (final double[] q : bPts) {
-                best = Math.min(best, pointDistance(a.isGeography(), p, q));
-            }
-        }
-        // … refined by point-to-segment in both directions.
-        for (final double[][] seg : allSegments(b.node())) {
-            for (final double[] p : aPts) {
-                best = Math.min(best, pointToSegment(a.isGeography(), p, seg));
-            }
-        }
-        for (final double[][] seg : allSegments(a.node())) {
-            for (final double[] q : bPts) {
-                best = Math.min(best, pointToSegment(a.isGeography(), q, seg));
-            }
-        }
-        // inside-a-polygon means distance zero, as does any segment crossing.
-        if (contains(a, bPts) || contains(b, aPts) || segmentsCross(a.node(), b.node())) {
-            best = 0;
-        }
-        return best;
-    }
-
     private static double pointDistance(final boolean spherical, final double[] p, final double[] q) {
         if (spherical) {
             return sphereDistance(p[0], p[1], q[0], q[1]);
         }
         return Math.hypot(p[0] - q[0], p[1] - q[1]);
-    }
-
-    private static double pointToSegment(final boolean spherical, final double[] p, final double[][] seg) {
-        // Planar projection of the point onto the segment; for the sphere this is an approximation
-        // (evaluated at the projected parameter), adequate at the segment lengths tests use.
-        final double ax = seg[0][0];
-        final double ay = seg[0][1];
-        final double bx = seg[1][0];
-        final double by = seg[1][1];
-        final double dx = bx - ax;
-        final double dy = by - ay;
-        final double lenSq = dx * dx + dy * dy;
-        double t = lenSq == 0 ? 0 : ((p[0] - ax) * dx + (p[1] - ay) * dy) / lenSq;
-        t = Math.max(0, Math.min(1, t));
-        final double[] proj = {ax + t * dx, ay + t * dy};
-        return pointDistance(spherical, p, proj);
-    }
-
-    private static boolean contains(final GeoValue container, final List<double[]> points) {
-        final List<JsonNode> polygons = polygonRingSets(container.node());
-        if (polygons.isEmpty() || points.isEmpty()) {
-            return false;
-        }
-        for (final double[] p : points) {
-            if (!pointInPolygons(polygons, p[0], p[1])) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** Point-in-polygon over outer ring minus holes (ray casting), across all polygons. */
-    public static boolean pointInPolygons(final List<JsonNode> polygons, final double x, final double y) {
-        for (final JsonNode rings : polygons) {
-            boolean inOuter = false;
-            boolean inHole = false;
-            for (int r = 0; r < rings.size(); r++) {
-                if (pointInRing(rings.get(r), x, y)) {
-                    if (r == 0) {
-                        inOuter = true;
-                    } else {
-                        inHole = true;
-                    }
-                }
-            }
-            if (inOuter && !inHole) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean pointInRing(final JsonNode ring, final double x, final double y) {
-        boolean inside = false;
-        for (int i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
-            final double xi = ring.get(i).get(0).asDouble();
-            final double yi = ring.get(i).get(1).asDouble();
-            final double xj = ring.get(j).get(0).asDouble();
-            final double yj = ring.get(j).get(1).asDouble();
-            if (onSegment(x, y, xi, yi, xj, yj)) {
-                return true;   // boundary counts as contained (ST_CONTAINS of a vertex is TRUE)
-            }
-            if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
-                inside = !inside;
-            }
-        }
-        return inside;
-    }
-
-    private static boolean onSegment(final double x, final double y,
-                                     final double ax, final double ay, final double bx, final double by) {
-        final double cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-        if (Math.abs(cross) > 1e-12) {
-            return false;
-        }
-        return x >= Math.min(ax, bx) - 1e-12 && x <= Math.max(ax, bx) + 1e-12
-            && y >= Math.min(ay, by) - 1e-12 && y <= Math.max(ay, by) + 1e-12;
-    }
-
-    /** Whether any segments of the two models cross (proper or touching intersection). */
-    public static boolean segmentsCross(final JsonNode a, final JsonNode b) {
-        final List<double[][]> aSegs = allSegments(a);
-        final List<double[][]> bSegs = allSegments(b);
-        for (final double[][] s : aSegs) {
-            for (final double[][] t : bSegs) {
-                if (segmentIntersect(s, t)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean segmentIntersect(final double[][] s, final double[][] t) {
-        final double d1 = cross(t[0], t[1], s[0]);
-        final double d2 = cross(t[0], t[1], s[1]);
-        final double d3 = cross(s[0], s[1], t[0]);
-        final double d4 = cross(s[0], s[1], t[1]);
-        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0))
-                && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-            return true;
-        }
-        return (d1 == 0 && between(t[0], t[1], s[0]))
-            || (d2 == 0 && between(t[0], t[1], s[1]))
-            || (d3 == 0 && between(s[0], s[1], t[0]))
-            || (d4 == 0 && between(s[0], s[1], t[1]));
-    }
-
-    private static double cross(final double[] a, final double[] b, final double[] p) {
-        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
-    }
-
-    private static boolean between(final double[] a, final double[] b, final double[] p) {
-        return p[0] >= Math.min(a[0], b[0]) - 1e-12 && p[0] <= Math.max(a[0], b[0]) + 1e-12
-            && p[1] >= Math.min(a[1], b[1]) - 1e-12 && p[1] <= Math.max(a[1], b[1]) + 1e-12;
-    }
-
-    /** Whether the two values intersect at all: shared area, crossing edges, or containment. */
-    public static boolean intersects(final GeoValue a, final GeoValue b) {
-        if (segmentsCross(a.node(), b.node())) {
-            return true;
-        }
-        final List<JsonNode> aPolys = polygonRingSets(a.node());
-        final List<JsonNode> bPolys = polygonRingSets(b.node());
-        for (final double[] p : allPoints(b.node())) {
-            if (!aPolys.isEmpty() && pointInPolygons(aPolys, p[0], p[1])) {
-                return true;
-            }
-        }
-        for (final double[] p : allPoints(a.node())) {
-            if (!bPolys.isEmpty() && pointInPolygons(bPolys, p[0], p[1])) {
-                return true;
-            }
-        }
-        // identical points (point-point intersection)
-        for (final double[] p : allPoints(a.node())) {
-            for (final double[] q : allPoints(b.node())) {
-                if (p[0] == q[0] && p[1] == q[1]) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /** Whether {@code inner} lies entirely within {@code outer} (vertices inside, no edge crossings out). */
-    public static boolean within(final GeoValue inner, final GeoValue outer) {
-        final List<JsonNode> polygons = polygonRingSets(outer.node());
-        if (polygons.isEmpty()) {
-            return false;
-        }
-        for (final double[] p : allPoints(inner.node())) {
-            if (!pointInPolygons(polygons, p[0], p[1])) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Total length: great-circle meters for geography, planar units for geometry. */

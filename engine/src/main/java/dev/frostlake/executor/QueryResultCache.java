@@ -43,8 +43,9 @@ import java.util.UUID;
  * {@link #beginSessionScope(String)} / {@link #clearSessionScope()}; anything else shares one
  * implicit session, which is what an embedded engine wants.
  *
- * <p>Cached RESULTS stay shared across sessions: a query ID is a handle anyone holding it can scan,
- * which is how Snowflake behaves. What is KEPT is per session: each session keeps its own last results and its
+ * <p>Cached RESULTS stay shared across the sessions of one user: DESCRIBE RESULT and RESULT_SCAN read a result
+ * from any session of the user whose statement answered it, and from no other user's, whatever the role (documented: only the user who ran a query can process its output; to any
+ * other user its ID names no statement). What is KEPT is per session: each session keeps its own last results and its
  * whole history, so another session's statements never evict them — a session's LAST_QUERY_ID and RESULT_SCAN
  * answer the same whatever runs beside it. A session that ends hands its results to a pool of finished
  * sessions' results, still readable by their IDs, of the same bound.
@@ -91,7 +92,9 @@ public class QueryResultCache {
     /** The IDs of the results of sessions that ended, oldest first, at most {@link #maxCachedResults}. */
     private final Deque<String> finishedResults = new ArrayDeque<String>();
     private final Map<String, QueryIdHistory> historyBySession;
-    private final Map<String, Boolean> failedQueryIds;
+    private final Map<String, String> failedQueryIds;
+    /** Who the calling thread's statement runs for, or null when no user owns a result. */
+    private ResultUser resultUser;
     private final ThreadLocal<String> boundSession = new ThreadLocal<>();
     /** The query ID the next statement of this thread takes, one a client was told before (see #assignNextQueryId). */
     private static final ThreadLocal<String> ASSIGNED_ID = new ThreadLocal<>();
@@ -126,12 +129,36 @@ public class QueryResultCache {
                 return true;
             }
         };
-        this.failedQueryIds = new LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+        this.failedQueryIds = new LinkedHashMap<String, String>(16, 0.75f, false) {
             @Override
-            protected boolean removeEldestEntry(final Map.Entry<String, Boolean> eldest) {
+            protected boolean removeEldestEntry(final Map.Entry<String, String> eldest) {
                 return size() > maxCachedResults;
             }
         };
+    }
+
+    /**
+     * Makes each result belong to the user its statement runs for, so another user reads it as no statement at all.
+     *
+     * @param user who the calling thread's statement runs for
+     */
+    public void ownResultsBy(final ResultUser user) {
+        this.resultUser = user;
+    }
+
+    /** The user the calling thread's statement runs for, or null when results belong to no one. */
+    private String currentUser() {
+        final ResultUser source = resultUser;
+        return source == null ? null : source.currentUser();
+    }
+
+    /** Whether a result its owner's statement answered is one the calling thread's user may read. */
+    private boolean readable(final String owner) {
+        if (owner == null) {
+            return true;
+        }
+        final String reader = currentUser();
+        return reader == null || reader.equals(owner);
     }
 
     /**
@@ -260,6 +287,16 @@ public class QueryResultCache {
     }
 
     /**
+     * Whether the next statement this thread runs takes a query ID its client was told before (see
+     * {@link #assignNextQueryId}).
+     *
+     * @return true while an assigned ID waits to be taken
+     */
+    public static boolean hasAssignedQueryId() {
+        return ASSIGNED_ID.get() != null;
+    }
+
+    /**
      * A query ID no statement has taken yet, for a client to be told before its statement runs (see
      * {@link #assignNextQueryId}).
      *
@@ -279,8 +316,9 @@ public class QueryResultCache {
      */
     public String cacheResult(final String sql, final ResultSet result, final String reserved) {
         final String queryId = reserved != null ? reserved : generateQueryId();
+        final String user = currentUser();
         synchronized (this) {
-            cache.put(queryId, new CachedResult(sql, result));
+            cache.put(queryId, new CachedResult(sql, result, user));
             final long cells = cellsOf(result);
             final Long replaced = cellsHeld.put(queryId, Long.valueOf(cells));
             heldCells += cells - (replaced != null ? replaced.longValue() : 0L);
@@ -318,7 +356,7 @@ public class QueryResultCache {
     public ResultSet getResult(final String queryId) {
         synchronized (this) {
             final CachedResult cached = cached(queryId);
-            return cached != null ? cached.getResult() : null;
+            return cached != null && readable(cached.getUser()) ? cached.getResult() : null;
         }
     }
 
@@ -355,7 +393,7 @@ public class QueryResultCache {
     public String getSql(final String queryId) {
         synchronized (this) {
             final CachedResult cached = cached(queryId);
-            return cached != null ? cached.getSql() : null;
+            return cached != null && readable(cached.getUser()) ? cached.getSql() : null;
         }
     }
 
@@ -389,7 +427,8 @@ public class QueryResultCache {
      */
     public boolean hasResult(final String queryId) {
         synchronized (this) {
-            return cache.containsKey(queryId);
+            final CachedResult cached = cache.get(queryId);
+            return cached != null && readable(cached.getUser());
         }
     }
 
@@ -459,8 +498,9 @@ public class QueryResultCache {
      */
     public String generateFailedQueryId(final String sql, final String reserved) {
         final String queryId = generateQueryId(sql, reserved);
+        final String user = currentUser();
         synchronized (this) {
-            failedQueryIds.put(queryId, Boolean.TRUE);
+            failedQueryIds.put(queryId, user != null ? user : "");
         }
         return queryId;
     }
@@ -473,7 +513,8 @@ public class QueryResultCache {
      */
     public boolean hasFailed(final String queryId) {
         synchronized (this) {
-            return failedQueryIds.containsKey(queryId);
+            final String owner = failedQueryIds.get(queryId);
+            return owner != null && readable(owner.isEmpty() ? null : owner);
         }
     }
 

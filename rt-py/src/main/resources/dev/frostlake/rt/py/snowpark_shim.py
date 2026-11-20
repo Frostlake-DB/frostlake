@@ -1061,6 +1061,10 @@ def _frostlake_install_snowpark():
             return _column_ref(name)
 
         def __getitem__(self, name):
+            # An int is a column's position, as Snowpark reads one, so a position past the last column ends
+            # iteration rather than naming a column forever.
+            if isinstance(name, int) and not isinstance(name, bool):
+                return _column_ref(self.columns[name])
             return _column_ref(name)
 
         def with_column(self, name, column):

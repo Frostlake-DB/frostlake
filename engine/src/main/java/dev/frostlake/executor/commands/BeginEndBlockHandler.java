@@ -46,6 +46,7 @@ import dev.frostlake.executor.StatementClock;
 import dev.frostlake.executor.UncaughtStatementFailure;
 import dev.frostlake.executor.UndeclaredScriptVariableException;
 import dev.frostlake.executor.UnrunBlocks;
+import dev.frostlake.executor.VariableKey;
 import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.SubqueryExpression;
 import dev.frostlake.executor.procedural.BuiltInExceptions;
@@ -141,7 +142,7 @@ public class BeginEndBlockHandler implements CommandHandler {
         for (final String name : proceduralExecutor().getAllVariables().keySet()) {
             final DataType type = proceduralExecutor().getDeclaredVariableType(name);
             if (type != null) {
-                types.put(ScriptingNameValidator.canonical(name), type);
+                types.put(name, type);
             }
         }
         return types;
@@ -401,7 +402,10 @@ public class BeginEndBlockHandler implements CommandHandler {
         // Compile the WHOLE block before running any of it, as Snowflake does: a name that resolves to
         // nothing is refused even on a branch this run will not take. Seeded with what is already in
         // scope — a stored procedure's parameters, or an enclosing block's variables.
-        final Set<String> inScope = new HashSet<String>(proceduralExecutor().getAllVariables().keySet());
+        final Set<String> inScope = new HashSet<String>();
+        for (final String name : proceduralExecutor().getAllVariables().keySet()) {
+            inScope.add(VariableKey.written(name));
+        }
         // A quoted parameter is read by its own name alone: "low" is no LOW, and LOW no "low" (live-verified). The
         // names in scope are read as written, so it goes in quoted.
         for (final String parameter : parameters) {
@@ -772,7 +776,7 @@ public class BeginEndBlockHandler implements CommandHandler {
         for (final FrostlakeParser.StatementContext statement : block.statementList().statement()) {
             final FrostlakeParser.ProceduralStatementContext procedural = statement.proceduralStatement();
             if (procedural != null && procedural.letStatement() != null) {
-                names.add(visitor.getText(procedural.letStatement().variableName()).toUpperCase(Locale.ROOT));
+                names.add(visitor.getText(procedural.letStatement().variableName()));
             }
         }
         return names;

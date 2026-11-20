@@ -157,6 +157,8 @@ public class AppObjectListing {
             add(names, values, "query_warehouse", object.getQueryWarehouse());
             add(names, values, "url_id", object.getUrlId());
             addPackagesAndAccess(names, values, object);
+            add(names, values, "compute_pool", null);
+            add(names, values, "runtime_name", null);
             return oneRow(names, values);
         }
         add(names, values, "title", object.getTitle());
@@ -303,8 +305,8 @@ public class AppObjectListing {
 
     private static void addPackagesAndAccess(final List<String> names, final List<Object> values,
                                              final AppObject object) {
-        add(names, values, "default_packages", null);
-        add(names, values, "user_packages", null);
+        add(names, values, "default_packages", STREAMLIT_PACKAGES);
+        add(names, values, "user_packages", "");
         addAccess(names, values, object);
     }
 

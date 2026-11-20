@@ -30,10 +30,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /**
  * Grants passed on through a grant option, and the REVOKE that reaches them (documented): a grant a role makes
  * through its option is recorded in its own name, GRANTED_BY, and depends on the grant that gave the option. A
- * REVOKE taking the option away - with the privilege, or alone through GRANT OPTION FOR - is refused under RESTRICT,
- * the default, while such a grant stands, and takes it back under CASCADE, the grants made through it after it. The
- * grantor takes back what it granted; a role that holds the privilege from another grantor keeps the grant it held.
- * The live account allows no CREATE ROLE, CREATE USER or GRANT, so the rule is held by the embedded engine.
+ * REVOKE taking the option away - with the privilege, or alone through GRANT OPTION FOR - skips that grant under
+ * RESTRICT, the default, while such a grant stands, and reports itself partially executed; under CASCADE it takes
+ * the grant back with the grants made through it after it. The grantor takes back what it granted; a role that holds
+ * the privilege from two grantors holds two grants, and keeps the one the revoke did not reach (live-verified).
  */
 public class DependentGrantRevokeTest {
 
@@ -91,10 +91,10 @@ public class DependentGrantRevokeTest {
         }, sql).getMessage();
     }
 
-    /** The SELECT grants on the table, each as grantee, grant option and grantor, in grantee order. */
+    /** The SELECT grants on the table, each as grantee, grant option and grantor, in grantee then grantor order. */
     private String selectGrants() {
         final ResultSet rs = engine.executeQuery(SHOW + " ->> SELECT \"grantee_name\" || ':' || \"grant_option\" || ':'"
-            + " || \"granted_by\" AS g FROM $1 WHERE \"privilege\" = 'SELECT' ORDER BY \"grantee_name\"");
+            + " || \"granted_by\" AS g FROM $1 WHERE \"privilege\" = 'SELECT' ORDER BY \"grantee_name\", \"granted_by\"");
         final StringBuilder out = new StringBuilder();
         while (rs.next()) {
             out.append(out.length() > 0 ? " " : "").append(rs.getValue(0));
@@ -113,10 +113,9 @@ public class DependentGrantRevokeTest {
         }
     }
 
-    private static String dependent(final String grantee) {
-        return "SQL execution error: Dependent grant of privilege 'SELECT' on securable 'P.PUBLIC.T' to role '"
-            + grantee + "' exists. It must be revoked first. More than one dependent grant may exist: use CASCADE"
-            + " option to revoke them all.";
+    private static String dependent(final int revoked, final int skipped) {
+        return "Revoke partially executed: " + revoked + " grant(s) revoked, " + skipped + " grant(s) skipped due to"
+            + " dependent grants and no CASCADE is specified.";
     }
 
     @Test
@@ -134,9 +133,9 @@ public class DependentGrantRevokeTest {
 
     @Test
     public void restrictRefusesWhileADependentGrantStandsAndChangesNothing() {
-        assertEquals(dependent("C"), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE b"));
-        assertEquals(dependent("C"), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE b RESTRICT"));
-        assertEquals(dependent("B"), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE a"));
+        assertEquals(dependent(0, 1), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE b"));
+        assertEquals(dependent(0, 1), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE b RESTRICT"));
+        assertEquals(dependent(0, 1), refusal("REVOKE SELECT ON TABLE p.public.t FROM ROLE a"));
         assertEquals("A:true:SYSADMIN B:true:A C:false:B", selectGrants());
         assertEquals("1", reads("UC", "c"));
     }
@@ -159,7 +158,7 @@ public class DependentGrantRevokeTest {
 
     @Test
     public void theGrantOptionAloneIsTakenBackTheSameWay() {
-        assertEquals(dependent("C"), refusal("REVOKE GRANT OPTION FOR SELECT ON TABLE p.public.t FROM ROLE b"));
+        assertEquals(dependent(0, 1), refusal("REVOKE GRANT OPTION FOR SELECT ON TABLE p.public.t FROM ROLE b"));
         engine.execute("REVOKE GRANT OPTION FOR SELECT ON TABLE p.public.t FROM ROLE b CASCADE");
         assertEquals("A:true:SYSADMIN B:false:A", selectGrants());
         assertEquals("1", reads("UB", "b"));
@@ -185,7 +184,7 @@ public class DependentGrantRevokeTest {
         as("UB", "b");
         engine.execute("GRANT SELECT ON TABLE p.public.t TO ROLE d");
         asSystem();
-        assertEquals("A:true:SYSADMIN B:true:A C:false:B D:false:SYSADMIN", selectGrants());
+        assertEquals("A:true:SYSADMIN B:true:A C:false:B D:false:B D:false:SYSADMIN", selectGrants());
         engine.execute("REVOKE SELECT ON TABLE p.public.t FROM ROLE b CASCADE");
         assertEquals("A:true:SYSADMIN D:false:SYSADMIN", selectGrants());
     }

@@ -19,6 +19,7 @@ package dev.frostlake.geo;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.types.GeographyType;
 import dev.frostlake.values.GeoValue;
+import tools.jackson.databind.JsonNode;
 
 import java.util.List;
 
@@ -29,8 +30,10 @@ public class StMakePoint extends BuiltInFunction {
     @Override
     public Object evaluate(final List<Object> args) {
         if (args.get(0) == null || args.get(1) == null) return null;
-        return GeoValue.ofNode(GeoShapes.pointModel(
-            ((Number) args.get(0)).doubleValue(), ((Number) args.get(1)).doubleValue()), true, 4326);
+        final JsonNode point = GeoShapes.pointModel(
+            ((Number) args.get(0)).doubleValue(), ((Number) args.get(1)).doubleValue());
+        GeoShapes.checkCoordinates(point, true);
+        return GeoValue.ofNode(point, true, 4326);
     }
 
     @Override

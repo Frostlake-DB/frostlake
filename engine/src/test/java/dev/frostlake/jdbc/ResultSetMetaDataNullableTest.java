@@ -30,10 +30,11 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * ResultSetMetaData.isNullable does NOT follow the rule the catalog surfaces follow, which is the
- * whole point of this test: the driver answers {@code columnNullable} only for a column it KNOWS
- * accepts NULL, and {@code columnNoNulls} for everything else — a NOT NULL column, an expression over
- * one, and a bare literal alike. So {@code SELECT UPPER(v)} reads columnNoNulls here while
- * INFORMATION_SCHEMA.COLUMNS reports that same column nullable.
+ * whole point of this test: the driver answers whether the projection can answer NULL — a NOT NULL
+ * column, an expression over one and a non-NULL literal read {@code columnNoNulls}, while a NULL
+ * literal, a NULL-yielding call and an expression over a nullable column read {@code columnNullable}.
+ * So {@code SELECT UPPER(v)} reads columnNoNulls here while INFORMATION_SCHEMA.COLUMNS reports that
+ * same column nullable.
  *
  * <p>Measured against the account's own driver, which is what a caller compares Frostlake to.
  */
@@ -85,6 +86,20 @@ public class ResultSetMetaDataNullableTest extends BaseJdbcTest {
     @Test
     public void aLiteralReadsNoNulls() throws SQLException {
         assertEquals("NoNulls|NoNulls", nullabilityOf("SELECT 1 AS one, 'a' AS ltr FROM jn_t"));
+    }
+
+    /** A column that can answer NULL reads columnNullable: a NULL literal, typed or not, and NULL-yielding calls. */
+    @Test
+    public void aNullableExpressionReadsNullable() throws SQLException {
+        assertEquals("Nullable|Nullable|Nullable|Nullable|Nullable|Nullable|Nullable|Nullable",
+            nullabilityOf("SELECT NULL AS n, NULL::NUMBER(10,2) AS d, NULLIF(1, 1) AS ni, TRY_CAST('x' AS INT) AS tc,"
+                + " NULL::BOOLEAN AS b, NULL::TIMESTAMP_NTZ AS ts, PARSE_JSON(NULL) AS pj, TO_BINARY(NULL) AS tb"));
+    }
+
+    /** An expression over a nullable column reads columnNullable. */
+    @Test
+    public void anExpressionOverANullableColumnReadsNullable() throws SQLException {
+        assertEquals("Nullable|Nullable", nullabilityOf("SELECT UPPER(w) AS uw, w || 'x' AS wx FROM jn_t"));
     }
 
     /**

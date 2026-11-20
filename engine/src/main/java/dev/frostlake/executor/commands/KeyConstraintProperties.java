@@ -87,6 +87,28 @@ final class KeyConstraintProperties {
         return properties;
     }
 
+    /**
+     * Judges the properties of every key a column list writes, in a column definition or at table level, so a list
+     * the account refuses is refused before the statement changes anything: a CREATE OR REPLACE TABLE refused for
+     * its properties leaves the table it would have replaced standing (live-verified).
+     *
+     * @param columns the column list, or null when the statement writes none
+     */
+    static void judge(final FrostlakeParser.ColumnListContext columns) {
+        if (columns == null) {
+            return;
+        }
+        for (final FrostlakeParser.ColumnOrConstraintContext item : columns.columnOrConstraint()) {
+            if (item.columnDef() != null) {
+                for (final FrostlakeParser.ColumnConstraintContext constraint : item.columnDef().columnConstraint()) {
+                    read(constraint.keyConstraintProperty());
+                }
+            } else if (item.tableConstraint() != null) {
+                read(item.tableConstraint().keyConstraintProperty());
+            }
+        }
+    }
+
     /** A property's value, which a second writing may repeat and may not contradict. */
     private static Boolean settled(final Boolean before, final boolean now) {
         if (before != null && before.booleanValue() != now) {

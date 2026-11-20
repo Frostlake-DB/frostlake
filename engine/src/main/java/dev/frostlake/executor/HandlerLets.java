@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -84,7 +83,7 @@ public final class HandlerLets {
         if (unread.isEmpty()) {
             return;
         }
-        final String canonical = name.toUpperCase(Locale.ROOT);
+        final String canonical = VariableKey.of(name);
         for (final Set<String> names : unread) {
             names.remove(canonical);
         }
@@ -101,7 +100,7 @@ public final class HandlerLets {
         if (unread.isEmpty() || name == null) {
             return;
         }
-        final String canonical = name.toUpperCase(Locale.ROOT);
+        final String canonical = VariableKey.of(name);
         for (final Set<String> names : unread) {
             if (!names.contains(canonical)) {
                 continue;
@@ -151,7 +150,7 @@ public final class HandlerLets {
             final Token symbol = ((TerminalNode) tree).getSymbol();
             final Token before = previous[0];
             previous[0] = symbol;
-            if (!canonical.equals(symbol.getText().toUpperCase(Locale.ROOT))) {
+            if (!canonical.equals(VariableKey.ofWritten(symbol.getText()))) {
                 return null;
             }
             return before != null && ":".equals(before.getText()) && before.getStopIndex() + 1 == symbol.getStartIndex()

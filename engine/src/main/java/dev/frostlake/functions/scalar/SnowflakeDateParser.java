@@ -181,7 +181,6 @@ public final class SnowflakeDateParser {
             case "S":
                 return parseNumber(SECOND, TWO_DIGIT_WIDTHS, 0, 59, index, pos);
             case "MON":
-            case "MMM":
             case "MMMM":
                 return parseMonthName(index, pos);
             case "DY":

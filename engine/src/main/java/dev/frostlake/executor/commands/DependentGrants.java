@@ -30,11 +30,12 @@ import java.util.Set;
 
 /**
  * The grants a REVOKE reaches beside the one it names (documented). A role holding a privilege WITH GRANT OPTION
- * that passes it on makes a grant recorded in its own name, which depends on the grant that gave it the option.
- * When a REVOKE takes that option away - with the privilege, or alone through GRANT OPTION FOR - the grants made
- * through it are left without it: RESTRICT, the default, refuses the REVOKE before anything changes, and CASCADE takes
- * those grants back too, and the grants made through theirs after them. Grants an owner makes stand on its ownership,
- * so revoking a privilege from the object's owner leaves them.
+ * that passes it on makes a grant recorded in its own name, which depends on the grantee holding the option. When a
+ * REVOKE takes the last instance of the option away - with the privilege, or alone through GRANT OPTION FOR - the
+ * grants made through it are left without it: RESTRICT, the default, skips the instances that carry the option and
+ * revokes the rest, then reports the statement partially executed; CASCADE takes those grants back too, and the
+ * grants made through theirs after them, each counted as a grant the statement took back (live-verified). Grants an
+ * owner makes stand on its ownership, so revoking a privilege from the object's owner leaves them.
  */
 final class DependentGrants {
 
@@ -48,33 +49,27 @@ final class DependentGrants {
     }
 
     /**
-     * Refuses a RESTRICT revoke that would leave a grant made through the grantee's option without it.
+     * Whether a grant made through the grantee's option stands: one instance of the privilege, held by any role or
+     * user, recorded in the grantee's name.
      *
      * @param objectType the object's kind as privileges record it
      * @param objectName the object's name as privileges record it
      * @param privilege  the privilege revoked, or whose grant option is
      * @param grantee    the account role losing the option
-     * @param owner      the object's owner, whose grants stand on its ownership
+     * @return whether such a grant stands
      */
-    void requireNone(final String objectType, final String objectName, final Privilege privilege,
-                     final Role grantee, final String owner) {
-        if (!losesOption(objectType, objectName, privilege, grantee, owner)) {
-            return;
-        }
+    boolean exist(final String objectType, final String objectName, final Privilege privilege, final Role grantee) {
         for (final Role dependent : roles()) {
-            if (madeBy(dependent.recordedPrivilegeGrantor(objectType, objectName, privilege), grantee)
-                    && dependent.hasPrivilege(objectType, objectName, privilege)) {
-                throw refusal(privilege, objectName, dependent instanceof DatabaseRole ? "database role" : "role",
-                    dependent instanceof DatabaseRole ? ((DatabaseRole) dependent).getQualifiedName()
-                        : dependent.getName());
+            if (madeBy(dependent.privilegeGrantors(objectType, objectName, privilege), grantee) != null) {
+                return true;
             }
         }
         for (final User dependent : catalog.getAllUsers()) {
-            if (madeBy(dependent.recordedPrivilegeGrantor(objectType, objectName, privilege), grantee)
-                    && dependent.hasPrivilege(objectType, objectName, privilege)) {
-                throw refusal(privilege, objectName, "user", dependent.getName());
+            if (madeBy(dependent.privilegeGrantors(objectType, objectName, privilege), grantee) != null) {
+                return true;
             }
         }
+        return false;
     }
 
     /**
@@ -95,14 +90,17 @@ final class DependentGrants {
     }
 
     /**
-     * Takes back the grants made through an option the grantee lost, and the grants made through theirs.
+     * Takes back the grants made through an option the grantee lost, and the grants made through theirs: each
+     * instance recorded in a grantor's name that no longer holds the option.
      *
      * @param objectType the object's kind as privileges record it
      * @param objectName the object's name as privileges record it
      * @param privilege  the privilege whose grants are taken back
      * @param grantee    the account role that lost the option
+     * @return how many instances were taken back
      */
-    void revokeAll(final String objectType, final String objectName, final Privilege privilege, final Role grantee) {
+    int revokeAll(final String objectType, final String objectName, final Privilege privilege, final Role grantee) {
+        int taken = 0;
         final Set<String> visited = new HashSet<>();
         visited.add(grantee.getName());
         final List<Role> pending = new ArrayList<>();
@@ -110,29 +108,41 @@ final class DependentGrants {
         while (!pending.isEmpty()) {
             final Role grantor = pending.remove(pending.size() - 1);
             for (final Role dependent : roles()) {
-                if (!madeBy(dependent.recordedPrivilegeGrantor(objectType, objectName, privilege), grantor)
-                        || !dependent.hasPrivilege(objectType, objectName, privilege)) {
+                final String recorded = madeBy(dependent.privilegeGrantors(objectType, objectName, privilege), grantor);
+                if (recorded == null) {
                     continue;
                 }
-                final boolean passedOn = !(dependent instanceof DatabaseRole)
+                final boolean heldOption = !(dependent instanceof DatabaseRole)
                     && dependent.hasGrantOption(objectType, objectName, privilege);
-                dependent.revokePrivilege(objectType, objectName, privilege);
-                if (passedOn && visited.add(dependent.getName())) {
+                dependent.revokePrivilegeGrantedBy(objectType, objectName, privilege, recorded);
+                taken++;
+                if (heldOption && !dependent.hasGrantOption(objectType, objectName, privilege)
+                        && visited.add(dependent.getName())) {
                     pending.add(dependent);
                 }
             }
             for (final User dependent : catalog.getAllUsers()) {
-                if (madeBy(dependent.recordedPrivilegeGrantor(objectType, objectName, privilege), grantor)
-                        && dependent.hasPrivilege(objectType, objectName, privilege)) {
-                    catalog.revokePrivilegeFromUser(privilege.name(), objectType, objectName, dependent.getName());
+                final String recorded = madeBy(dependent.privilegeGrantors(objectType, objectName, privilege), grantor);
+                if (recorded != null) {
+                    dependent.revokePrivilegeGrantedBy(objectType, objectName, privilege, recorded);
+                    taken++;
                 }
             }
         }
+        return taken;
     }
 
-    /** Whether a grant's recorded grantor is the role: grants with no grantor recorded depend on no option. */
-    private boolean madeBy(final String recorded, final Role grantor) {
-        return recorded != null && catalog.resolveRoleName(recorded).equals(grantor.getName());
+    /**
+     * The grantor, as recorded, of the instance a role made among a grantee's instances of one privilege; null when
+     * it made none. Grants with no grantor recorded depend on no option.
+     */
+    private String madeBy(final List<String> recorded, final Role grantor) {
+        for (final String each : recorded) {
+            if (catalog.resolveRoleName(each).equals(grantor.getName())) {
+                return each;
+            }
+        }
+        return null;
     }
 
     /** The account roles and every database's database roles: whatever a grant on an object can be made to. */
@@ -142,14 +152,5 @@ final class DependentGrants {
             roles.addAll(database.getDatabaseRoles());
         }
         return roles;
-    }
-
-    /** The refusal of a RESTRICT revoke, naming one grant that depends on the option. */
-    private static RuntimeException refusal(final Privilege privilege, final String objectName, final String kind,
-                                            final String grantee) {
-        return new RuntimeException("SQL execution error: Dependent grant of privilege '"
-            + privilege.name().replace('_', ' ') + "' on securable '" + objectName + "' to " + kind + " '" + grantee
-            + "' exists. It must be revoked first. More than one dependent grant may exist: use CASCADE option to"
-            + " revoke them all.");
     }
 }

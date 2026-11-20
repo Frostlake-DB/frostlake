@@ -74,7 +74,22 @@ public final class FileFormatClause {
         for (final FrostlakeParser.CopyFormatOptionContext option : options) {
             written.add(writtenOption(option));
         }
-        return apply(written, into, typeChangeable, namesAllowed, true);
+        return apply(written, into, typeChangeable, namesAllowed, true, true);
+    }
+
+    /**
+     * Judge an ALTER FILE FORMAT's options by their names and values alone, as the account does before it looks for
+     * the format: an unknown name, a repeated one and a value no option takes are refused, while whether the format's
+     * type takes an option is left unasked, there being no format to ask (live-verified).
+     *
+     * @param options the options in the order written
+     */
+    public static void judgeWithoutFormat(final List<FrostlakeParser.CopyFormatOptionContext> options) {
+        final List<WrittenFormatOption> written = new ArrayList<>();
+        for (final FrostlakeParser.CopyFormatOptionContext option : options) {
+            written.add(writtenOption(option));
+        }
+        apply(written, new FileFormat("", "CSV"), true, false, false, false);
     }
 
     /**
@@ -92,7 +107,7 @@ public final class FileFormatClause {
         for (final FrostlakeParser.ParenOptionContext option : list.parenOption()) {
             written.add(writtenOption(option));
         }
-        return apply(written, into, true, namesAllowed, false);
+        return apply(written, into, true, namesAllowed, false, true);
     }
 
     /**
@@ -179,6 +194,10 @@ public final class FileFormatClause {
         if (option.LPAREN() != null) {
             return new WrittenFormatOption(name, spelled, null, null, false, listed(option.stringLiteralList()));
         }
+        if (option.NULL() != null) {
+            // A NULL, which a table's list reads: no value of any option.
+            return new WrittenFormatOption(name, spelled, option.NULL().getText(), null, false, null);
+        }
         return scalar(name, spelled, option.copyOptionValue());
     }
 
@@ -209,7 +228,7 @@ public final class FileFormatClause {
 
     private static FileFormatClause apply(final List<WrittenFormatOption> options, final FileFormat into,
                                           final boolean typeChangeable, final boolean namesAllowed,
-                                          final boolean codecByType) {
+                                          final boolean codecByType, final boolean byType) {
         final Set<String> seen = new HashSet<>();
         String writtenType = null;
         String formatName = null;
@@ -219,6 +238,16 @@ public final class FileFormatClause {
         for (final WrittenFormatOption option : options) {
             if (!seen.add(option.name)) {
                 throw new RuntimeException(SqlCompilationError.conflictingFileFormatParameter(option.name));
+            }
+            if (option.value == null && option.listed == null) {
+                // A NULL is no value of an option the list knows, and an unknown name is refused first
+                // (live-verified).
+                if (!"TYPE".equals(option.name) && !"FORMAT_NAME".equals(option.name)
+                        && !"COMMENT".equals(option.name) && !FileFormatSurfaces.isKnownOption(option.name)) {
+                    throw new RuntimeException(SqlCompilationError.of("invalid parameter '" + option.spelled + "'"));
+                }
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(option.written,
+                    option.name));
             }
             if ("TYPE".equals(option.name) && option.value != null) {
                 FileFormatSurfaces.requireLegalValue("TYPE", option.value, option.written);
@@ -268,7 +297,7 @@ public final class FileFormatClause {
         }
         // Cross-type membership is judged against the EFFECTIVE type, wherever TYPE sat in the list; a list that
         // names a format and writes no type of its own is judged by the format it names.
-        if (formatName == null || writtenType != null) {
+        if (byType && (formatName == null || writtenType != null)) {
             for (final String key : into.getOptions().keySet()) {
                 if (!FileFormatSurfaces.isOptionValidFor(into.getType(), key)) {
                     // The type is named as the list wrote it (live-verified).

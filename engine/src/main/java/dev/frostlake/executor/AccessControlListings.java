@@ -181,13 +181,17 @@ public final class AccessControlListings {
                 continue;
             }
             for (final Privilege privilege : entry.getValue()) {
-                final Instant granted = role.getPrivilegeGrantTime(objectType, objectName, privilege);
-                rows.add(new Row(Arrays.<Object>asList(
-                    granted != null ? ShowResultHelpers.createdOn(granted) : ShowResultHelpers.createdOn(role.getCreatedTime()),
-                    privilege.displayName(), objectType, GrantNames.spelled(objectType, objectName), granteeKind,
-                    granteeName,
-                    role.hasGrantOption(objectType, objectName, privilege) ? "true" : "false",
-                    role.getPrivilegeGrantor(objectType, objectName, privilege))));
+                // A row for each grantor's instance of the privilege (live-verified).
+                for (final String grantor : role.privilegeGrantors(objectType, objectName, privilege)) {
+                    final Instant granted = role.getPrivilegeGrantTime(objectType, objectName, privilege, grantor);
+                    rows.add(new Row(Arrays.<Object>asList(
+                        granted != null ? ShowResultHelpers.createdOn(granted)
+                            : ShowResultHelpers.createdOn(role.getCreatedTime()),
+                        privilege.displayName(), objectType, GrantNames.spelled(objectType, objectName), granteeKind,
+                        granteeName,
+                        role.hasGrantOption(objectType, objectName, privilege, grantor) ? "true" : "false",
+                        grantor)));
+                }
             }
         }
         addOwnershipRows(rows, role instanceof DatabaseRole ? ((DatabaseRole) role).getQualifiedName()

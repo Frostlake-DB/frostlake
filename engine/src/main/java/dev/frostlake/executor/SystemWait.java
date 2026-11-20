@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.transaction.TableLockGate;
 import dev.frostlake.types.DecimalText;
 
 import java.math.BigDecimal;
@@ -91,14 +92,15 @@ public final class SystemWait {
         final long unitsInLongestSleep = LONGEST_SLEEP_NANOS / nanosPerUnit;
         final long nanos = amount <= 0 ? 0L
             : amount > unitsInLongestSleep ? LONGEST_SLEEP_NANOS : amount * nanosPerUnit;
-        // The wait is slept in slices, so its statement's timeout or cancel ends it where it stands.
+        // The wait is slept in slices, so its statement's timeout or cancel ends it where it stands, with the engine's
+        // lock given up meanwhile: another session lists the statement RUNNING and may cancel it (live-verified).
         final long until = System.nanoTime() + nanos;
         long left = nanos;
         while (left > 0) {
             StatementCancellation.check();
             final long slice = Math.min(left, SLICE_NANOS);
             try {
-                Thread.sleep(slice / 1_000_000L, (int) (slice % 1_000_000L));
+                TableLockGate.pauseReleased(Math.max(1L, slice / 1_000_000L));
             } catch (final InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 break;

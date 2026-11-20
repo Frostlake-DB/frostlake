@@ -65,4 +65,12 @@ public interface ObjectVisibility {
      * @return whether the rights own it or hold a privilege on it
      */
     boolean listsProcedure(final Schema schema, final Procedure procedure);
+
+    /**
+     * Whether TABLE_STORAGE_METRICS lists anything: only a session using the ACCOUNTADMIN role reads its rows, any
+     * other finds the view empty (documented).
+     *
+     * @return whether the rights read the account's storage figures
+     */
+    boolean readsStorageMetrics();
 }

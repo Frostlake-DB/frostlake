@@ -16,20 +16,30 @@
 package dev.frostlake.persistence;
 
 import java.io.Serializable;
+import java.time.Instant;
 import java.time.LocalDateTime;
 
 /** One recorded run of a task, as TASK_HISTORY reports it, as a snapshot holds it. */
 public class TaskExecutionSnapshot implements Serializable {
     private static final long serialVersionUID = 1L;
 
-    /** When the run was scheduled. */
+    /** When the run was scheduled, on the host's wall clock; read where the snapshot holds no instants. */
     public LocalDateTime scheduledTime;
 
-    /** When it started. */
+    /** When it started, on the host's wall clock. */
     public LocalDateTime startTime;
 
-    /** When it ended, or null. */
+    /** When it ended, on the host's wall clock, or null. */
     public LocalDateTime endTime;
+
+    /** The instant the run was scheduled for; null in a snapshot taken before runs kept instants. */
+    public Instant scheduledAt;
+
+    /** The instant it started; null in a snapshot taken before runs kept instants. */
+    public Instant startedAt;
+
+    /** The instant it ended, or null. */
+    public Instant endedAt;
 
     /** Its state, as the enum constant's name. */
     public String state;

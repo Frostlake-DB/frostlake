@@ -54,6 +54,81 @@ public abstract class AbstractFrostlakeStatement implements Statement {
     /** The fetch size, as set. */
     private int fetchSize = DEFAULT_FETCH_SIZE;
 
+    /** Per-statement MULTI_STATEMENT_COUNT set via {@link #setParameter}, overriding the session's. */
+    private Integer statementMultiCount;
+
+    /**
+     * The real driver's per-statement parameter surface ({@code unwrap(...).setParameter(...)});
+     * MULTI_STATEMENT_COUNT is the one parameter this driver understands.
+     *
+     * @param name  the parameter's name
+     * @param value its value
+     * @throws SQLException for any other parameter
+     */
+    public void setParameter(final String name, final int value) throws SQLException {
+        if (!"MULTI_STATEMENT_COUNT".equalsIgnoreCase(name)) {
+            throw new SQLException("Unknown statement parameter: " + name);
+        }
+        this.statementMultiCount = Integer.valueOf(value);
+    }
+
+    /**
+     * The multi-statement gate the real driver runs before executing (live-verified): the pack's
+     * statement count must EQUAL the desired count — per-statement parameter first, else the
+     * connection's session value — with 0 meaning any. An exact ALTER SESSION SET/UNSET
+     * MULTI_STATEMENT_COUNT statement is gated like any other (under count 2 even the UNSET refuses as
+     * 1 vs 2 — the per-statement parameter is the escape hatch); its assignment moves the connection's
+     * value only once it passes.
+     *
+     * @param sql the request's text
+     * @throws SQLException when the text holds another number of statements than asked for
+     */
+    protected final void applyMultiStatementGate(final String sql) throws SQLException {
+        final int desired = desiredStatementCount();
+        if (desired != 0) {
+            final int actual = statementCount(sql);
+            if (actual != desired) {
+                throw JdbcMultiStatement.countMismatch(sql, actual, desired);
+            }
+        }
+        final Integer assigned = JdbcMultiStatement.sessionCountAssignment(sql);
+        if (assigned != null) {
+            sessionStatementCount(assigned.intValue());
+        }
+    }
+
+    /**
+     * The statement count this request asks for: the statement's own parameter, else the session's.
+     *
+     * @return the count, 0 for any
+     */
+    protected final int desiredStatementCount() {
+        return statementMultiCount != null ? statementMultiCount.intValue() : sessionStatementCount();
+    }
+
+    /**
+     * The statement count the connection's session asks for.
+     *
+     * @return the count, 0 for any
+     */
+    protected abstract int sessionStatementCount();
+
+    /**
+     * Moves the statement count the connection's session asks for.
+     *
+     * @param count the new count
+     */
+    protected abstract void sessionStatementCount(int count);
+
+    /**
+     * The number of statements a text holds, as this transport counts them: by the parser where the text is
+     * parsed in this process, by the lexer's tokens where it is handed to a server.
+     *
+     * @param sql the text
+     * @return the count
+     */
+    protected abstract int statementCount(String sql);
+
     /**
      * Refuses a call on a closed statement.
      *
@@ -72,7 +147,10 @@ public abstract class AbstractFrostlakeStatement implements Statement {
      * @throws SQLException when the text is empty
      */
     protected static void requireSqlText(final String sql) throws SQLException {
-        if (sql != null && sql.isEmpty()) {
+        if (sql == null) {
+            throw new SQLException("Invalid SQL text: null", "03000", 200021);
+        }
+        if (sql.isEmpty()) {
             throw new SQLException("Invalid SQL text: " + sql, "03000", 200021);
         }
     }
@@ -212,11 +290,6 @@ public abstract class AbstractFrostlakeStatement implements Statement {
     public boolean isCloseOnCompletion() throws SQLException {
         checkClosed();
         return false;
-    }
-
-    @Override
-    public boolean getMoreResults(final int current) throws SQLException {
-        return getMoreResults();
     }
 
     @Override

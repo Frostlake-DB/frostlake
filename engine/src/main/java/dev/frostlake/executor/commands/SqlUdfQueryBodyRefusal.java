@@ -351,7 +351,9 @@ final class SqlUdfQueryBodyRefusal {
         for (int i = keyword + 1; i + 1 < end; i++) {
             if (opensQuery(tokens, i)) {
                 lines.add(tokens.get(i + 1));
-                final Token unfinished = unfinishedClose(framed, tokens, i);
+                // An IN's query whose FROM writes a table function bare is read to that call's ')' (live-verified).
+                final int bareClose = tokens.get(i - 1).getType() == FrostlakeLexer.IN ? bareCallClose(tokens, i) : -1;
+                final Token unfinished = bareClose > 0 ? tokens.get(bareClose) : unfinishedClose(framed, tokens, i);
                 if (unfinished != null) {
                     lines.add(unfinished);
                 }
@@ -359,6 +361,29 @@ final class SqlUdfQueryBodyRefusal {
             }
         }
         return lines;
+    }
+
+    /** The ')' of the table function the query opened at {@code open} writes bare after its FROM, or -1. */
+    private static int bareCallClose(final List<Token> tokens, final int open) {
+        final int close = matchingClose(tokens, open);
+        int depth = 0;
+        for (int i = open + 1; close > 0 && i + 2 < close; i++) {
+            final int type = tokens.get(i).getType();
+            if (type == FrostlakeLexer.LPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.RPAREN) {
+                depth--;
+            } else if (depth == 0 && type == FrostlakeLexer.FROM) {
+                final Token named = tokens.get(i + 1);
+                if (!isName(named) && named.getType() != FrostlakeLexer.FLATTEN
+                        || tokens.get(i + 2).getType() != FrostlakeLexer.LPAREN) {
+                    return -1;
+                }
+                final int callClose = matchingClose(tokens, i + 2);
+                return callClose > 0 && callClose < close ? callClose : -1;
+            }
+        }
+        return -1;
     }
 
     /**

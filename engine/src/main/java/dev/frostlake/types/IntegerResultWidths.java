@@ -31,7 +31,7 @@ package dev.frostlake.types;
  *       COUNT ROW_NUMBER RANK DENSE_RANK NTILE BITCOUNT
  *   19  BIT_LENGTH HASH
  *   37  FACTORIAL
- *   38  BITAND BITOR BITXOR BITNOT BITSHIFTLEFT BITSHIFTRIGHT GETBIT AS_INTEGER
+ *   38  BITSHIFTLEFT AS_INTEGER
  * </pre>
  *
  * <p>The widths track what the value can BE — two digits for a month, nine for a position in a string,
@@ -41,8 +41,9 @@ package dev.frostlake.types;
  * short of the widest NUMBER. Measure the function, then add it.
  *
  * <p>This table is for functions whose width is a CONSTANT. The ones that derive it from their input —
- * the rounding family, whose precision follows the argument's, and SIGN, which passes an approximate
- * straight through — do not belong here.
+ * the rounding family, whose precision follows the argument's, SIGN, which passes an approximate
+ * straight through, and BITAND, BITOR, BITXOR, BITNOT, BITSHIFTRIGHT and GETBIT, which follow their arguments'
+ * whole digits and are thirty-eight only over what the type inference does not count — do not belong here.
  */
 public final class IntegerResultWidths {
 

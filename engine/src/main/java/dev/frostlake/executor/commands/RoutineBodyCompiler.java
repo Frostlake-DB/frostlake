@@ -52,6 +52,7 @@ import dev.frostlake.metastore.model.Procedure;
 import dev.frostlake.metastore.model.UdfLanguage;
 import dev.frostlake.parser.AssignedTableNameLines;
 import dev.frostlake.parser.BlockKeywordValueLines;
+import dev.frostlake.parser.BlockObjectConstantLines;
 import dev.frostlake.parser.BlockValueSubqueryLines;
 import dev.frostlake.parser.EndOfInput;
 import dev.frostlake.parser.FrostlakeLexer;
@@ -218,6 +219,12 @@ final class RoutineBodyCompiler {
                 || spoken.get(0).getType() == FrostlakeLexer.QUOTED_IDENTIFIER)) {
             throw new RuntimeException(SqlCompilationError.of("syntax error " + describe(spoken.get(0)) + "."));
         }
+        // A SELECT statement whose first item is CASE or CAST written as a name is refused as the block run on its
+        // own is, at the token after the word (see BlockKeywordValueLines).
+        final List<String> selectItem = BlockKeywordValueLines.selectItemLines(body);
+        if (selectItem != null) {
+            throw new RuntimeException(SqlCompilationError.of(String.join("\n", selectItem)));
+        }
         final FrostlakeParser.SqlScriptContext written = queryExecutor.scriptOf(body);
         if (written == null) {
             // A body that does not parse is refused for a word naming no type where a type stands, its own faults
@@ -290,6 +297,12 @@ final class RoutineBodyCompiler {
             // And a tag function one of the body's own expressions calls is answered now (see CompiledTagCalls).
             CompiledTagCalls.requireInProcedureBody(block, queryExecutor);
             return;
+        }
+        // A block whose first fault is an object constant's key that is no text is refused at CREATE as the block run
+        // on its own is (see BlockObjectConstantLines).
+        final List<String> constantLines = BlockObjectConstantLines.linesOf(body);
+        if (constantLines != null) {
+            throw new RuntimeException(SqlCompilationError.of(String.join("\n", constantLines)));
         }
         // A query a block assigns whose only faults are TABLE( over bare names is refused at CREATE as the block run on
         // its own is (see AssignedTableNameLines).

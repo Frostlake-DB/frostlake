@@ -138,15 +138,18 @@ public class InformationSchemaCatalogTest extends BaseDatabaseTest {
      * storage. All three drop stamps are filtered on purpose — that is what they are for: a real
      * account keeps a table listed until it leaves fail-safe, whether it was the TABLE that was
      * dropped or the SCHEMA or CATALOG containing it, so an account that has run this test before
-     * legitimately holds several rows for the same name.
+     * legitimately holds several rows for the same name. Only a session using ACCOUNTADMIN reads its rows.
      */
     @Test
     public void storageMetricsCarriesARowPerTable() {
         engine.execute("CREATE TABLE metrics_t (id INTEGER)");
+        // Only the account's administrator reads the view's rows.
+        engine.execute("USE ROLE ACCOUNTADMIN");
         final ResultSet rs = engine.executeQuery(
             "SELECT TABLE_NAME, ACTIVE_BYTES FROM INFORMATION_SCHEMA.TABLE_STORAGE_METRICS"
             + " WHERE TABLE_NAME = 'METRICS_T' AND TABLE_DROPPED IS NULL"
             + " AND SCHEMA_DROPPED IS NULL AND CATALOG_DROPPED IS NULL");
+        engine.execute("USE ROLE SYSADMIN");
         assertEquals(1, rs.getRowCount());
         assertEquals(0L, ((Number) rs.getRows().get(0).getValue(1)).longValue());
     }

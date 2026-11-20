@@ -21,7 +21,6 @@ import dev.frostlake.functions.SemiStructuredRejection;
 import dev.frostlake.functions.VariantAccessorFunction;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.types.ArrayType;
-import dev.frostlake.values.UuidTextNode;
 import dev.frostlake.values.VariantUndefined;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.ObjectMapper;
@@ -52,32 +51,11 @@ public class ArrayAppend extends VariantAccessorFunction {
             // The source array may already hold a VARIANT `undefined` element, whose canonical text is the
             // bare token no JSON parser accepts on its own — see VariantUndefined.
             final ArrayNode array = (ArrayNode) VariantUndefined.readTree(MAPPER, arrayStr);
-            if (value == null) {
-                // Live: ARRAY_APPEND([1], NULL) is [1,undefined] and
-                // ARRAY_APPEND(PARSE_JSON('[1,null,2]'), NULL) is [1,null,2,undefined] — the appended SQL
-                // NULL is `undefined`, distinct from the JSON null already in the array.
-                array.add(VariantUndefined.node());
-            } else if (value instanceof Boolean) {
-                array.add((Boolean) value);
-            } else if (value instanceof VariantValue && UuidTextNode.holds(((VariantValue) value).node())) {
-                // A UUID member keeps its type (see UuidTextNode).
-                array.add(((VariantValue) value).node());
-            } else if (value instanceof Number) {
-                // Numbers go through the shared conversion so an appended element normalises like a
-                // constructed one — live ARRAY_APPEND(ARRAY_CONSTRUCT(), 1.00) is [1], not [1.0]. Routing
-                // every Number through doubleValue() also rounded a NUMBER(38,0) past double precision.
-                array.add(ArrayFunctionHelper.toNode(MAPPER, value));
-            } else {
-                final String s = value.toString().trim();
-                if ((s.startsWith("[") || s.startsWith("{")) && !s.isEmpty()) {
-                    try {
-                        array.add(MAPPER.readTree(s));
-                        return VariantValue.ofNode(array);
-                    }
-                    catch (final Exception ignored) {}
-                }
-                array.add(s);
-            }
+            // The appended value converts exactly as an ARRAY_CONSTRUCT element does (live-verified): a SQL NULL
+            // is `undefined` (ARRAY_APPEND([1], NULL) is [1,undefined]), a VARIANT keeps its own type (a JSON
+            // number, boolean or null stays one), a DATE or BINARY keeps its type, and a VARCHAR stays a STRING
+            // member however much its text looks like JSON (ARRAY_APPEND([1], '[9]') is [1,"[9]"]).
+            array.add(ArrayFunctionHelper.toElementNode(MAPPER, value));
             return VariantValue.ofNode(array);
         } catch (final Exception e) {
             throw new RuntimeException("ARRAY_APPEND: invalid array: " + args.get(0));

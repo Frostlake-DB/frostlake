@@ -49,7 +49,8 @@ public final class MaterializedViewValidity {
 
     private static final String MARKED = " Marked Materialized View as invalid.";
 
-    private static final String INACCESSIBLE = "Invalid materialized view definition. Source table used in the "
+    /** The refusal of a view whose source table is not there to read. */
+    public static final String INACCESSIBLE = "Invalid materialized view definition. Source table used in the "
         + "definition is not accessible or been deleted.";
 
     /** Where a read of a view over another table is refused. */

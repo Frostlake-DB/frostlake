@@ -65,6 +65,10 @@ public final class BlockKeywordValueLines {
             final Token word = spoken.get(i);
             final int type = word.getType();
             final Token next = spoken.get(i + 1);
+            final List<String> item = selectItemLines(sql, spoken, i);
+            if (item != null) {
+                return item;
+            }
             final boolean condition = type == FrostlakeLexer.WHEN && inCondition(spoken, i);
             if (!condition && !opensValue(spoken, i)
                     || type == FrostlakeLexer.CAST && next.getType() == FrostlakeLexer.LPAREN) {
@@ -96,6 +100,59 @@ public final class BlockKeywordValueLines {
             return lines;
         }
         return null;
+    }
+
+    /**
+     * The lines of a block whose first such fault is a CASE or a CAST standing as a SELECT statement's first item
+     * (see {@link #selectItemLines(String, List, int)}).
+     *
+     * @param sql the block's text
+     * @return the lines, or null when the text holds no such item or has another fault
+     */
+    public static List<String> selectItemLines(final String sql) {
+        if (sql == null) {
+            return null;
+        }
+        final List<Token> spoken = BlockReadOn.spoken(sql);
+        for (int i = 2; i + 1 < spoken.size(); i++) {
+            final List<String> lines = selectItemLines(sql, spoken, i);
+            if (lines != null) {
+                return lines;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The lines for a CASE or a CAST that is the first item of a block's SELECT statement, written where a name is
+     * meant: the token after the word is refused - the INTO, the FROM or the comma - and the account reads on as it
+     * does after any refused statement of a block, taking the first word that may be a name and refusing the token
+     * after it (live-verified: {@code SELECT case INTO :x; RETURN 1;} is the INTO and the RETURN,
+     * {@code SELECT case FROM t INTO :x;} the FROM and the INTO, {@code SELECT case, 1 INTO :x, :y;} both commas).
+     *
+     * @return the lines, or null when the word at {@code index} is no such item or the text has another fault
+     */
+    private static List<String> selectItemLines(final String sql, final List<Token> spoken, final int index) {
+        final Token word = spoken.get(index);
+        if (word.getType() != FrostlakeLexer.CASE && word.getType() != FrostlakeLexer.CAST || index < 2
+                || spoken.get(index - 1).getType() != FrostlakeLexer.SELECT) {
+            return null;
+        }
+        final int opener = spoken.get(0).getType();
+        final int before = spoken.get(index - 2).getType();
+        final int after = spoken.get(index + 1).getType();
+        if (opener != FrostlakeLexer.BEGIN && opener != FrostlakeLexer.DECLARE
+                || before != FrostlakeLexer.SEMI && before != FrostlakeLexer.BEGIN && before != FrostlakeLexer.THEN
+                    && before != FrostlakeLexer.ELSE && before != FrostlakeLexer.DO && before != FrostlakeLexer.LOOP
+                || after != FrostlakeLexer.INTO && after != FrostlakeLexer.FROM && after != FrostlakeLexer.COMMA
+                || SyntaxErrorListener.cleanParse(sql.substring(0, word.getStartIndex()) + "x"
+                    + sql.substring(word.getStopIndex() + 1)) == null) {
+            return null;
+        }
+        final List<String> lines = new ArrayList<>();
+        lines.add(SyntaxErrorListener.sentence(spoken.get(index + 1)));
+        BlockAssignmentValueLines.readOn(spoken, index + 2, lines);
+        return lines;
     }
 
     /**

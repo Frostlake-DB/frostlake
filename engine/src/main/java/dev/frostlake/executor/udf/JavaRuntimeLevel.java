@@ -27,11 +27,31 @@ public final class JavaRuntimeLevel {
     /** The level of a routine that declares no RUNTIME_VERSION. */
     private static final int DEFAULT = 11;
 
+    /** The first level whose compiler knows records. */
+    private static final int RECORDS = 16;
+
     /** A class file's major version is its Java level and this: Java 11 writes 55. */
     private static final int CLASS_FILE_VERSION_OF_JAVA_ZERO = 44;
 
     /** Static helpers only — never instantiated. */
     private JavaRuntimeLevel() {
+    }
+
+    /**
+     * A compiler's report as the account's compiler of the release words it: a unit that opens with no type is
+     * {@code class, interface, or enum expected} at Java 11, which knows no record, where a later compiler names
+     * records too (live-verified).
+     *
+     * @param report  the report of the engine's own compiler
+     * @param release the release the source was compiled at, or 0 for the JDK's own level
+     * @return the report
+     */
+    public static String reworded(final String report, final int release) {
+        if (release <= 0 || release >= RECORDS) {
+            return report;
+        }
+        return report.replace("error: class, interface, enum, or record expected",
+            "error: class, interface, or enum expected");
     }
 
     /**
