@@ -115,8 +115,10 @@
     ]},
     {"name": "storage-metrics-carries-a-row-per-table", "steps": [
       {"sql": "CREATE TABLE metrics_t (id INTEGER)"},
+      {"sql": "USE ROLE ACCOUNTADMIN"},
       {"sql": "SELECT TABLE_NAME, ACTIVE_BYTES FROM INFORMATION_SCHEMA.TABLE_STORAGE_METRICS WHERE TABLE_NAME = 'METRICS_T' AND TABLE_DROPPED IS NULL AND SCHEMA_DROPPED IS NULL AND CATALOG_DROPPED IS NULL",
-       "expect": {"rowCount": 1, "rows": [["METRICS_T", "0"]]}}
+       "expect": {"rowCount": 1, "rows": [["METRICS_T", "0"]]}},
+      {"sql": "USE ROLE SYSADMIN"}
     ]},
     {"name": "populated-views-carry-lives-column-list", "steps": [
       {"sql": "SELECT * FROM INFORMATION_SCHEMA.TABLES",

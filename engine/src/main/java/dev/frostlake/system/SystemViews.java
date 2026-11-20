@@ -16,8 +16,9 @@
 
 package dev.frostlake.system;
 
-import dev.frostlake.executor.ClockDefaultSpelling;
 import dev.frostlake.executor.ClusteringKeySpelling;
+import dev.frostlake.executor.FileFormatSurfaces;
+import dev.frostlake.executor.FormatProperty;
 import dev.frostlake.executor.JsonTextList;
 import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.functions.scalar.context.DefinitionOwnership;
@@ -28,7 +29,6 @@ import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.SystemSchema;
 import dev.frostlake.metastore.model.CheckConstraint;
 import dev.frostlake.metastore.model.Database;
-import dev.frostlake.metastore.model.DefaultValueExpression;
 import dev.frostlake.metastore.model.DynamicTable;
 import dev.frostlake.metastore.model.FileFormat;
 import dev.frostlake.metastore.model.ForeignKeyConstraint;
@@ -502,16 +502,12 @@ public class SystemViews {
     }
 
     /**
-     * COLUMN_DEFAULT's text: a default that reads the clock as the account prints it, an expression as it is told
-     * back, any other as stored.
+     * COLUMN_DEFAULT's text: the default as DESCRIBE, SHOW COLUMNS and GET_DDL tell it — a string quoted, a boolean in
+     * capitals, a clock as the account prints it, an expression as it is told back — and null for an explicit
+     * {@code DEFAULT NULL}, which leaves the column with no default (all live-verified).
      */
     private static String columnDefault(final Object stored) {
-        final String clock = ClockDefaultSpelling.of(stored);
-        if (clock != null) {
-            return clock;
-        }
-        return stored instanceof DefaultValueExpression ? ((DefaultValueExpression) stored).getToldText()
-            : stored.toString();
+        return "NULL".equals(stored) ? null : ShowResultHelpers.renderDefaultExpression(stored);
     }
 
     /**
@@ -960,8 +956,9 @@ public class SystemViews {
                     // COMMENT ON moves it, and ORDERED spells the ORDER clause YES/NO where SHOW spells it Y/N.
                     final OffsetDateTime created = ShowResultHelpers.createdOn(seq.getCreatedTime());
                     final OffsetDateTime lastAltered = ShowResultHelpers.createdOn(seq.getLastDdlTime());
+                    // The name as the catalog holds it: a quoted name keeps its case (live-verified).
                     result.addRow(new Row(
-                        db.getName(), schema.getName(), seq.getName().toUpperCase(Locale.ROOT), seq.getOwner(),
+                        db.getName(), schema.getName(), seq.getName(), seq.getOwner(),
                         "NUMBER", 38L, 10L, 0L,
                         String.valueOf(seq.getStartValue()), String.valueOf(Long.MIN_VALUE),
                         String.valueOf(Long.MAX_VALUE), String.valueOf(seq.peekNextValue()),
@@ -1022,8 +1019,12 @@ public class SystemViews {
         for (final Database db : databases(databaseName)) {
             for (final Schema schema : schemas(db, schemaName)) {
                 for (final Pipe pipe : schema.getPipes()) {
+                    if (!lists("PIPE", schema, pipe.getName(), pipe.getOwner())) {
+                        continue;
+                    }
+                    // The name as the catalog holds it: a quoted name keeps its case (live-verified).
                     result.addRow(new Row(
-                        db.getName(), schema.getName(), pipe.getName().toUpperCase(Locale.ROOT), pipe.getOwner(),
+                        db.getName(), schema.getName(), pipe.getName(), pipe.getOwner(),
                         pipe.getCopyStatement(), yesNo(pipe.isAutoIngest()),
                         null, pipe.getCreatedTime(), pipe.getLastDdlTime(), pipe.getComment(), null
                     ));
@@ -1147,8 +1148,13 @@ public class SystemViews {
 
     // ── FILE_FORMATS ──────────────────────────────────────────────────────────
 
-    /** Column shape measured on a real account; the per-option columns read the format's own
-     *  options, so a CREATE FILE FORMAT written with any of them reports them back here. */
+    /**
+     * Column shape measured on a real account. Each per-option column reads the option the format sets, else the
+     * default its TYPE takes, and is NULL for an option the type has none of: a bare {@code TYPE = CSV} reads a
+     * line-feed RECORD_DELIMITER, AUTO DATE_FORMAT and COMPRESSION, and NULL_IF {@code ["\\N"]}, while a JSON
+     * format's FIELD_DELIMITER and SKIP_HEADER are NULL and its NULL_IF {@code []}. A value reads as kept, a
+     * boolean in lower case, NULL_IF as a JSON array (live-verified).
+     */
     public ResultSet queryFileFormats(final String databaseName, final String schemaName) {
         final ResultSet result = new ResultSet(Arrays.asList(
             col("FILE_FORMAT_CATALOG"), col("FILE_FORMAT_SCHEMA"), col("FILE_FORMAT_NAME"),
@@ -1167,16 +1173,17 @@ public class SystemViews {
                     if (!lists("FILE_FORMAT", schema, format.getName(), format.getOwner())) {
                         continue;
                     }
+                    // The name as the catalog holds it: a quoted name keeps its case (live-verified).
                     result.addRow(new Row(
-                        db.getName(), schema.getName(), format.getName().toUpperCase(Locale.ROOT), null,
-                        format.getType(), format.getOption("RECORD_DELIMITER"),
-                        format.getOption("FIELD_DELIMITER"), skipHeaderCount(format),
-                        format.getOption("DATE_FORMAT"), format.getOption("TIME_FORMAT"),
-                        format.getOption("TIMESTAMP_FORMAT"), format.getOption("BINARY_FORMAT"),
-                        format.getOption("ESCAPE"), format.getOption("ESCAPE_UNENCLOSED_FIELD"),
-                        format.getOption("TRIM_SPACE"), format.getOption("FIELD_OPTIONALLY_ENCLOSED_BY"),
-                        nullIfText(format), format.getOption("COMPRESSION"),
-                        format.getOption("ERROR_ON_COLUMN_COUNT_MISMATCH"), format.getCreatedTime(),
+                        db.getName(), schema.getName(), format.getName(), format.getOwner(),
+                        format.getType(), optionCell(format, "RECORD_DELIMITER"),
+                        optionCell(format, "FIELD_DELIMITER"), skipHeaderCount(format),
+                        optionCell(format, "DATE_FORMAT"), optionCell(format, "TIME_FORMAT"),
+                        optionCell(format, "TIMESTAMP_FORMAT"), optionCell(format, "BINARY_FORMAT"),
+                        optionCell(format, "ESCAPE"), optionCell(format, "ESCAPE_UNENCLOSED_FIELD"),
+                        optionCell(format, "TRIM_SPACE"), optionCell(format, "FIELD_OPTIONALLY_ENCLOSED_BY"),
+                        optionCell(format, "NULL_IF"), optionCell(format, "COMPRESSION"),
+                        optionCell(format, "ERROR_ON_COLUMN_COUNT_MISMATCH"), format.getCreatedTime(),
                         format.getLastDdlTime(),
                         format.getComment()
                     ));
@@ -1186,14 +1193,38 @@ public class SystemViews {
         return inSessionZone(result);
     }
 
-    /** The format's NULL_IF values joined by commas, or null when it sets none. */
-    private String nullIfText(final FileFormat format) {
-        final List<String> values = format.getNullIfValues();
-        return values == null ? null : String.join(",", values);
+    /**
+     * An option's cell: the value the format sets, else its type's default, a boolean in lower case and NULL_IF as
+     * a JSON array; NULL for an option the format's type has none of.
+     */
+    private static String optionCell(final FileFormat format, final String name) {
+        final FormatProperty property = formatProperty(format, name);
+        if (property == null) {
+            return null;
+        }
+        final String stored = format.getOption(name);
+        if ("List".equals(property.type)) {
+            return FileFormatSurfaces.json(property, stored);
+        }
+        final String value = stored != null ? stored : property.valueDefault;
+        return "Boolean".equals(property.type) ? value.toLowerCase(Locale.ROOT) : value;
     }
 
-    /** The format's SKIP_HEADER as a count; 0 when unset or not a number (live reports a number). */
-    private long skipHeaderCount(final FileFormat format) {
+    /** The property of the format's type that an option names, or null when the type has none of it. */
+    private static FormatProperty formatProperty(final FileFormat format, final String name) {
+        for (final FormatProperty property : FileFormatSurfaces.tree(format.getType())) {
+            if (property.name.equals(name)) {
+                return property;
+            }
+        }
+        return null;
+    }
+
+    /** The format's SKIP_HEADER as a count, 0 when unset or not a number; NULL for a type that has none of it. */
+    private static Long skipHeaderCount(final FileFormat format) {
+        if (formatProperty(format, "SKIP_HEADER") == null) {
+            return null;
+        }
         final String value = format.getOption("SKIP_HEADER");
         if (value == null) {
             return 0L;
@@ -1235,7 +1266,8 @@ public class SystemViews {
     // ── TABLE_STORAGE_METRICS ─────────────────────────────────────────────────
 
     /** Byte counts are all zero: this engine stores rows in memory and keeps no byte accounting,
-     *  no time-travel copies and no fail-safe, so zero is the honest figure for each. */
+     *  no time-travel copies and no fail-safe, so zero is the honest figure for each. Only a session using the
+     *  ACCOUNTADMIN role reads the view's rows; any other finds it empty (documented). */
     public ResultSet queryTableStorageMetrics(final String databaseName, final String schemaName) {
         final ResultSet result = new ResultSet(Arrays.asList(
             col("TABLE_CATALOG"), col("TABLE_SCHEMA"), colText("TABLE_NAME", 134217728), colLong("ID"),
@@ -1245,11 +1277,16 @@ public class SystemViews {
             colLtz("TABLE_ENTERED_FAILSAFE"), colLtz("CATALOG_CREATED"), colLtz("CATALOG_DROPPED"),
             colLtz("SCHEMA_CREATED"), colLtz("SCHEMA_DROPPED"), col("COMMENT")
         ));
+        if (visibility != null && !visibility.readsStorageMetrics()) {
+            return inSessionZone(result);
+        }
         for (final Database db : databases(databaseName)) {
             for (final Schema schema : schemas(db, schemaName)) {
                 for (final Table table : schema.getTables()) {
+                    // ID is the table's own number; CLONE_GROUP_ID the number of the table its clone line starts at,
+                    // its own for a table no clone made (documented).
                     result.addRow(new Row(
-                        db.getName(), schema.getName(), table.getName(), null, null,
+                        db.getName(), schema.getName(), table.getName(), table.getTableId(), table.getCloneGroupId(),
                         table.isTransient() ? "YES" : "NO", 0L, 0L, 0L, 0L,
                         table.getCreatedTime(), null, null,
                         db.getCreatedTime(), null, schema.getCreatedTime(), null,

@@ -259,10 +259,10 @@ final class FromSourceNames {
     }
 
     /** The name a MERGE's source registers under when it carries no alias. */
-    static String mergeSourceName(final FrostlakeParser.MergeSourceContext source) {
+    String mergeSourceName(final FrostlakeParser.MergeSourceContext source) {
         if (source instanceof FrostlakeParser.MergeSourceTableContext) {
-            return lastPart(ParseTreeText.qualifiedNameParts(
-                ((FrostlakeParser.MergeSourceTableContext) source).qualifiedName()));
+            return lastPart(executor.resolveObjectNameParts(
+                ((FrostlakeParser.MergeSourceTableContext) source).objectName()));
         }
         return source instanceof FrostlakeParser.MergeSourceValuesContext ? VALUES_MONIKER : SUBQUERY_MONIKER;
     }

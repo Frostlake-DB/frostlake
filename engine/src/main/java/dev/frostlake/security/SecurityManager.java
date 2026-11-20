@@ -884,6 +884,27 @@ public class SecurityManager {
         return uses(roles, "SCHEMA", databaseName + "." + schemaName) ? null : "SCHEMA";
     }
 
+    /**
+     * {@link #missedContainer}, for a container the session does not see at all ({@link #sees}): it holds no privilege
+     * on it and no MANAGE GRANTS. Such a container is out of the session's sight, and so is everything in it: a
+     * statement naming an object there is refused as though the container were not there, before anything is said
+     * about the object (documented). A container the session sees, though it may not use it, leaves the object's own
+     * refusal first.
+     *
+     * @param databaseName the object's database
+     * @param schemaName   the object's schema
+     * @return "DATABASE" or "SCHEMA" for the first one missed and unseen, or null
+     */
+    public String missedUnseenContainer(final String databaseName, final String schemaName) {
+        // A restricted body sees what its caller sees: what it may not use there is the object's refusal to tell.
+        final String missed = restricted() ? null : missedContainer(databaseName, schemaName);
+        if (missed == null) {
+            return null;
+        }
+        final String name = "DATABASE".equals(missed) ? databaseName : databaseName + "." + schemaName;
+        return sees(missed, name, catalog.getObjectOwnerRole(missed, name)) ? null : missed;
+    }
+
     /** Whether a restricted body uses a container: a caller grant names USAGE on it, and its caller may use it. */
     private boolean usesByCallerGrant(final String containerType, final String containerName) {
         return callerGranted(Privilege.USAGE.name(), containerType, containerName)

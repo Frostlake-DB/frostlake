@@ -242,7 +242,7 @@ public class DynamicTableStreamIdentityTest extends MeasuredCellsTestSupport {
             {"CREATE OR REPLACE STREAM sfg808 ON DYNAMIC TABLE fg808",
                 "Stream SFG808 successfully created."},
             {"SHOW DYNAMIC TABLES LIKE 'F%808' ->> SELECT \"name\", \"refresh_mode\" FROM $1 ORDER BY 1",
-                "FA808|FULL ;; FC808|FULL ;; FF808|FULL ;; FG808|INCREMENTAL ;; FM808|FULL ;; FW808|FULL"},
+                "FA808|FULL ;; FC808|FULL ;; FF808|FULL ;; FG808|ADAPTIVE ;; FM808|FULL ;; FW808|FULL"},
             {"SHOW STREAMS LIKE 'SF%808' ->> SELECT \"name\", \"stale\" FROM $1 ORDER BY 1",
                 "SFG808|false"},
         });
@@ -285,11 +285,11 @@ public class DynamicTableStreamIdentityTest extends MeasuredCellsTestSupport {
                 + "automatically set to FULL for more predictable performance. To use INCREMENTAL, re-create the "
                 + "dynamic table with REFRESH_MODE=INCREMENTAL. See "
                 + "https://docs.snowflake.com/user-guide/dynamic-table-performance-guide for details. ;; "
-                + "GE811|INCREMENTAL|null ;; GH811|INCREMENTAL|null ;; GI811|INCREMENTAL|null ;; GM811|FULL|This "
+                + "GE811|INCREMENTAL|null ;; GH811|ADAPTIVE|null ;; GI811|INCREMENTAL|null ;; GM811|FULL|This "
                 + "dynamic table contains a complex query. Refresh mode has been automatically set to FULL for more "
                 + "predictable performance. To use INCREMENTAL, re-create the dynamic table with "
                 + "REFRESH_MODE=INCREMENTAL. See https://docs.snowflake.com/user-guide/dynamic-table-performance-guide "
-                + "for details. ;; GO811|INCREMENTAL|null ;; GV811|INCREMENTAL|null ;; GW811|FULL|This dynamic table "
+                + "for details. ;; GO811|ADAPTIVE|null ;; GV811|ADAPTIVE|null ;; GW811|FULL|This dynamic table "
                 + "contains a complex query. Refresh mode has been automatically set to FULL for more predictable "
                 + "performance. To use INCREMENTAL, re-create the dynamic table with REFRESH_MODE=INCREMENTAL. See "
                 + "https://docs.snowflake.com/user-guide/dynamic-table-performance-guide for details. ;; "

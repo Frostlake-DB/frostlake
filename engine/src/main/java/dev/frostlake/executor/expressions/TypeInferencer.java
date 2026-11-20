@@ -1611,15 +1611,22 @@ final class TypeInferencer {
      * Null for an argument of any other kind.
      */
     private DataType bitwiseResultType(final String written, final List<Expression> args) {
-        // BIT_AND, BIT_OR, BIT_XOR and BIT_NOT are the same functions under a second spelling.
+        // BIT_AND, BIT_OR, BIT_XOR, BIT_NOT, BIT_SHIFTLEFT and BIT_SHIFTRIGHT are the same functions under a second
+        // spelling.
         final String funcName = written.equals("BIT_AND") || written.equals("BIT_OR") || written.equals("BIT_XOR")
-            || written.equals("BIT_NOT") ? "BIT" + written.substring(4) : written;
+            || written.equals("BIT_NOT") || written.equals("BIT_SHIFTLEFT") || written.equals("BIT_SHIFTRIGHT")
+            ? "BIT" + written.substring(4) : written;
         final boolean or = funcName.equals("BITOR");
         final boolean twoOperands = or || funcName.equals("BITAND") || funcName.equals("BITXOR")
             || funcName.equals("GETBIT");
         if (!twoOperands && !funcName.equals("BITNOT") && !funcName.equals("BITSHIFTRIGHT")
                 && !funcName.equals("BITSHIFTLEFT")) {
             return null;
+        }
+        if (!funcName.equals("GETBIT") && bitwiseOverBinary(args, twoOperands ? 2 : 1)) {
+            // Over BINARY operands the functions answer a BINARY no plan sizes (live-verified: BINARY[LOB] in
+            // SYSTEM$TYPEOF, BINARY(8388608) once stored).
+            return BinaryType.UNSIZED;
         }
         if (funcName.equals("BITSHIFTLEFT")) {
             return IntegerResultWidths.WIDEST;
@@ -1646,6 +1653,16 @@ final class TypeInferencer {
             digits = Math.min(digits, 33);
         }
         return new NumericType("NUMBER", Math.max(digits, 2), 0);
+    }
+
+    /** Whether a bitwise call's operands, the first {@code operands} arguments, hold a BINARY. */
+    private boolean bitwiseOverBinary(final List<Expression> args, final int operands) {
+        for (int i = 0; i < operands && i < args.size(); i++) {
+            if (infer(args.get(i)) instanceof BinaryType) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

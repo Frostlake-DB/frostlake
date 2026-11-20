@@ -271,6 +271,21 @@ public class ResultSetColumn {
     }
 
     /**
+     * Whether result metadata describes this column as able to hold NULL: {@link #getReportedNullable} where the
+     * projection worked it out, else the source column's declaration where that is known, else nullable — what
+     * the account's driver reports as {@code ResultSetMetaData.isNullable}.
+     *
+     * @return whether it is described nullable
+     */
+    public boolean isDescribedNullable() {
+        final Boolean reported = getReportedNullable();
+        if (reported != null) {
+            return reported.booleanValue();
+        }
+        return !nullabilityKnown || nullable;
+    }
+
+    /**
      * Whether a COLLATE named this column's collation (see {@link #withCollation(String, boolean)}).
      *
      * @return true for a named collation

@@ -32,7 +32,7 @@ public class StDwithin extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null || args.get(2) == null) return null;
         GeoShapes.requireSameKind("ST_DWITHIN", a, b);
-        return Boolean.valueOf(GeoShapes.minDistance(a, b) <= ((Number) args.get(2)).doubleValue());
+        return Boolean.valueOf(GeoRelation.distance(a, b) <= ((Number) args.get(2)).doubleValue());
     }
 
     @Override

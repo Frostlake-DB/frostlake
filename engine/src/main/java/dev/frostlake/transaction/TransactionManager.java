@@ -20,7 +20,6 @@ import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QueryHistory;
 import dev.frostlake.storage.StorageEngine;
 import dev.frostlake.stream.StreamManager;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Collection;
@@ -512,10 +511,25 @@ public class TransactionManager {
             throw new RuntimeException("Transaction is not active");
         }
 
-        // Captured before the txn is cleared below so the WAL append (after a successful apply) can use it.
+        // Durability: the transaction's record is appended to the write-ahead log and forced to disk BEFORE its
+        // writes apply. A commit the log could not keep fails whole: it is rolled back, so no session reads or builds
+        // on rows a restart would not bring back. Appending after the apply left a failed commit's rows visible.
         final List<String> walStatements = txn.getWalStatements();
-        final List<Instant> walInstants = txn.getWalInstants();
-        final List<WalStatementContext> walContexts = txn.getWalContexts();
+        if (walSink != null && !walStatements.isEmpty()) {
+            try {
+                walSink.appendTransaction(walStatements, txn.getWalInstants(), txn.getWalContexts());
+            } catch (final RuntimeException notLogged) {
+                try {
+                    txn.rollback();
+                    txn.setState(TransactionState.ROLLED_BACK);
+                } finally {
+                    activeTransactions.remove(txn.getId());
+                    currentTransaction.remove();
+                    resumeOuter(txn);
+                }
+                throw notLogged;
+            }
+        }
         try {
             // Apply all changes
             txn.commit();
@@ -528,17 +542,16 @@ public class TransactionManager {
             }
         } catch (final Exception e) {
             txn.setState(TransactionState.FAILED);
+            if (walSink != null && !walStatements.isEmpty()) {
+                // The log holds the record of a transaction that did not apply: a checkpoint, which holds what did,
+                // takes the record out of what a restart replays.
+                walSink.appendedNotApplied();
+            }
             throw new RuntimeException("Failed to commit transaction", e);
         } finally {
             activeTransactions.remove(txn.getId());
             currentTransaction.remove();
             resumeOuter(txn);
-        }
-
-        // Durability: the commit has applied successfully — now append it to the WAL and fsync (a failure
-        // here surfaces to the caller). Done after apply so the log only ever holds committed work.
-        if (walSink != null && !walStatements.isEmpty()) {
-            walSink.appendTransaction(walStatements, walInstants, walContexts);
         }
     }
 

@@ -23,10 +23,17 @@ final class CachedResult {
 
     private final String sql;
     private final ResultSet result;
+    private final String user;
 
-    CachedResult(final String sql, final ResultSet result) {
+    CachedResult(final String sql, final ResultSet result, final String user) {
         this.sql = sql;
         this.result = result;
+        this.user = user;
+    }
+
+    /** The user whose statement answered the result, or null when the engine knew none. */
+    String getUser() {
+        return user;
     }
 
     String getSql() {

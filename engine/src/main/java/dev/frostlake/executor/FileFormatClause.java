@@ -74,7 +74,22 @@ public final class FileFormatClause {
         for (final FrostlakeParser.CopyFormatOptionContext option : options) {
             written.add(writtenOption(option));
         }
-        return apply(written, into, typeChangeable, namesAllowed, true);
+        return apply(written, into, typeChangeable, namesAllowed, true, true);
+    }
+
+    /**
+     * Judge an ALTER FILE FORMAT's options by their names and values alone, as the account does before it looks for
+     * the format: an unknown name, a repeated one and a value no option takes are refused, while whether the format's
+     * type takes an option is left unasked, there being no format to ask (live-verified).
+     *
+     * @param options the options in the order written
+     */
+    public static void judgeWithoutFormat(final List<FrostlakeParser.CopyFormatOptionContext> options) {
+        final List<WrittenFormatOption> written = new ArrayList<>();
+        for (final FrostlakeParser.CopyFormatOptionContext option : options) {
+            written.add(writtenOption(option));
+        }
+        apply(written, new FileFormat("", "CSV"), true, false, false, false);
     }
 
     /**
@@ -92,7 +107,7 @@ public final class FileFormatClause {
         for (final FrostlakeParser.ParenOptionContext option : list.parenOption()) {
             written.add(writtenOption(option));
         }
-        return apply(written, into, true, namesAllowed, false);
+        return apply(written, into, true, namesAllowed, false, true);
     }
 
     /**
@@ -213,7 +228,7 @@ public final class FileFormatClause {
 
     private static FileFormatClause apply(final List<WrittenFormatOption> options, final FileFormat into,
                                           final boolean typeChangeable, final boolean namesAllowed,
-                                          final boolean codecByType) {
+                                          final boolean codecByType, final boolean byType) {
         final Set<String> seen = new HashSet<>();
         String writtenType = null;
         String formatName = null;
@@ -282,7 +297,7 @@ public final class FileFormatClause {
         }
         // Cross-type membership is judged against the EFFECTIVE type, wherever TYPE sat in the list; a list that
         // names a format and writes no type of its own is judged by the format it names.
-        if (formatName == null || writtenType != null) {
+        if (byType && (formatName == null || writtenType != null)) {
             for (final String key : into.getOptions().keySet()) {
                 if (!FileFormatSurfaces.isOptionValidFor(into.getType(), key)) {
                     // The type is named as the list wrote it (live-verified).

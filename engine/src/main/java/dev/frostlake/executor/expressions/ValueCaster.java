@@ -276,7 +276,7 @@ public final class ValueCaster {
                 throw new RuntimeException(rangeRefusal(number, source, MAX_NUMBER_PRECISION, 0, nullableSource,
                     sourcePrecision));
             }
-            return number.setScale(0, RoundingMode.HALF_UP);
+            return NumericRangeRefusal.atScale(number, 0);
         }
         final String[] parts = targetType.substring(open + 1, close).split(",");
         final int precision;
@@ -287,13 +287,12 @@ public final class ValueCaster {
         } catch (final NumberFormatException nfe) {
             return number;
         }
-        final BigDecimal scaled = number.setScale(scale, RoundingMode.HALF_UP);
         // (precision - scale) is the maximum number of digits allowed left of the decimal point.
-        if (scaled.precision() - scaled.scale() > precision - scale) {
+        if (NumericRangeRefusal.exceeds(number, precision, scale)) {
             throw new RuntimeException(rangeRefusal(number, source, precision, scale, nullableSource,
                 sourcePrecision));
         }
-        return scaled;
+        return NumericRangeRefusal.atScale(number, scale);
     }
 
     /**
@@ -365,6 +364,11 @@ public final class ValueCaster {
         if (source instanceof VariantValue) {
             // A double the VARIANT holds is printed as the VARIANT prints it, 1.2345678e+39 (live-verified).
             final JsonNode held = ((VariantValue) source).node();
+            if (held != null && held.isTextual()) {
+                // A text the VARIANT holds fails the VARIANT's cast, echoed as written: "Failed to cast variant
+                // value "1e40" to FIXED" (live-verified).
+                return VariantNumbers.refusal(held, VariantNumbers.FIXED).getMessage();
+            }
             return held != null && held.isFloatingPointNumber() && !held.isBigDecimal()
                 ? NumericRangeRefusal.untypedText(NumericRangeRefusal.variantDoubleText(held.doubleValue()))
                 : NumericRangeRefusal.untyped(number);

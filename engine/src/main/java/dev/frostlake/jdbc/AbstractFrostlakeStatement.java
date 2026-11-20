@@ -293,11 +293,6 @@ public abstract class AbstractFrostlakeStatement implements Statement {
     }
 
     @Override
-    public boolean getMoreResults(final int current) throws SQLException {
-        return getMoreResults();
-    }
-
-    @Override
     public <T> T unwrap(final Class<T> iface) throws SQLException {
         if (iface.isInstance(this)) {
             return iface.cast(this);

@@ -52,6 +52,9 @@ public class StageSnapshot implements Serializable {
     public boolean temporary;
     public boolean credentials;
     public boolean encryptionKey;
+    /** The stage's ENDPOINT and its storage integration's name, null for none (and in an older file). */
+    public String endpoint;
+    public String storageIntegration;
     public Instant directoryRefreshed;
     public HashMap<String, String> fileFormatOptions;
     public HashMap<String, String> copyOptions;

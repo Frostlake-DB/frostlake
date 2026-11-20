@@ -132,6 +132,12 @@ public class CreateSecurityHandler implements CommandHandler {
             queryExecutor.requireOwnership("TAG", queryExecutor.createdNameParts(ctx), null);
             // Asked before the tag a replacement drops is gone.
             ddl.checkCreatePrivilege(Privilege.CREATE_TAG, ddl.resolveSchemaFromQualifiedName(tagName));
+            if (catalog.hasTagExact(tagName) && catalog.getTagExact(tagName).hasMaskingPolicies()) {
+                // A tag carrying a masking policy is neither dropped nor replaced (documented).
+                throw new RuntimeException(SqlCompilationError.PREFIX + " Tag "
+                    + catalog.getTagExact(tagName).getName()
+                    + " cannot be dropped/replaced as it is associated with one or more policies.");
+            }
             try { catalog.dropTagExact(tagName); } catch (final RuntimeException ignored) {}
         }
         try {

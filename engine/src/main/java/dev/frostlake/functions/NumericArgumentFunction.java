@@ -71,6 +71,28 @@ public abstract class NumericArgumentFunction extends BuiltInFunction {
         super(name, returnType);
     }
 
+    /**
+     * Whether a row's value at this position is read as a number — a numeric text or a VARIANT converted to one —
+     * before the member sees it. Every position is, except one a member takes as text (BITAND's padding side).
+     *
+     * @param position the zero-based argument position
+     * @return whether the value is read as a number
+     */
+    public boolean readsNumberAt(final int position) {
+        return true;
+    }
+
+    /**
+     * The numeric family a VARIANT argument is cast to, which its refusal names: REAL for most members, FIXED for
+     * the bitwise functions, which read whole numbers (live-verified: {@code BITSHIFTLEFT(X'01', 'x'::VARIANT)} is
+     * "Failed to cast variant value "x" to FIXED").
+     *
+     * @return REAL or FIXED
+     */
+    public String variantCastTarget() {
+        return "REAL";
+    }
+
     @Override
     public SemiStructuredRejection semiStructuredRejection(final int position) {
         return SemiStructuredRejection.ARGUMENT_TYPES;

@@ -132,6 +132,33 @@ public class SecurityIntegrationTypesTest extends BaseDatabaseTest {
     }
 
     @Test
+    public void aSaml2OrScimIntegrationMayLeaveEnabledOut() {
+        engine.execute("CREATE SECURITY INTEGRATION so_saml_def TYPE = SAML2 SAML2_ISSUER = 'https://idp'"
+            + " SAML2_SSO_URL = 'https://idp/sso' SAML2_PROVIDER = 'CUSTOM' SAML2_X509_CERT = 'MIIC'");
+        assertEquals("SO_SAML_DEF|SAML2|SECURITY|true|null", listed("SO_SAML_DEF"));
+        assertEquals(PREFIX + "Missing option(s): [SAML2_ISSUER, SAML2_SSO_URL, SAML2_PROVIDER, SAML2_X509_CERT]",
+            refusal("CREATE SECURITY INTEGRATION so_bad TYPE = SAML2"));
+        engine.execute("CREATE SECURITY INTEGRATION so_scim_def TYPE = SCIM SCIM_CLIENT = 'AZURE'"
+            + " RUN_AS_ROLE = 'AAD_PROVISIONER'");
+        assertEquals("SO_SCIM_DEF|SCIM - AZURE|SECURITY|true|null", listed("SO_SCIM_DEF"));
+    }
+
+    @Test
+    public void alterSetMaySeparateItsPropertiesWithCommas() {
+        engine.execute("CREATE SECURITY INTEGRATION so_comma TYPE = OAUTH OAUTH_CLIENT = CUSTOM"
+            + " OAUTH_CLIENT_TYPE = 'CONFIDENTIAL' OAUTH_REDIRECT_URI = 'https://example.com/cb'");
+        assertEquals("Statement executed successfully.", status("ALTER SECURITY INTEGRATION so_comma"
+            + " SET OAUTH_ENFORCE_PKCE = TRUE, COMMENT = 'two'"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|true|two", listed("SO_COMMA"));
+        assertEquals("Statement executed successfully.", status("ALTER SECURITY INTEGRATION so_comma"
+            + " SET OAUTH_ENFORCE_PKCE = FALSE, ENABLED = FALSE COMMENT = 'three'"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|false|three", listed("SO_COMMA"));
+        assertEquals("Statement executed successfully.",
+            status("ALTER SECURITY INTEGRATION so_comma UNSET ENABLED, COMMENT"));
+        assertEquals("SO_COMMA|OAUTH - CUSTOM|SECURITY|true|null", listed("SO_COMMA"));
+    }
+
+    @Test
     public void alterSetsWhatTheTypeTakes() {
         engine.execute("CREATE SECURITY INTEGRATION so_alter TYPE = SCIM ENABLED = TRUE SCIM_CLIENT = 'GENERIC'"
             + " RUN_AS_ROLE = 'GENERIC_SCIM_PROVISIONER'");

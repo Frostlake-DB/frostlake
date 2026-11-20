@@ -85,6 +85,13 @@ protocol = "http"
 REMOVE, which `snow stage remove` sends, is refused until the server's `frostlake.properties` sets
 `command.removeEnabled=true`.
 
+
+## Snowflake's Terraform provider
+
+The Snowflake Terraform provider (`snowflakedb/snowflake`) plans, applies and destroys against the same HTTP server:
+give it the server's `host` and `port` with `protocol = "http"`. The provider block, a first configuration, the
+resources that run their whole lifecycle and the ones that do not are in [`docs/terraform.md`](docs/terraform.md).
+
 ## Trademarks & Disclaimer
 
 Frostlake is an independent project and is **not affiliated with, endorsed by, or sponsored

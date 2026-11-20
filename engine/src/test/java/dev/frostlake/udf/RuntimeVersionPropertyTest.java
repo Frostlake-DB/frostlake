@@ -18,6 +18,7 @@ package dev.frostlake.udf;
 
 import dev.frostlake.BaseDatabaseTest;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,7 +49,7 @@ public class RuntimeVersionPropertyTest extends BaseDatabaseTest {
 
     private static String decommissioned(final String version) {
         return "SQL compilation error: Python runtime version " + version + " is decommissioned."
-            + " Please update your code to Python runtime version 3.10 or later.";
+            + " Please update your code to Python runtime version 3.11 or later.";
     }
 
     private static String invalid(final String version) {
@@ -64,13 +65,11 @@ public class RuntimeVersionPropertyTest extends BaseDatabaseTest {
     @Test
     public void aPythonRoutineTakesOnlyAVersionTheLanguageOffers() {
         assertCells(new String[][] {
-            {"CREATE FUNCTION py10() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.10'" + PY_BODY, "created"},
             {"CREATE FUNCTION py11() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.11'" + PY_BODY, "created"},
             {"CREATE FUNCTION py12() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.12'" + PY_BODY, "created"},
             {"CREATE FUNCTION py13() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.13'" + PY_BODY, "created"},
             {"CREATE FUNCTION py14() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.14'" + PY_BODY, "created"},
             {"CREATE FUNCTION pyn1() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION=3.11" + PY_BODY, "created"},
-            {"CREATE FUNCTION pyn2() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION=3.10" + PY_BODY, "created"},
             {"CREATE FUNCTION pyx1() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='4.0'" + PY_BODY, invalid("4.0")},
             {"CREATE FUNCTION pyx2() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='x'" + PY_BODY, invalid("x")},
             {"CREATE FUNCTION pyx3() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3'" + PY_BODY, invalid("3")},
@@ -155,7 +154,12 @@ public class RuntimeVersionPropertyTest extends BaseDatabaseTest {
 
     @Test
     public void aRetiredPythonVersionIsRefusedByItsOwnSentence() {
+        Assumptions.assumeFalse(isLiveSnowflake());
         assertCells(new String[][] {
+            {"CREATE FUNCTION d10() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.10'" + PY_BODY,
+                decommissioned("3.10")},
+            {"CREATE FUNCTION d11() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION=3.10" + PY_BODY,
+                decommissioned("3.10")},
             {"CREATE FUNCTION d1() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.9'" + PY_BODY, decommissioned("3.9")},
             {"CREATE FUNCTION d2() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION='3.8'" + PY_BODY, decommissioned("3.8")},
             {"CREATE FUNCTION d3() RETURNS INT LANGUAGE PYTHON RUNTIME_VERSION=3.9" + PY_BODY, decommissioned("3.9")},

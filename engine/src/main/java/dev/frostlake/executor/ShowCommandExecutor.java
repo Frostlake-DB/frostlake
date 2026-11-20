@@ -27,6 +27,7 @@ import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.ManagedAccount;
 import dev.frostlake.metastore.model.ObjectParameters;
 import dev.frostlake.metastore.model.Pipe;
+import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.security.SecurityManager;
 import dev.frostlake.storage.ResultSet;
@@ -82,6 +83,11 @@ public class ShowCommandExecutor {
             @Override
             public boolean sees(final String objectType, final String objectName, final String owner) {
                 return securityManager == null || securityManager.sees(objectType, objectName, owner);
+            }
+
+            @Override
+            public String missedContainer(final String databaseName, final String schemaName) {
+                return securityManager == null ? null : securityManager.missedUnseenContainer(databaseName, schemaName);
             }
         };
         this.relationalExecutor = new ShowRelationalExecutor(catalog, storageEngine, ownership);
@@ -299,6 +305,10 @@ public class ShowCommandExecutor {
 
     public ResultSet showUserFunctionsInDatabase(final String databaseName) {
         return routineExecutor.showUserFunctionsInDatabase(databaseName);
+    }
+
+    public ResultSet showExternalFunctions(final List<Schema> schemas) {
+        return routineExecutor.showExternalFunctions(schemas);
     }
 
     public ResultSet showUserProceduresInDatabase(final String databaseName) {

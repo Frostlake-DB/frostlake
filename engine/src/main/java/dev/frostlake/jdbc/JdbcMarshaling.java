@@ -1521,6 +1521,26 @@ public final class JdbcMarshaling {
         return SqlStringLiterals.encode(value.toString());
     }
 
+    /**
+     * Whether a prepared statement is a kind that answers rows, judged by its first keyword past any comments and
+     * opening parentheses: a query, SHOW, DESCRIBE, EXPLAIN or CALL.
+     *
+     * @param sql the statement
+     * @return true for a kind that answers rows
+     */
+    public static boolean answersRows(final String sql) {
+        for (final Token t : lex(sql).getTokens()) {
+            if (t.getChannel() != Token.DEFAULT_CHANNEL || t.getType() == FrostlakeLexer.LPAREN) {
+                continue;
+            }
+            final int type = t.getType();
+            return type == FrostlakeLexer.SELECT || type == FrostlakeLexer.WITH || type == FrostlakeLexer.SHOW
+                || type == FrostlakeLexer.DESC || type == FrostlakeLexer.DESCRIBE || type == FrostlakeLexer.EXPLAIN
+                || type == FrostlakeLexer.CALL;
+        }
+        return false;
+    }
+
     /** Count the {@code ?} placeholders in {@code sql}, skipping any inside single-quoted string literals. */
     public static int countPlaceholders(final String sql) {
         int count = 0;

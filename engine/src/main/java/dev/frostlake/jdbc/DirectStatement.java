@@ -48,6 +48,9 @@ public class DirectStatement extends AbstractFrostlakeStatement {
     // over them: which answer rows and which an update count, and where getMoreResults() stands.
     private List<ResultSet> results = new ArrayList<>();
     private JdbcResultWalk walk = JdbcResultWalk.none();
+    // The result set handed out for the current result, and those getMoreResults(KEEP_CURRENT_RESULT) left open.
+    private DirectResultSet currentResultSet;
+    private final List<DirectResultSet> keptResultSets = new ArrayList<>();
     private final List<String> batchStatements = new ArrayList<>();
     private final List<Long> generatedKeys = new ArrayList<>();
     private String lastQueryId;
@@ -88,6 +91,8 @@ public class DirectStatement extends AbstractFrostlakeStatement {
             ((DirectConnection) connection).requireSession();
         }
         applyMultiStatementGate(sql);
+        // Executing closes the result set the previous execution handed out, as JDBC defines it.
+        closeCurrentResultSet();
         final ExecutionResult result;
         final Integer displacedCount = DynamicStatementCount.beginRequest(desiredStatementCount(),
             JdbcMultiStatement.countStatements(sql));
@@ -148,7 +153,8 @@ public class DirectStatement extends AbstractFrostlakeStatement {
             throw JdbcResultWalk.firstResultIsACount();
         }
         take(produced, true);
-        return new DirectResultSet(this, produced.get(0));
+        currentResultSet = new DirectResultSet(this, produced.get(0));
+        return currentResultSet;
     }
 
     @Override
@@ -214,7 +220,26 @@ public class DirectStatement extends AbstractFrostlakeStatement {
         if (!walk.currentIsRows()) {
             return null;
         }
-        return new DirectResultSet(this, results.get(walk.position()));
+        if (currentResultSet == null) {
+            currentResultSet = new DirectResultSet(this, results.get(walk.position()));
+        }
+        return currentResultSet;
+    }
+
+    /**
+     * The result set handed out for the current result while it is still open, or null.
+     *
+     * @return the open result set, or null
+     */
+    protected java.sql.ResultSet openResultSet() throws SQLException {
+        return currentResultSet == null || currentResultSet.isClosed() ? null : currentResultSet;
+    }
+
+    private void closeCurrentResultSet() throws SQLException {
+        if (currentResultSet != null) {
+            currentResultSet.close();
+            currentResultSet = null;
+        }
     }
 
     /**
@@ -241,12 +266,19 @@ public class DirectStatement extends AbstractFrostlakeStatement {
 
     /** Leave a whole prepared batch behind as one update count, as the driver's array-bound batch does. */
     protected void takeBatchCount(final long count) {
+        currentResultSet = null;
         results = new ArrayList<>();
         walk = JdbcResultWalk.ofCount(count);
     }
 
     @Override
     public void close() throws SQLException {
+        // Closing the statement closes every result set it handed out that is still open (live-verified).
+        closeCurrentResultSet();
+        for (final DirectResultSet kept : keptResultSets) {
+            kept.close();
+        }
+        keptResultSets.clear();
         closed = true;
         results = new ArrayList<>();
         walk = JdbcResultWalk.none();
@@ -279,10 +311,36 @@ public class DirectStatement extends AbstractFrostlakeStatement {
         return walk.updateCount();
     }
 
-    /** Move to the next statement's result; see {@link JdbcResultWalk#next()} for what it answers. */
+    /**
+     * Move to the next statement's result, closing the current result set; see {@link JdbcResultWalk#next()} for
+     * what it answers.
+     */
     @Override
     public boolean getMoreResults() throws SQLException {
+        return getMoreResults(Statement.CLOSE_CURRENT_RESULT);
+    }
+
+    /**
+     * Move to the next statement's result, the current result set closed, kept open or closed with every one kept
+     * before it, as {@code current} says (see {@link JdbcResultWalk#next()} for what it answers).
+     */
+    @Override
+    public boolean getMoreResults(final int current) throws SQLException {
         checkClosed();
+        if (current == Statement.KEEP_CURRENT_RESULT) {
+            if (currentResultSet != null) {
+                keptResultSets.add(currentResultSet);
+            }
+            currentResultSet = null;
+        } else {
+            closeCurrentResultSet();
+            if (current == Statement.CLOSE_ALL_RESULTS) {
+                for (final DirectResultSet kept : keptResultSets) {
+                    kept.close();
+                }
+                keptResultSets.clear();
+            }
+        }
         return walk.next();
     }
 
@@ -355,7 +413,6 @@ public class DirectStatement extends AbstractFrostlakeStatement {
         return lastQueryId;
     }
 
-    /** As {@link #getMoreResults()}: a result set already handed out stays readable either way. */
     @Override
     public java.sql.ResultSet getGeneratedKeys() throws SQLException {
         checkClosed();

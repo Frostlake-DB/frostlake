@@ -27,6 +27,7 @@ import java.io.EOFException;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -111,6 +112,11 @@ public class WriteAheadLog {
     private boolean readsVariablePrecisions = true;
     /** Whether the record read last was torn: the file ended inside it. */
     private boolean readTorn;
+    /** Whether the last read stopped at a record whose type byte names no record type. */
+    private boolean readUnknown;
+    /** What the reads since the last {@link #takeSetAside} set aside; see {@link #setAside}. */
+    private final List<String> setAside = new ArrayList<>();
+    private static final int ZERO_SCAN_BYTES = 1 << 16;
     private static final byte REC_CHECKPOINT = 2;
     /** Where counters stood once a statement drew from them (see {@link CounterMark}). */
     private static final byte REC_COUNTERS = 3;
@@ -601,7 +607,10 @@ public class WriteAheadLog {
     /**
      * All records in order (for replay); empty if the log doesn't exist yet or has only the header. A torn
      * trailing record left by a crash mid-append is discarded, so only fully-written, fsync'd records are
-     * returned, and is cut off the file, so the records appended after this read follow the last whole one.
+     * returned, and is cut off the file, so the records appended after this read follow the last whole one. So is a
+     * record that stops being readable before the end of the file (a zero-filled tail, or damage, which is first kept
+     * in a copy beside the log; see {@link #takeSetAside}): the reads stop there, and a record appended behind it would
+     * never be read.
      */
     public synchronized List<WalRecord> readAll() throws IOException {
         final List<WalRecord> records = new ArrayList<>();
@@ -639,6 +648,7 @@ public class WriteAheadLog {
             // The reads go straight to the file, so its position is where the bytes read so far end.
             whole = file.getChannel().position();
             readTorn = false;
+            readUnknown = false;
             while (true) {
                 final WalRecord rec = readRecord(in);
                 if (rec == null) {
@@ -647,18 +657,74 @@ public class WriteAheadLog {
                 records.add(rec);
                 whole = file.getChannel().position();
             }
-            // A record a crash tore is a whole record's beginning, so reading it runs into the end of the file. One
-            // that stops being readable before the end is damage this log cannot tell the extent of: it stays.
+            // A record a crash tore is a whole record's beginning, so reading it runs into the end of the file.
             tornAtEnd = readTorn && file.getChannel().position() >= file.getChannel().size();
-            if (readTorn && !tornAtEnd) {
-                logger.warn("The write-ahead log at {} holds an unreadable record at byte {}; replay stops there", path,
-                    whole);
-            }
         }
         if (tornAtEnd) {
             cutAt(whole);
+        } else if (readTorn || readUnknown) {
+            // A record that stops being readable before the end of the file. Replay stops there, and so would every
+            // later start: whatever is appended behind it is never read. A tail of zeros is what a crash leaves when
+            // the file grew before its bytes were written, and holds nothing; anything else is kept in a copy beside
+            // the log before it is cut off, so the records appended from now on follow the last readable one.
+            if (!zerosFrom(whole)) {
+                setAside(whole);
+            }
+            cutAt(whole);
         }
         return records;
+    }
+
+    /** Whether the file holds only zero bytes from {@code from} to its end. */
+    private boolean zerosFrom(final long from) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            channel.position(from);
+            final ByteBuffer buffer = ByteBuffer.allocate(ZERO_SCAN_BYTES);
+            while (true) {
+                buffer.clear();
+                final int read = channel.read(buffer);
+                if (read < 0) {
+                    return true;
+                }
+                for (int i = 0; i < read; i++) {
+                    if (buffer.get(i) != 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Copy the whole log beside it, forced to disk, before what follows its last readable record is cut off: the
+     * bytes may still hold work a person can recover by hand. What was set aside is reported by {@link #takeSetAside}.
+     */
+    private void setAside(final long whole) throws IOException {
+        Path copy = path.resolveSibling(path.getFileName() + ".damaged");
+        int n = 1;
+        while (Files.exists(copy)) {
+            copy = path.resolveSibling(path.getFileName() + ".damaged." + n);
+            n++;
+        }
+        Files.copy(path, copy);
+        DurableFiles.syncFile(copy);
+        DurableFiles.syncDirectory(path.toAbsolutePath().getParent());
+        final String told = "The write-ahead log at " + path + " holds an unreadable record at byte " + whole
+            + "; the log is kept as it was in " + copy + " and cut there, so recovery replayed the records before it";
+        logger.error(told);
+        setAside.add(told);
+    }
+
+    /**
+     * What the reads of the log since the last call set aside: one message per unreadable record found before the
+     * end of the file, naming the copy of the log kept beside it. Empty when every record was readable.
+     *
+     * @return the messages, oldest first
+     */
+    public synchronized List<String> takeSetAside() {
+        final List<String> taken = new ArrayList<>(setAside);
+        setAside.clear();
+        return taken;
     }
 
     /** Epoch nanoseconds, the form the log stores an instant in. */
@@ -709,6 +775,7 @@ public class WriteAheadLog {
                 return WalRecord.counters(marks);
             } else {
                 logger.warn("Unknown write-ahead log record type {}; stopping replay here", type);
+                readUnknown = true;
                 return null;
             }
         } catch (final EOFException eof) {
@@ -757,28 +824,34 @@ public class WriteAheadLog {
 
     private void rewrite(final List<WalRecord> keep) throws IOException {
         out.close();   // close the current append stream before replacing the file underneath it
-        final Path tmp = path.resolveSibling(path.getFileName() + ".compact");
-        try (FileOutputStream tmpFileOut = new FileOutputStream(tmp.toFile(), false);
-             DataOutputStream tmpOut = new DataOutputStream(new BufferedOutputStream(tmpFileOut))) {
-            tmpOut.writeInt(MAGIC);
-            tmpOut.writeByte(VERSION);
-            tmpOut.writeLong(toNanos(firstStart));
-            for (final WalRecord rec : keep) {
-                if (rec.getType() == WalRecordType.TRANSACTION) {
-                    // In this version's layout, which the header names: the instants and contexts kept too.
-                    writeTransaction(tmpOut, rec);
-                } else if (rec.getType() == WalRecordType.COUNTERS) {
-                    writeCounters(tmpOut, rec.getCounterMarks());
-                } else {
-                    tmpOut.writeByte(REC_CHECKPOINT);
-                    writeString(tmpOut, rec.getCheckpointRef());
+        try {
+            final Path tmp = path.resolveSibling(path.getFileName() + ".compact");
+            try (FileOutputStream tmpFileOut = new FileOutputStream(tmp.toFile(), false);
+                 DataOutputStream tmpOut = new DataOutputStream(new BufferedOutputStream(tmpFileOut))) {
+                tmpOut.writeInt(MAGIC);
+                tmpOut.writeByte(VERSION);
+                tmpOut.writeLong(toNanos(firstStart));
+                for (final WalRecord rec : keep) {
+                    if (rec.getType() == WalRecordType.TRANSACTION) {
+                        // In this version's layout, which the header names: the instants and contexts kept too.
+                        writeTransaction(tmpOut, rec);
+                    } else if (rec.getType() == WalRecordType.COUNTERS) {
+                        writeCounters(tmpOut, rec.getCounterMarks());
+                    } else {
+                        tmpOut.writeByte(REC_CHECKPOINT);
+                        writeString(tmpOut, rec.getCheckpointRef());
+                    }
                 }
+                tmpOut.flush();
+                tmpFileOut.getFD().sync();
             }
-            tmpOut.flush();
-            tmpFileOut.getFD().sync();
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            // The rename is durable once the directory naming the log is.
+            DurableFiles.syncDirectory(path.toAbsolutePath().getParent());
+        } finally {
+            // Reopened whether or not the rewrite went through: a log left closed failed every later append.
+            openForAppend();
         }
-        Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        openForAppend();   // reopen the (now-compacted) log for subsequent appends
     }
 
     public synchronized void close() {

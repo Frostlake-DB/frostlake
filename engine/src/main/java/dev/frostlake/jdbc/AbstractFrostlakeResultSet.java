@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.net.URL;
 import java.sql.Array;
 import java.sql.Blob;
@@ -430,9 +431,11 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
         return cell == null ? null : decimal(columnIndex, cell);
     }
 
+    /** The value at the scale asked for, rounded half up, as the account's driver reads it (live-verified). */
     @Override
     public BigDecimal getBigDecimal(final int columnIndex, final int scale) throws SQLException {
-        return getBigDecimal(columnIndex);
+        final BigDecimal value = getBigDecimal(columnIndex);
+        return value == null ? null : value.setScale(scale, RoundingMode.HALF_UP);
     }
 
     @Override

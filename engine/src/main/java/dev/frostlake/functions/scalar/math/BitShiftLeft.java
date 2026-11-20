@@ -17,7 +17,9 @@
 package dev.frostlake.functions.scalar.math;
 
 import dev.frostlake.functions.NumericArgumentFunction;
+import dev.frostlake.functions.SemiStructuredRejection;
 import dev.frostlake.types.IntegerResultWidths;
+import dev.frostlake.values.BinaryValue;
 
 import java.util.List;
 
@@ -27,7 +29,22 @@ public class BitShiftLeft extends NumericArgumentFunction {
     @Override
     public Object evaluate(final List<Object> args) {
         if (args.get(0) == null || args.get(1) == null) return null;
+        if (args.get(0) instanceof BinaryValue) {
+            return BinaryBitwise.shifted((BinaryValue) args.get(0), args.get(1), true);
+        }
         return BitShifts.shifted(BitwiseOperand.wide(args.get(0)), BitwiseOperand.whole(args.get(1)), true);
+    }
+
+    /** A VARIANT is cast to a whole number here. */
+    @Override
+    public String variantCastTarget() {
+        return "FIXED";
+    }
+
+    /** A BINARY value is taken in first place, the BINARY form (see BinaryBitwise). */
+    @Override
+    public SemiStructuredRejection binaryRejection(final int position) {
+        return position == 0 ? SemiStructuredRejection.NONE : super.binaryRejection(position);
     }
 
     @Override

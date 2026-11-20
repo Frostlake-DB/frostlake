@@ -298,6 +298,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                     if (names) {
                         HiddenDatabases.end(displaced);
                     }
+                    // A DDL statement may have dropped, replaced, moved or brought back a started task, or the schema
+                    // or the database it is in: its timer follows (see TaskScheduler#reconcile).
+                    if (taskScheduler != null && ctx.ddlStatement() != null) {
+                        taskScheduler.reconcile();
+                    }
                 }
             } finally {
                 PropertyVariables.unbind(boundVariables);
@@ -497,18 +502,21 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         // policy in a column definition, a view column's clause or ADD COLUMN, WITH ROW ACCESS POLICY, and an
         // aggregation or a join policy (see ApplyPrivileges).
         if (node instanceof FrostlakeParser.ColumnConstraintContext
+                && ((FrostlakeParser.ColumnConstraintContext) node).objectName() != null) {
+            requireApplyAttachedPolicy("MASKING_POLICY", ((FrostlakeParser.ColumnConstraintContext) node).objectName());
+        } else if (node instanceof FrostlakeParser.ColumnConstraintContext
                 && ((FrostlakeParser.ColumnConstraintContext) node).qualifiedName() != null) {
             final FrostlakeParser.ColumnConstraintContext constraint = (FrostlakeParser.ColumnConstraintContext) node;
-            if (constraint.MASKING() != null) {
-                requireApplyAttachedPolicy("MASKING_POLICY", constraint.qualifiedName());
-            } else if (constraint.PROJECTION() != null) {
+            if (constraint.PROJECTION() != null) {
                 requireApplyAttachedPolicy("PROJECTION_POLICY", constraint.qualifiedName());
             }
         } else if (node instanceof FrostlakeParser.ViewColumnClauseContext
+                && ((FrostlakeParser.ViewColumnClauseContext) node).objectName() != null) {
+            requireApplyAttachedPolicy("MASKING_POLICY", ((FrostlakeParser.ViewColumnClauseContext) node).objectName());
+        } else if (node instanceof FrostlakeParser.ViewColumnClauseContext
                 && ((FrostlakeParser.ViewColumnClauseContext) node).qualifiedName() != null) {
-            final FrostlakeParser.ViewColumnClauseContext clause = (FrostlakeParser.ViewColumnClauseContext) node;
-            requireApplyAttachedPolicy(clause.MASKING() != null ? "MASKING_POLICY" : "PROJECTION_POLICY",
-                clause.qualifiedName());
+            requireApplyAttachedPolicy("PROJECTION_POLICY",
+                ((FrostlakeParser.ViewColumnClauseContext) node).qualifiedName());
         } else if (node instanceof FrostlakeParser.RowAccessPolicyClauseContext) {
             requireApplyAttachedPolicy("ROW_ACCESS_POLICY",
                 ((FrostlakeParser.RowAccessPolicyClauseContext) node).qualifiedName());
@@ -538,13 +546,32 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * @param name the policy's name as written
      */
     private void requireApplyAttachedPolicy(final String kind, final FrostlakeParser.QualifiedNameContext name) {
-        if (catalog == null || name == null) {
+        if (name != null) {
+            requireApplyAttachedPolicy(kind, getText(name));
+        }
+    }
+
+    /** {@link #requireApplyAttachedPolicy(String, FrostlakeParser.QualifiedNameContext)} for a policy an IDENTIFIER()
+     *  reference may name. */
+    private void requireApplyAttachedPolicy(final String kind, final FrostlakeParser.ObjectNameContext name) {
+        final String written;
+        try {
+            written = queryExecutor.resolveObjectName(name);
+        } catch (final RuntimeException unresolved) {
+            // The statement's own handler resolves the reference again and reports what is wrong with it.
+            return;
+        }
+        requireApplyAttachedPolicy(kind, written);
+    }
+
+    private void requireApplyAttachedPolicy(final String kind, final String written) {
+        if (catalog == null) {
             return;
         }
         final String fullName;
         final String owner;
         try {
-            fullName = catalog.qualifiedExactName(getText(name));
+            fullName = catalog.qualifiedExactName(written);
             owner = attachedPolicyOwner(kind, fullName);
         } catch (final RuntimeException missing) {
             return;
@@ -846,8 +873,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         }
         try {
             // EXECUTE TASK task_name
-            final String taskName = getText(ctx.qualifiedName());
-            ManualRunPrivileges.requireTask(queryExecutor, ParseTreeText.qualifiedNameParts(ctx.qualifiedName()));
+            final String[] taskParts = queryExecutor.resolveObjectNameParts(ctx.objectName());
+            final String taskName = QualifiedName.join(taskParts);
+            ManualRunPrivileges.requireTask(queryExecutor, taskParts);
 
             if (taskScheduler == null) {
                 throw new RuntimeException("Task scheduler not initialized");
@@ -871,7 +899,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             final List<ResultSetColumn> columns = Arrays.asList(
                 new ResultSetColumn("status", StringType.VARCHAR));
             final List<Row> rows = Arrays.asList(new Row(Arrays.asList(
-                "Task " + QualifiedName.parse(taskName).last() + " is scheduled to run immediately.")));
+                "Task " + taskParts[taskParts.length - 1] + " is scheduled to run immediately.")));
             return new ResultSet(columns, rows);
         } catch (final Exception e) {
             if (e instanceof SecurityException) throw (SecurityException) e;
@@ -1117,7 +1145,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
     public Object visitCopyIntoStatement(final FrostlakeParser.CopyIntoStatementContext ctx) {
         final Object answer = dmlHandler.handleCopyIntoStatement(ctx);
         // A load into a table runs as a transaction of its own (see TransactionManager.recordStatementTransaction).
-        if (ctx.qualifiedName() != null) {
+        if (ctx.objectName() != null) {
             queryExecutor.getTransactionManager().recordStatementTransaction();
         }
         return answer;
@@ -3162,7 +3190,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             if (returnValue instanceof DataFrame) {
                 return ReturnedTable.shape(procedure.getReturnColumns(), ((DataFrame) returnValue).getResultSet());
             }
-            if (returnValue == null && (language == UdfLanguage.JAVA || language == UdfLanguage.SCALA)) {
+            if (returnValue == null && (language == UdfLanguage.JAVA || language == UdfLanguage.SCALA
+                    || language == UdfLanguage.PYTHON)) {
                 throw new RuntimeException("NULL result in a non-nullable column of type TEXT in function "
                     + procedure.getName() + " with handler " + procedure.getHandler());
             }

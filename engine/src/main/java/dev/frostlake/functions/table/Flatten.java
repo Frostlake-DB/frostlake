@@ -316,14 +316,9 @@ public class Flatten extends TableFunction {
             return VariantValue.ofNode(node);
         }
         if (node.isTextual()) {
-            // Same disambiguation as path extraction: a string element whose content looks like JSON
-            // structure keeps its quoted form so it is not mistaken for a real array/object downstream.
-            final String text = node.asText();
-            final String trimmedText = text.trim();
-            if (trimmedText.startsWith("[") || trimmedText.startsWith("{")) {
-                return VariantValue.ofNode(node);
-            }
-            return text;
+            // Same disambiguation as path extraction: a string element that could be mistaken for a JSON
+            // null or for JSON structure stays a VARIANT string.
+            return VariantValue.ofStringMember(node);
         }
         if (node.isBoolean()) {
             return node.asBoolean();

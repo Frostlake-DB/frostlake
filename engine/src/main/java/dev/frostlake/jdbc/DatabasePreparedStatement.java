@@ -24,7 +24,6 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -131,9 +130,7 @@ public class DatabasePreparedStatement extends DatabaseStatement implements Fros
         if (currentResultSet != null) {
             return currentResultSet.getMetaData();
         }
-        final String head = originalSql.trim().toUpperCase(Locale.ROOT);
-        if (!(head.startsWith("SELECT") || head.startsWith("WITH") || head.startsWith("SHOW")
-                || head.startsWith("DESC") || head.startsWith("EXPLAIN") || head.startsWith("CALL"))) {
+        if (!JdbcMarshaling.answersRows(originalSql)) {
             return null;
         }
         final Map<Integer, Object> filled = new HashMap<>(parameters);

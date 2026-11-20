@@ -92,7 +92,7 @@ public class DecfloatRoutineTest extends MeasuredCellsTestSupport {
                 + "with handler DfB.f"},
             {"CREATE OR REPLACE FUNCTION df_js(x DECFLOAT) RETURNS FLOAT LANGUAGE JAVASCRIPT AS 'return X;'",
                 "REFUSED Language JAVASCRIPT does not support type 'DECFLOAT(38)' for argument or return type."},
-            {"CREATE OR REPLACE FUNCTION df_py(x DECFLOAT) RETURNS FLOAT LANGUAGE PYTHON RUNTIME_VERSION = '3.10' "
+            {"CREATE OR REPLACE FUNCTION df_py(x DECFLOAT) RETURNS FLOAT LANGUAGE PYTHON RUNTIME_VERSION = '3.11' "
                 + "HANDLER = 'f' AS 'def f(x):\n    return float(x)'",
                 "REFUSED Snowflake type DECFLOAT[DECFLOAT18](38,0){nullable} is not supported in function DF_PY with "
                 + "handler f"},
@@ -106,7 +106,7 @@ public class DecfloatRoutineTest extends MeasuredCellsTestSupport {
                 + "}'",
                 "REFUSED Snowflake type DECFLOAT[DECFLOAT18](38,0){nullable} is not supported in function DF_JP with "
                 + "handler DfP.run"},
-            {"CREATE OR REPLACE PROCEDURE df_pp(x DECFLOAT) RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION = '3.10' "
+            {"CREATE OR REPLACE PROCEDURE df_pp(x DECFLOAT) RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION = '3.11' "
                 + "PACKAGES = ('snowflake-snowpark-python') HANDLER = 'run' AS 'def run(session, x):\n    return "
                 + "str(x)'",
                 "REFUSED Language PYTHON does not support type 'DECFLOAT(38)' for argument or return type."},

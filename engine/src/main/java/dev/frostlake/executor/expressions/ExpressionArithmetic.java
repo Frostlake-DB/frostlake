@@ -1218,8 +1218,16 @@ public final class ExpressionArithmetic {
         return null;
     }
 
-    /** A temporal as the instant it names, a naive one read in the session's zone; null if not temporal. */
+    /**
+     * A temporal as the instant it names, a naive one read in the session's zone; null if not temporal. Text
+     * reads as a TIMESTAMP_LTZ cast reads it — an offset, an RFC or ISO form and an epoch fix the instant,
+     * a bare wall clock is in the session's zone — and text that is no timestamp is live's refusal,
+     * {@code Timestamp 'abc' is not recognized}, rather than an inequality (live-verified).
+     */
     private static Instant sessionInstant(final Object v) {
+        if (v instanceof CharSequence) {
+            return SharedFunctionHelpers.toSessionOffsetDateTime(v.toString()).toInstant();
+        }
         // A raw instant, as an INFORMATION_SCHEMA time once was, is already the instant it names.
         if (v instanceof Instant) {
             return (Instant) v;

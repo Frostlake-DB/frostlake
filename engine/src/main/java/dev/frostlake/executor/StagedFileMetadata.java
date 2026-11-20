@@ -106,6 +106,6 @@ public final class StagedFileMetadata {
         values.add(Long.valueOf(rowNumber));
         values.add(contentKey);
         values.add(lastModified);
-        values.add(StatementClock.now());
+        values.add(StatementClock.nowUtc());
     }
 }

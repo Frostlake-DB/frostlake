@@ -39,6 +39,7 @@ Response:
 | 400 | the body has no `sql` field: nothing ran, and the answer is the usual failure — `success: false`, `errorMessage: "SQL is required"`, `sessionId: null` |
 | 404 | `sessionId` names no live session and the request did not set `requireSession: false`: nothing ran, and `sessionId` is null |
 | 405 | any method but POST |
+| 413 | the body is larger than `http.maxRequestBytes` (see [What a request is held to](#what-a-request-is-held-to)): nothing ran |
 | 500 | the server could not handle the request at all (an unreadable body, an internal fault such as a class it cannot load). A fault is always answered, never left to the client's timeout. |
 
 Decide success from the body's `success`: a SQL error is an answer, not a transport failure.
@@ -361,7 +362,8 @@ jdbc:snowflake://127.0.0.1:18082/?account=frostlake&ssl=off
 `ssl=off` (or writing the scheme, `jdbc:snowflake://http://127.0.0.1:18082/?account=frostlake`) keeps the driver
 on plain HTTP. The account is any name: the driver requires one, and with no `account` it takes the host's first
 part. Any user and password log in, as nothing here is authenticated. `db`, `schema`, `role` and `warehouse` are
-set as a USE sets them, and the session parameters the connection carries (`TIMEZONE`, the output formats, …) as
+set as a USE sets them - a `role` the session cannot take (one that does not exist, or is not granted) refuses the
+login with vendor code 390189, SQLSTATE 08001, as the account does - and the session parameters the connection carries (`TIMEZONE`, the output formats, …) as
 ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its cloud-metadata lookups at connect.
 
 | Endpoint | What it does |
@@ -374,6 +376,10 @@ ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its c
 | `POST /session?delete=true` | Ends the session. |
 | `POST /session/heartbeat`, `POST /session/token-request` | Keep the session and renew its token. |
 | `POST /telemetry/send` | Accepted and dropped. |
+
+The endpoints marked `POST` above take no other method: a `GET` of the login, which any page could make an image
+request to, is answered `405` and opens no session. The login and each statement's answer tell the driver the role
+the session runs as (`getRole()`), the one a `USE ROLE` moved it to included.
 
 A query's rows come as Arrow (`rowsetBase64`), the account's default, unless the session sets
 `JDBC_QUERY_RESULT_FORMAT = 'JSON'`; then as JSON. Every other answer comes as a JSON `rowset`, as the account sends
@@ -532,6 +538,12 @@ reaches. So before any handler runs, a request is refused for the three things o
 | `Host` | `421` | A server bound to the loopback interface (the default, `http.host=localhost`) answers to `localhost`, `127.0.0.1`, `[::1]` and the configured `http.host`, with any port. Another name is one pointed at the machine from outside. A server bound to any other address checks no name. |
 | `Origin` | `403` | A request that names an origin — every request a page sends across origins, and every `POST` — is served only for an origin listed in `http.cors.allowedOrigins`. A request without the header is no page's: a driver, `curl`. |
 | `Content-Type` | `415` | A body sent to `/api/execute` or `/api/sessions` has to be declared `application/json` (parameters such as `; charset=utf-8` allowed). |
+
+A body is read at most to `http.maxRequestBytes` bytes (256 MiB by default; 0 sets no bound), as sent and, for a
+`Content-Encoding: gzip` body - the Snowflake driver's - once unzipped, so a small body that unzips a thousandfold is
+never held whole. A larger one is answered `413` before it is read whole and nothing of it runs: a body declared
+longer is refused unread, and one sent in chunks stops being read at the bound. The 413 carries the reason
+(`errorMessage`, or `message` on the Snowflake driver's endpoints); each driver reports it as the statement's failure.
 
 Each refusal is `{"error": "…"}`. Every driver sends `application/json`, no `Origin` and the host it connects to,
 so none of them is affected; a client that reaches a loopback server under another name sets `http.host` to it.

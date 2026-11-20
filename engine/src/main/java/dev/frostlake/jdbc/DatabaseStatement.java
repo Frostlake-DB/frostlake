@@ -27,6 +27,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -38,6 +39,8 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
     protected final DatabaseConnection connection;
     protected final HttpClient httpClient;
     protected DatabaseResultSet currentResultSet;
+    // The result sets getMoreResults(KEEP_CURRENT_RESULT) left open, closed with the statement.
+    private final List<DatabaseResultSet> keptResultSets = new ArrayList<>();
     // Every result the last (possibly multi-statement) execution produced, one per statement, and the walk
     // over them: which answer rows and which an update count, and where getMoreResults() stands.
     protected List<ResultSetData> pendingResultData = new ArrayList<>();
@@ -228,8 +231,16 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
             if (currentResultSet != null) {
                 currentResultSet.close();
             }
+            closeKeptResultSets();
             closed = true;
         }
+    }
+
+    private void closeKeptResultSets() throws SQLException {
+        for (final DatabaseResultSet kept : keptResultSets) {
+            kept.close();
+        }
+        keptResultSets.clear();
     }
 
     @Override
@@ -309,13 +320,32 @@ public class DatabaseStatement extends AbstractFrostlakeStatement {
         return walk.updateCount();
     }
 
-    /** Move to the next statement's result; see {@link JdbcResultWalk#next()} for what it answers. */
+    /**
+     * Move to the next statement's result, closing the current result set; see {@link JdbcResultWalk#next()} for
+     * what it answers.
+     */
     @Override
     public boolean getMoreResults() throws SQLException {
+        return getMoreResults(Statement.CLOSE_CURRENT_RESULT);
+    }
+
+    /**
+     * Move to the next statement's result, the current result set closed, kept open or closed with every one kept
+     * before it, as {@code current} says (see {@link JdbcResultWalk#next()} for what it answers).
+     */
+    @Override
+    public boolean getMoreResults(final int current) throws SQLException {
         checkClosed();
         if (currentResultSet != null) {
-            currentResultSet.close();
+            if (current == Statement.KEEP_CURRENT_RESULT) {
+                keptResultSets.add(currentResultSet);
+            } else {
+                currentResultSet.close();
+            }
             currentResultSet = null;
+        }
+        if (current == Statement.CLOSE_ALL_RESULTS) {
+            closeKeptResultSets();
         }
         final boolean answer = walk.next();
         if (walk.currentIsRows()) {

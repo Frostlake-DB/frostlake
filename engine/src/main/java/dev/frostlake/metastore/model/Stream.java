@@ -57,7 +57,14 @@ public class Stream implements Named, Taggable {
     private final StreamSourceType sourceType;
     private final StreamType streamType;
     private final boolean showInitialRows;
+    /**
+     * The change records from the first one no read has consumed yet, in capture order. Offsets and cuts count every
+     * record ever captured; the consumed ones before the offset are read by nothing and are dropped as the offset
+     * passes them (see {@link #discarded}).
+     */
     private final List<StreamRecord> records;
+    /** How many records were captured before the first one {@link #records} holds: consumed and dropped. */
+    private long discarded;
     private LocalDateTime createdAt;
     /** When a consuming statement last moved the offset, or null before any did (see stale_after). */
     private LocalDateTime lastConsumedAt;
@@ -117,16 +124,16 @@ public class Stream implements Named, Taggable {
 
     public void addRecord(final StreamRecord record) {
         // For append-only streams, only track actual INSERTs (not UPDATE-generated INSERTs)
-        if (streamType == StreamType.APPEND_ONLY && !isAppend(record)) {
+        if (streamType != StreamType.STANDARD && !isAppend(record)) {
             return;
         }
         records.add(record);
     }
 
     /**
-     * Removes a dropped column's slot from the change records, consumed or not, so a record captured
-     * before a DROP COLUMN reads through the table's current columns as the account's streams do. Offsets
-     * index the record list, which keeps its length and order.
+     * Removes a dropped column's slot from the change records the stream holds, so a record captured
+     * before a DROP COLUMN reads through the table's current columns as the account's streams do. The
+     * records keep their number and order.
      *
      * @param index       the dropped column's position before the drop
      * @param capturedFrom the table the records must have been captured from (upper-case bare name), or
@@ -142,7 +149,7 @@ public class Stream implements Named, Taggable {
     }
 
     /**
-     * Appends a newly added column's value to the change records, consumed or not, when a record is
+     * Appends a newly added column's value to the change records the stream holds, when a record is
      * exactly one slot short — every record captured before the ADD COLUMN.
      *
      * @param width        the table's column count after the add
@@ -161,10 +168,7 @@ public class Stream implements Named, Taggable {
     }
 
     public List<StreamRecord> getUnconsumedRecords() {
-        if (currentOffset >= records.size()) {
-            return new ArrayList<>();
-        }
-        return new ArrayList<>(records.subList((int) currentOffset, records.size()));
+        return unconsumedRecordsUpTo(recordCount());
     }
 
     /**
@@ -227,15 +231,28 @@ public class Stream implements Named, Taggable {
     }
 
     private List<StreamRecord> unconsumedRecordsUpTo(final long cut) {
-        final int end = (int) Math.min(cut, records.size());
+        final long end = Math.min(cut, recordCount());
         if (currentOffset >= end) {
             return new ArrayList<>();
         }
-        return new ArrayList<>(records.subList((int) currentOffset, end));
+        return new ArrayList<>(records.subList(held(currentOffset), held(end)));
+    }
+
+    /** Where the record captured {@code position}-th (counting every record ever captured) is in {@link #records}. */
+    private int held(final long position) {
+        return (int) (position - discarded);
+    }
+
+    /** Drops the records before the offset: consumed, they are read by nothing (no read starts before the offset). */
+    private void discardConsumed() {
+        if (currentOffset > discarded) {
+            records.subList(0, held(currentOffset)).clear();
+            discarded = currentOffset;
+        }
     }
 
     private List<StreamRecord> netRecordsOf(final List<StreamRecord> raw) {
-        if (streamType == StreamType.APPEND_ONLY) {
+        if (streamType != StreamType.STANDARD) {
             return raw;
         }
 
@@ -399,9 +416,10 @@ public class Stream implements Named, Taggable {
             return;
         }
         // Consuming a stream advances the offset
-        currentOffset = records.size();
+        currentOffset = recordCount();
         offsetSequence = SnapshotSequence.mark();
         dropConsumedVersions();
+        discardConsumed();
     }
 
     /**
@@ -432,9 +450,19 @@ public class Stream implements Named, Taggable {
         }
     }
 
+    /**
+     * How many change records the stream holds: those from its offset on, the consumed ones being dropped as the offset
+     * passes them.
+     *
+     * @return the records held
+     */
+    public int heldRecordCount() {
+        return records.size();
+    }
+
     /** Total records ever captured (consumed + unconsumed): the window a read outside any transaction ends at. */
     public long recordCount() {
-        return records.size();
+        return discarded + records.size();
     }
 
     /**
@@ -445,8 +473,8 @@ public class Stream implements Named, Taggable {
      * @return the records captured before it, never fewer than the consumed ones
      */
     public long recordsBefore(final long sequence) {
-        int cut = records.size();
-        while (cut > currentOffset && records.get(cut - 1).getSequence() >= sequence) {
+        long cut = recordCount();
+        while (cut > currentOffset && records.get(held(cut - 1)).getSequence() >= sequence) {
             cut--;
         }
         return cut;
@@ -469,12 +497,9 @@ public class Stream implements Named, Taggable {
         offsetSequence = Math.max(offsetSequence, sequence);
         dropConsumedVersions();
         if (cut > currentOffset) {
-            currentOffset = Math.min(cut, records.size());
+            currentOffset = Math.min(cut, recordCount());
+            discardConsumed();
         }
-    }
-
-    public void reset() {
-        currentOffset = 0;
     }
 
     /** Owning role; defaults to SYSADMIN until stamped with the creating role at CREATE. */
@@ -578,7 +603,8 @@ public class Stream implements Named, Taggable {
         // Listed as reading those tables under the names they have from then on, renamed too (live-verified).
         shownTables = new ArrayList<>(tables);
         initialRecords = null;
-        currentOffset = records.size();
+        currentOffset = recordCount();
+        discardConsumed();
         versions.clear();
         stale = false;
     }
@@ -642,10 +668,6 @@ public class Stream implements Named, Taggable {
         return showInitialRows;
     }
 
-    public List<StreamRecord> getRecords() {
-        return records;
-    }
-
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }
@@ -706,7 +728,7 @@ public class Stream implements Named, Taggable {
         if (initialRecords != null) {
             return initialRecords.size();
         }
-        return records.size() - (int) currentOffset;
+        return (int) (recordCount() - currentOffset);
     }
 
     /**
@@ -799,6 +821,7 @@ public class Stream implements Named, Taggable {
     public void inheritChanges(final Stream source) {
         records.clear();
         records.addAll(source.records);
+        discarded = source.discarded;
         currentOffset = source.currentOffset;
         stale = source.stale;
         rebound = source.rebound;
@@ -811,6 +834,7 @@ public class Stream implements Named, Taggable {
     public void inheritOffset(final Stream source) {
         records.clear();
         records.addAll(source.records);
+        discarded = source.discarded;
         currentOffset = source.currentOffset;
         stale = source.stale;
         rebound = source.rebound;

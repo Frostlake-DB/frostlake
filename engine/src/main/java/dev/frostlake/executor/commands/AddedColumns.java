@@ -72,7 +72,7 @@ final class AddedColumns {
      */
     static void refuseUnfillableNotNull(final TableColumn column, final String table) {
         final Object fill = column.getDefaultValue();
-        if (!column.isNullable() && (fill == null || "NULL".equalsIgnoreCase(String.valueOf(fill).trim()))) {
+        if (!column.isNullable() && (fill == null || "NULL".equals(fill))) {
             throw new RuntimeException(SqlCompilationError.inline("Non-nullable column '" + column.getName()
                 + "' cannot be added to non-empty table '" + table + "' unless it has a non-null default value."));
         }

@@ -622,6 +622,10 @@ final class ValueRangeInferencer {
      * BITNOT(TO_VARIANT(n5)) are NUMBER(2,0)[SB1]). GETBIT is tagged as BITAND is.
      */
     private ValueRange bitwiseRange(final FunctionCallExpression call, final List<Expression> args) {
+        if (!(visitor.inferStaticType(call) instanceof NumericType)) {
+            // Over BINARY operands the answer is a BINARY, which carries no integer tag.
+            return null;
+        }
         for (final Expression arg : args) {
             if (isBareNull(arg)) {
                 return ValueRange.EMPTY;
@@ -634,7 +638,8 @@ final class ValueRangeInferencer {
         }
         // A shift count is no value the result is read through: BITSHIFTRIGHT(1, '2') keeps the declared width's
         // [SB1] (live-verified).
-        final boolean shifts = call.getFunctionName().toUpperCase(Locale.ROOT).startsWith("BITSHIFT");
+        final String shiftName = call.getFunctionName().toUpperCase(Locale.ROOT);
+        final boolean shifts = shiftName.startsWith("BITSHIFT") || shiftName.startsWith("BIT_SHIFT");
         boolean throughSixtyFourBits = false;
         for (int i = 0; i < args.size(); i++) {
             final DataType type = visitor.inferStaticType(args.get(i));
@@ -942,6 +947,8 @@ final class ValueRangeInferencer {
             case "BIT_NOT":
             case "BITSHIFTLEFT":
             case "BITSHIFTRIGHT":
+            case "BIT_SHIFTLEFT":
+            case "BIT_SHIFTRIGHT":
             case "GETBIT":
                 return bitwiseRange(call, args);
             case "FACTORIAL":

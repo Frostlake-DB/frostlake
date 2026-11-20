@@ -34,7 +34,7 @@ public class PythonOwnersRightsTemporaryObjectTest extends BaseDatabaseTest {
 
     private void pythonProcedure(final String name, final String rights, final String statement) {
         engine.execute("CREATE OR REPLACE PROCEDURE " + name + "() RETURNS STRING LANGUAGE PYTHON"
-            + " RUNTIME_VERSION='3.10' PACKAGES=('snowflake-snowpark-python') HANDLER='go'"
+            + " RUNTIME_VERSION='3.11' PACKAGES=('snowflake-snowpark-python') HANDLER='go'"
             + " EXECUTE AS " + rights + " AS $$\n"
             + "def go(session):\n"
             + "    session.sql(\"" + statement + "\").collect()\n"

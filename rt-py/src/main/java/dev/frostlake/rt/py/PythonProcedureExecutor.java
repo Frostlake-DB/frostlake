@@ -16,6 +16,7 @@
 
 package dev.frostlake.rt.py;
 
+import com.snowflake.snowpark_java.DataFrame;
 import dev.frostlake.DatabaseEngine;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Procedure;
@@ -154,14 +155,16 @@ public final class PythonProcedureExecutor {
                 PythonInterpreter.eval(pythonCode);
             }
 
+            if (procedure.returnsTable()) {
+                return returnedTable(procedure, session);
+            }
+
             // A procedure that answers a value answers it as its declared RETURNS type, converted as Python
             // converts and judged as the account judges it (see PythonReturn).
-            if (!procedure.returnsTable()) {
-                final Object declared = PythonReturn.declaredGlobal("__result",
-                    procedure.getReturnType(), procedure.getName(), procedure.getHandler());
-                if (declared != PythonReturn.AS_IS) {
-                    return declared;
-                }
+            final Object declared = PythonReturn.declaredGlobal("__result",
+                procedure.getReturnType(), procedure.getName(), procedure.getHandler());
+            if (declared != PythonReturn.AS_IS) {
+                return declared;
             }
 
             final Object javaResult = PythonInterpreter.global("__result");
@@ -211,6 +214,39 @@ public final class PythonProcedureExecutor {
         } finally {
             PythonInterpreter.leaveModule(frame);
         }
+    }
+
+    /**
+     * What a RETURNS TABLE procedure's handler handed back: the rows of the Snowpark DataFrame it returned, read once
+     * the handler has returned, for the CALL to shape under the declared columns; nothing when it returned None. Any
+     * other value is refused, and so is a DataFrame whose statement the engine refuses, in the words of Snowpark's
+     * exception without the handler's traceback (live-verified).
+     *
+     * @param procedure the procedure called
+     * @param session   the session its handler was handed
+     * @return the DataFrame, or null
+     */
+    private static DataFrame returnedTable(final Procedure procedure, final SnowparkSession session) {
+        PythonInterpreter.eval("__fl_table_sql = __result._sql_source() if isinstance(__result, "
+            + "__frostlake_sp.DataFrame) else None\n__fl_table_none = __result is None\n");
+        final Object sql = PythonInterpreter.global("__fl_table_sql");
+        if (sql == null) {
+            if (Boolean.TRUE.equals(PythonInterpreter.global("__fl_table_none"))) {
+                return null;
+            }
+            throw new PythonReturnRefusal("Return value should be a Snowpark dataframe object in function "
+                + procedure.getName() + " with handler " + procedure.getHandler());
+        }
+        final SnowparkOutcome outcome = session.attempt(String.valueOf(sql));
+        if (outcome.refused()) {
+            // The account's text drops the parenthesis that opens Snowpark's code.
+            final String refusal = outcome.refusal();
+            throw new PythonReturnRefusal("Python Interpreter Error:\nsnowflake.snowpark.exceptions."
+                + "SnowparkSQLException: " + (outcome.queryId() != null && refusal.startsWith("(")
+                    ? refusal.substring(1) : refusal)
+                + " in function " + procedure.getName() + " with handler " + procedure.getHandler());
+        }
+        return new DataFrame(outcome.result().resultSet());
     }
 
     private static String extractFunctionName(final String body) {

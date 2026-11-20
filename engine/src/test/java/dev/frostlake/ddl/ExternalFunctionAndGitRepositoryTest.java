@@ -89,6 +89,15 @@ public class ExternalFunctionAndGitRepositoryTest extends MeasuredCellsTestSuppo
             answer("SHOW USER FUNCTIONS LIKE 'F1450'");
             assertAnswer("Y|EXTERNAL", "SELECT \"is_external_function\", \"language\" FROM "
                 + "TABLE(RESULT_SCAN(LAST_QUERY_ID()))");
+            // SHOW EXTERNAL FUNCTIONS lists the external functions alone, in SHOW USER FUNCTIONS' columns.
+            answer("CREATE OR REPLACE FUNCTION g1450(x INT) RETURNS INT AS 'x'");
+            answer("SHOW EXTERNAL FUNCTIONS LIKE 'F1450' IN SCHEMA test_db.test_schema");
+            assertAnswer("F1450|TEST_DB|Y|EXTERNAL", "SELECT \"name\", \"catalog_name\", \"is_external_function\","
+                + " \"language\" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))");
+            answer("SHOW EXTERNAL FUNCTIONS IN DATABASE test_db");
+            assertAnswer("F1450", "SELECT LISTAGG(\"name\", ',') FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))");
+            answer("SHOW EXTERNAL FUNCTIONS LIKE 'G1450' IN ACCOUNT");
+            assertAnswer("0", "SELECT COUNT(*) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))");
         } finally {
             answer("DROP INTEGRATION IF EXISTS ef_api1450");
             answer("DROP INTEGRATION IF EXISTS ef_git1450");

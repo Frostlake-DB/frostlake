@@ -29,7 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * INFORMATION_SCHEMA's role and privilege views answer for the session that reads them (documented): ENABLED_ROLES
  * lists the roles in use and every role granted to one of them, with PUBLIC always; APPLICABLE_ROLES lists the role
  * grants applied to the session's user, the roles granted to those included; TABLE_PRIVILEGES and OBJECT_PRIVILEGES
- * list only objects the session's roles reach. Engine only: the live account allows no CREATE USER or CREATE ROLE.
+ * list only objects the session's roles reach, as PIPES does; TABLE_STORAGE_METRICS lists rows only for a session
+ * using ACCOUNTADMIN. Engine only: the live account allows no CREATE USER or CREATE ROLE.
  */
 public class InformationSchemaRoleViewsTest {
 
@@ -108,5 +109,38 @@ public class InformationSchemaRoleViewsTest {
             + " WHERE object_name IN ('HIDDEN', 'SV')"));
         assertEquals("ISR|ISR_Z ; PUBLIC|ISR_Z", rows("SELECT object_name, grantee FROM isr.INFORMATION_SCHEMA."
             + "OBJECT_PRIVILEGES WHERE grantee = 'ISR_Z' ORDER BY 1"));
+    }
+
+    @Test
+    public void pipesListOnlyWhatTheSessionReaches() {
+        engine.execute("CREATE TABLE loaded (id INT)");
+        engine.execute("CREATE STAGE st");
+        engine.execute("CREATE PIPE pp AS COPY INTO loaded FROM @st");
+        assertEquals("PP", rows("SELECT pipe_name FROM isr.INFORMATION_SCHEMA.PIPES"));
+        asIsrZ();
+        assertEquals("", rows("SELECT pipe_name FROM isr.INFORMATION_SCHEMA.PIPES"));
+        asSystem("SYSADMIN");
+        engine.execute("GRANT MONITOR ON PIPE isr.public.pp TO ROLE isr_z");
+        asIsrZ();
+        assertEquals("PP", rows("SELECT pipe_name FROM isr.INFORMATION_SCHEMA.PIPES"));
+    }
+
+    @Test
+    public void storageMetricsAreReadOnlyByTheAccountAdministrator() {
+        asIsrZ();
+        assertEquals("0", rows("SELECT COUNT(*) FROM isr.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS"));
+        asSystem("SYSADMIN");
+        // ACCOUNTADMIN in use as a secondary role reads them too.
+        assertEquals("1", rows("SELECT COUNT(*) FROM isr.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS"));
+        engine.execute("USE SECONDARY ROLES NONE");
+        assertEquals("0", rows("SELECT COUNT(*) FROM isr.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS"));
+        asSystem("ACCOUNTADMIN");
+        assertEquals("HIDDEN", rows("SELECT table_name FROM isr.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS"
+            + " WHERE table_schema = 'PUBLIC'"));
+    }
+
+    private void asSystem(final String role) {
+        engine.setCurrentUser("SYSTEM");
+        engine.execute("USE ROLE " + role);
     }
 }

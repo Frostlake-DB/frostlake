@@ -169,6 +169,17 @@ public final class InformationSchemaViews {
     }
 
     /**
+     * Whether a view is one of INFORMATION_SCHEMA's system views, whose definition is a placeholder rather than a
+     * query: its rows come from the system view readers, so nothing parses or walks its body.
+     *
+     * @param view the view
+     * @return true for a system view
+     */
+    public static boolean isSystemView(final View view) {
+        return DEFINITION.equals(view.getDefinition());
+    }
+
+    /**
      * Registers every view in a database's INFORMATION_SCHEMA: created at the epoch and owned by nobody,
      * like the schema holding them, with the account's description as its comment.
      */

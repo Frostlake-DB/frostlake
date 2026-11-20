@@ -79,6 +79,8 @@ public class Catalog {
     // The account locator a fully qualified name may lead with; null until the engine sets it.
     private String accountLocator;
     private final Map<String, Database> databases;
+    /** Whether a tag has carried a masking policy, so that a query reads the tags reaching what it reads. */
+    private volatile boolean tagMasking;
     private final Map<String, Warehouse> warehouses;
     private final Map<String, ComputePool> computePools = new ConcurrentHashMap<>();
     private final IntegrationRegistry integrations = new IntegrationRegistry();
@@ -439,7 +441,27 @@ public class Catalog {
      *
      * @param home       the policy's schema
      * @param policyName the policy's own name */
+    /**
+     * Notes that a tag carries a masking policy, after which a query reads the tags reaching the columns it reads.
+     */
+    public void noteTagMasking() {
+        tagMasking = true;
+    }
+
+    /**
+     * Whether a tag has carried a masking policy since the catalog was made or restored.
+     *
+     * @return whether the tags reaching a column are to be read for its masking
+     */
+    public boolean isTagMaskingInUse() {
+        return tagMasking;
+    }
+
     public boolean isPolicyInUse(final Schema home, final String policyName, final boolean masking) {
+        if (masking && tagMasking && TagMaskingPolicies.carried(this, home, policyName)) {
+            // A tag carrying the policy holds it as a column does (live-verified).
+            return true;
+        }
         for (final Database database : getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
                 for (final Table table : schema.getTables()) {

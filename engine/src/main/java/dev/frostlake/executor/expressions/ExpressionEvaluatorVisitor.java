@@ -31,6 +31,7 @@ import dev.frostlake.executor.FromlessDual;
 import dev.frostlake.executor.InvalidQualifierException;
 import dev.frostlake.executor.LateralShapeArguments;
 import dev.frostlake.executor.NamedArguments;
+import dev.frostlake.executor.NumericConversionException;
 import dev.frostlake.executor.NumericRangeRefusal;
 import dev.frostlake.executor.ParameterReferences;
 import dev.frostlake.executor.ParseTreeText;
@@ -89,6 +90,7 @@ import dev.frostlake.functions.scalar.datetime.LastDay;
 import dev.frostlake.functions.scalar.datetime.PlannedDateAdd;
 import dev.frostlake.functions.scalar.datetime.PlannedDateDiff;
 import dev.frostlake.functions.scalar.file.StageUrlFunction;
+import dev.frostlake.functions.scalar.math.BitwisePair;
 import dev.frostlake.functions.scalar.math.DecfloatRounding;
 import dev.frostlake.functions.scalar.math.FloatScaleRounding;
 import dev.frostlake.functions.scalar.math.RoundingModeNames;
@@ -245,6 +247,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     // published it and nothing further in, so a subquery written inside one of those clauses must not
     // correlate to it (live-verified).
     private boolean scopeOpaqueToSubqueries;
+    // Whether the statement's compilation has judged every correlated scalar subquery this visitor meets, so a row
+    // reaching one runs it: a MERGE's, whose pairs this visitor reads through one merged shape the statistics of the
+    // two relations do not reach.
+    private boolean correlationsPlanned;
     private Map<String, Table> multiTableAliasToTable;
     private List<Table> multiTableAllTables;
     // Per-context memo of how each column reference resolved against the CURRENT multi-table
@@ -426,6 +432,16 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     /** Whether a subquery evaluated here may read this visitor's relation as an outer row. */
     boolean isScopeOpaqueToSubqueries() {
         return scopeOpaqueToSubqueries;
+    }
+
+    /** See {@link #correlationsPlanned}. */
+    public void setCorrelationsPlanned(final boolean planned) {
+        this.correlationsPlanned = planned;
+    }
+
+    /** Whether the statement's compilation has judged the correlated scalar subqueries evaluated here. */
+    boolean isCorrelationsPlanned() {
+        return correlationsPlanned;
     }
 
     Map<String, Object> getLateralContext() {
@@ -2792,16 +2808,59 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     }
 
     /**
-     * WIDTH_BUCKET's DECFLOAT arguments, each the whole number it rounds to, half away from zero:
-     * {@code WIDTH_BUCKET(1.5::DECFLOAT, 0, 10, 5)} is 2, the bucket of 2 (live-verified).
+     * WIDTH_BUCKET's arguments when the value or a bound is a DECFLOAT: the value and both bounds are then held at the
+     * widest scale an exact NUMBER among them declares - none counts as a scale of zero - each rounded half away from
+     * zero to it, a FLOAT among them too, and bucketed exactly. {@code WIDTH_BUCKET(1.5::DECFLOAT, 0, 10, 5)} is 2,
+     * the bucket of 2; {@code WIDTH_BUCKET(0.299::DECFLOAT, 0, 0.9, 3)} is 2, the bucket of 0.3; and
+     * {@code WIDTH_BUCKET(0.15, 0.1::DECFLOAT, 0.9::DECFLOAT, 8)} is 1, every number already at the scale. A DECFLOAT
+     * bucket count is the whole number it rounds to (all live-verified).
      */
     private void decfloatWholeArguments(final FunctionCallExpression expr, final List<Object> argValues) {
-        for (int i = 0; i < argValues.size() && i < expr.getArguments().size(); i++) {
+        final int bounded = Math.min(3, Math.min(argValues.size(), expr.getArguments().size()));
+        boolean decfloat = false;
+        int scale = 0;
+        for (int i = 0; i < bounded; i++) {
             final Object value = argValues.get(i);
-            if (value instanceof Number && !(value instanceof Double) && isDecfloatTyped(expr.getArguments().get(i))) {
-                argValues.set(i, Decfloats.of((Number) value, "TO_DECFLOAT").setScale(0, RoundingMode.HALF_UP));
+            if (!(value instanceof Number) || value instanceof Double) {
+                continue;
+            }
+            if (isDecfloatTyped(expr.getArguments().get(i))) {
+                decfloat = true;
+            } else {
+                scale = Math.max(scale, declaredScaleOf(expr.getArguments().get(i), (Number) value));
             }
         }
+        for (int i = 0; i < argValues.size() && i < expr.getArguments().size(); i++) {
+            final Object value = argValues.get(i);
+            if (!(value instanceof Number)) {
+                continue;
+            }
+            if (i == 3) {
+                if (!(value instanceof Double) && isDecfloatTyped(expr.getArguments().get(i))) {
+                    argValues.set(i, Decfloats.of((Number) value, "TO_DECFLOAT").setScale(0, RoundingMode.HALF_UP));
+                }
+                continue;
+            }
+            if (!decfloat || value instanceof Double && !Double.isFinite(((Double) value).doubleValue())) {
+                continue;
+            }
+            final BigDecimal exact = value instanceof Double ? new BigDecimal(((Double) value).doubleValue())
+                : Decfloats.of((Number) value, "TO_DECFLOAT");
+            argValues.set(i, exact.setScale(scale, RoundingMode.HALF_UP));
+        }
+    }
+
+    /** The scale an exact numeric argument declares, or its value's own when its type is not known. */
+    private int declaredScaleOf(final Expression argument, final Number value) {
+        try {
+            final DataType declared = typeInferencer.infer(argument);
+            if (NumericType.isExactNumber(declared)) {
+                return Math.max(0, ((NumericType) declared).getScale());
+            }
+        } catch (final RuntimeException untyped) {
+            // Read the value's own scale below.
+        }
+        return value instanceof BigDecimal ? Math.max(0, ((BigDecimal) value).scale()) : 0;
     }
 
     /**
@@ -4328,8 +4387,9 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                 return null;
             }
             if (func instanceof NumericArgumentFunction) {
-                coerceNumericTextArguments(funcName, expr, argValues);
-                coerceNumericVariantArguments(argValues);
+                refuseVariantHeldBinary((NumericArgumentFunction) func, expr, argValues);
+                coerceNumericTextArguments(funcName, (NumericArgumentFunction) func, expr, argValues);
+                coerceNumericVariantArguments((NumericArgumentFunction) func, argValues);
             }
             if (func instanceof TextArgumentFunction && ((TextArgumentFunction) func).readsTemporalsAsText()) {
                 textTemporalArguments(argValues);
@@ -9803,7 +9863,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     }
 
     /**
-     * GET_PATH's path, judged while the statement compiles when it is constant text — a literal, or what
+     * GET_PATH's path, and JSON_EXTRACT_PATH_TEXT's, judged while the statement compiles when it is constant text — a literal, or what
      * {@link ConstantTextArgument} folds, such as a join of two — over a NULL source and a source with no row
      * too. The refusal says what is wrong and where, and carries no compilation prefix: {@code Invalid
      * extraction path 'a.': dangling dot at position 2.} Any other path is read with the row, by the function
@@ -9813,7 +9873,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      * @param args     its arguments
      */
     private void rejectMalformedExtractionPath(final String funcName, final List<Expression> args) {
-        if (!"GET_PATH".equals(funcName) || args.size() != 2
+        if (!"GET_PATH".equals(funcName) && !"JSON_EXTRACT_PATH_TEXT".equals(funcName) || args.size() != 2
                 || !ConstantTextArgument.isConstant(args.get(1), this)) {
             return;
         }
@@ -11000,6 +11060,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     + strictArgTypeText(args.get(0)) + ", NUMBER(1,0), NUMBER(1,0))"));
             }
         }
+        if (function instanceof BitwisePair && refusesBitwiseSignature(args)) {
+            throw new RuntimeException(positionedArgumentTypes(call,
+                "Invalid argument types for function '" + funcName + "': (" + strictArgTypeList(args) + ")"));
+        }
         for (int position = 0; position < args.size(); position++) {
             if (position == 0 && args.size() == 2 && funcName.equals("CONCAT_WS")) {
                 // With one value the separator is never read, so its family is never judged (live-verified).
@@ -11133,6 +11197,47 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     semiStructuredRejectionMessage(rejection, funcName, args, position, inferred, call));
             }
         }
+    }
+
+    /**
+     * Whether BITAND, BITOR or BITXOR refuse their arguments as a whole signature while the statement compiles
+     * (live-verified). The functions take two whole numbers, or two BINARY values with an optional padding side; an
+     * untyped NULL stands for either. A BINARY beside anything else is refused — {@code BITAND(X'FF', 1)} is
+     * "Invalid argument types for function 'BITAND': (BINARY(1), NUMBER(1,0))", as beside a text or a VARIANT — and
+     * so is a padding side beside two numbers ({@code BITAND(1, 3, 'LEFT')}), and a BINARY, OBJECT, ARRAY or
+     * geospatial padding side; a text, a number, a BOOLEAN, a date or time and a VARIANT are taken there.
+     *
+     * @param args the call's arguments
+     * @return whether the signature is refused
+     */
+    private boolean refusesBitwiseSignature(final List<Expression> args) {
+        if (args.size() < 2) {
+            return false;
+        }
+        boolean binary = false;
+        boolean other = false;
+        for (int i = 0; i < 2; i++) {
+            if (isNullLiteral(args.get(i))) {
+                continue;
+            }
+            if (typeInferencer.infer(args.get(i)) instanceof BinaryType) {
+                binary = true;
+            } else {
+                other = true;
+            }
+        }
+        if (binary && other) {
+            return true;
+        }
+        if (args.size() < 3) {
+            return false;
+        }
+        if (other) {
+            return true;
+        }
+        final Expression side = args.get(2);
+        return typeInferencer.infer(side) instanceof BinaryType || GeoTypes.isGeo(typeInferencer.infer(side))
+            || typeInferencer.inferSemiStructured(side) != null;
     }
 
     /**
@@ -21016,13 +21121,13 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         }
     }
 
-    private void coerceNumericTextArguments(final String funcName, final Expression call,
-                                            final List<Object> argValues) {
+    private void coerceNumericTextArguments(final String funcName, final NumericArgumentFunction function,
+                                            final Expression call, final List<Object> argValues) {
         final List<Expression> arguments = call instanceof FunctionCallExpression
             ? ((FunctionCallExpression) call).getArguments() : null;
         for (int i = 0; i < argValues.size(); i++) {
             final Object value = argValues.get(i);
-            if (!(value instanceof CharSequence)) {
+            if (!(value instanceof CharSequence) || !function.readsNumberAt(i)) {
                 continue;
             }
             if (readsTextAtImpliedScale(funcName, i, argValues.size()) && arguments != null
@@ -21049,9 +21154,10 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      * FLOAT-typed); an object, an array or other text fails its cast to REAL (live: ABS, ROUND, FLOOR,
      * SQRT, MOD … over {"x":1}).
      */
-    private static void coerceNumericVariantArguments(final List<Object> argValues) {
+    private static void coerceNumericVariantArguments(final NumericArgumentFunction function,
+                                                      final List<Object> argValues) {
         for (int i = 0; i < argValues.size(); i++) {
-            if (!(argValues.get(i) instanceof VariantValue)) {
+            if (!(argValues.get(i) instanceof VariantValue) || !function.readsNumberAt(i)) {
                 continue;
             }
             final VariantValue variant = (VariantValue) argValues.get(i);
@@ -21059,8 +21165,33 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             if (node == null || node.isNull()) {
                 continue;
             }
-            final Number read = VariantNumbers.numberOf(variant, VariantNumbers.REAL);
+            final Number read = VariantNumbers.numberOf(variant, function.variantCastTarget());
             argValues.set(i, Double.valueOf(read.doubleValue()));
+        }
+    }
+
+    /**
+     * Refuses a BINARY a VARIANT argument holds where a numeric function reads a number: the VARIANT is cast to the
+     * function's numeric family and a binary member converts to none (live-verified: {@code BITNOT(TO_VARIANT(X'FF'))}
+     * is "Failed to cast variant value "FF" to FIXED"). A VARIANT carries its binary member as the binary itself, so
+     * the argument's declared type tells it from a BINARY argument.
+     *
+     * @param function  the function
+     * @param call      the call
+     * @param argValues the evaluated arguments
+     */
+    private void refuseVariantHeldBinary(final NumericArgumentFunction function, final Expression call,
+                                         final List<Object> argValues) {
+        if (!(call instanceof FunctionCallExpression)) {
+            return;
+        }
+        final List<Expression> arguments = ((FunctionCallExpression) call).getArguments();
+        for (int i = 0; i < argValues.size() && i < arguments.size(); i++) {
+            if (argValues.get(i) instanceof BinaryValue && function.readsNumberAt(i)
+                    && typeInferencer.infer(arguments.get(i)) instanceof VariantType) {
+                throw new NumericConversionException("Failed to cast variant value \""
+                    + ((BinaryValue) argValues.get(i)).toHex() + "\" to " + function.variantCastTarget());
+            }
         }
     }
 

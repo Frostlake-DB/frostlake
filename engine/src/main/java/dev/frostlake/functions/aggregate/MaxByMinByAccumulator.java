@@ -25,9 +25,7 @@ import tools.jackson.databind.node.ArrayNode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Shared accumulator for {@link MaxBy} and {@link MinBy}. Unlike the numeric two-argument aggregates (CORR,
@@ -48,7 +46,6 @@ public class MaxByMinByAccumulator implements AggregateFunction.Accumulator {
     // Bounded three-argument form MIN_BY/MAX_BY(value, key, N): collect every pair and return an ARRAY
     // of up to N values ordered by key (ascending for MIN_BY, descending for MAX_BY). -1 = scalar form.
     private int limit = -1;
-    private boolean distinct;
     private final List<Object> pairValues = new ArrayList<>();
     private final List<Object> pairKeys = new ArrayList<>();
 
@@ -56,10 +53,12 @@ public class MaxByMinByAccumulator implements AggregateFunction.Accumulator {
         this.wantMax = wantMax;
     }
 
-    /** Switch to the bounded (array-returning) form with the given cap; DISTINCT dedups values. */
-    public void setLimit(final int limit, final boolean distinct) {
+    /**
+     * Switch to the bounded (array-returning) form with the given cap. DISTINCT leaves this form's values as they
+     * are: MAX_BY(DISTINCT v, k, 3) over the values 1, 1, 2 is [1,1,2] (live-verified).
+     */
+    public void setLimit(final int limit) {
         this.limit = limit;
-        this.distinct = distinct;
     }
 
     @Override
@@ -97,8 +96,12 @@ public class MaxByMinByAccumulator implements AggregateFunction.Accumulator {
         return has ? bestValue : null;
     }
 
-    /** The bounded form's ARRAY: values ordered by key (min asc / max desc), deduped when DISTINCT, capped. */
+    /** The bounded form's ARRAY: values ordered by key (min asc / max desc), capped. */
     private Object boundedResult() {
+        if (pairKeys.isEmpty()) {
+            // No row with a key answers NULL, not an empty ARRAY (live-verified).
+            return null;
+        }
         final Integer[] order = new Integer[pairKeys.size()];
         for (int i = 0; i < order.length; i++) {
             order[i] = i;
@@ -111,20 +114,14 @@ public class MaxByMinByAccumulator implements AggregateFunction.Accumulator {
             }
         });
         final ArrayNode array = ArrayFunctionHelper.MAPPER.createArrayNode();
-        final Set<String> seen = new LinkedHashSet<>();
         int taken = 0;
         for (final int idx : order) {
             if (taken >= limit) {
                 break;
             }
             final Object value = pairValues.get(idx);
-            if (distinct) {
-                final String image = String.valueOf(value);
-                if (!seen.add(image)) {
-                    continue;
-                }
-            }
-            array.add(ArrayFunctionHelper.toNode(ArrayFunctionHelper.MAPPER, value));
+            // A SQL NULL value is the ARRAY's undefined element, as ARRAY_CONSTRUCT's (live-verified).
+            array.add(ArrayFunctionHelper.toElementNode(ArrayFunctionHelper.MAPPER, value));
             taken++;
         }
         return ArrayFunctionHelper.toCanonicalVariant(array);

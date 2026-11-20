@@ -162,6 +162,23 @@ public final class ExactMoments {
     }
 
     /**
+     * The product of two values of exact types at the scale it declares, as the account multiplies two NUMBERs (see
+     * {@link #product}), or null when either is of another type.
+     *
+     * @param left  one value
+     * @param right the other
+     * @return the product, or null
+     */
+    static BigDecimal exactProduct(final Object left, final Object right) {
+        final BigDecimal leftNumber = exactValue(left);
+        final BigDecimal rightNumber = exactValue(right);
+        if (leftNumber == null || rightNumber == null) {
+            return null;
+        }
+        return product(leftNumber, rightNumber);
+    }
+
+    /**
      * The product of two values at the scale it declares, rounded half up to it and refused when its raw leaves the
      * carrier there.
      *

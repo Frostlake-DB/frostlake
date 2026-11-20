@@ -570,6 +570,8 @@ final class RestCatalogSnapshots {
         snapshot.temporary = stage.isTemporary();
         snapshot.credentials = stage.hasCredentials();
         snapshot.encryptionKey = stage.hasEncryptionKey();
+        snapshot.endpoint = stage.getEndpoint();
+        snapshot.storageIntegration = stage.getStorageIntegration();
         snapshot.directoryRefreshed = stage.getDirectoryRefreshed();
         snapshot.fileFormatOptions = new HashMap<>(stage.getFileFormatOptions());
         snapshot.copyOptions = new HashMap<>(stage.getCopyOptions());
@@ -593,6 +595,8 @@ final class RestCatalogSnapshots {
         stage.setTemporary(snapshot.temporary);
         stage.setCredentials(snapshot.credentials);
         stage.setEncryptionKey(snapshot.encryptionKey);
+        stage.setEndpoint(snapshot.endpoint);
+        stage.setStorageIntegration(snapshot.storageIntegration);
         stage.setDirectoryRefreshed(snapshot.directoryRefreshed);
         if (snapshot.fileFormatOptions != null) {
             stage.getFileFormatOptions().putAll(snapshot.fileFormatOptions);

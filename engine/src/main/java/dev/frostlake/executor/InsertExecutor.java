@@ -59,6 +59,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -1082,7 +1083,7 @@ final class InsertExecutor {
             // expressions, all before a row is routed, so an empty source still refuses.
             executor.requireSourceRelations(ctx.selectStatement());
             for (final FrostlakeParser.MultiInsertIntoContext into : allMultiInsertIntos(ctx)) {
-                final String target = executor.getQualifiedName(into.qualifiedName());
+                final String target = intoName(into);
                 DmlTarget.requireTable(executor, target, "INSERT (MULTI-TABLE)");
                 DmlTarget.refuseEventTable(executor.getCatalog().resolveTableAsWritten(target, "Table"),
                     "INSERT (MULTI-TABLE)");
@@ -1137,7 +1138,7 @@ final class InsertExecutor {
             if (overwrite) {
                 final Set<String> truncated = new LinkedHashSet<>();
                 for (final FrostlakeParser.MultiInsertIntoContext into : allMultiInsertIntos(ctx)) {
-                    final String tableName = executor.getQualifiedName(into.qualifiedName());
+                    final String tableName = intoName(into);
                     final String fqn = executor.getFullyQualifiedTableName(tableName);
                     if (truncated.add(fqn) && executor.getStorageEngine().getTableStorage(fqn).getRowCount() > 0) {
                         executor.requireTableUnlocked(fqn,
@@ -1153,8 +1154,11 @@ final class InsertExecutor {
             // answers with, one "number of rows inserted into <table>" column each.
             final Map<String, long[]> insertedInto = new LinkedHashMap<>();
             final Map<String, String> targetNames = new LinkedHashMap<>();
+            // Each target's name is resolved once, an IDENTIFIER() reference's value included, not once a row.
+            final Map<FrostlakeParser.MultiInsertIntoContext, String> intoNames = new IdentityHashMap<>();
             for (final FrostlakeParser.MultiInsertIntoContext into : allMultiInsertIntos(ctx)) {
-                final String fqn = executor.getFullyQualifiedTableName(executor.getQualifiedName(into.qualifiedName()));
+                intoNames.put(into, intoName(into));
+                final String fqn = executor.getFullyQualifiedTableName(intoNames.get(into));
                 if (!insertedInto.containsKey(fqn)) {
                     insertedInto.put(fqn, new long[1]);
                     targetNames.put(fqn, targetOf(into).getName());
@@ -1182,7 +1186,7 @@ final class InsertExecutor {
                 }
 
                 for (final FrostlakeParser.MultiInsertIntoContext into : applicable) {
-                    final String tableName = executor.getQualifiedName(into.qualifiedName());
+                    final String tableName = intoNames.get(into);
                     final Table target = executor.getCatalog().resolveTableAsWritten(tableName, "Table");
                     final String fqn = executor.getFullyQualifiedTableName(tableName);
                     executor.requirePrivilege(Privilege.INSERT, "TABLE", tableName);
@@ -1262,7 +1266,12 @@ final class InsertExecutor {
     }
 
     private Table targetOf(final FrostlakeParser.MultiInsertIntoContext into) {
-        return executor.getCatalog().resolveTableAsWritten(executor.getQualifiedName(into.qualifiedName()), "Table");
+        return executor.getCatalog().resolveTableAsWritten(intoName(into), "Table");
+    }
+
+    /** The table a multi-table insert's INTO names, an IDENTIFIER() reference resolved to the name it holds. */
+    private String intoName(final FrostlakeParser.MultiInsertIntoContext into) {
+        return executor.resolveObjectName(into.objectName());
     }
 
     /** How many values an INTO supplies: its own VALUES list, else one per column of the source. */

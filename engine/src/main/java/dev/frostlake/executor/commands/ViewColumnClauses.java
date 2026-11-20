@@ -109,7 +109,9 @@ final class ViewColumnClauses {
                     InlineTags.apply(column, clause.tagList(), queryExecutor);
                     continue;
                 }
-                final String written = ParseTreeText.getQualifiedName(clause.qualifiedName());
+                final String written = clause.PROJECTION() != null
+                    ? ParseTreeText.getQualifiedName(clause.qualifiedName())
+                    : queryExecutor.resolveObjectName(clause.objectName());
                 if (clause.PROJECTION() != null) {
                     if (catalog.findProjectionPolicyExact(written) == null) {
                         throw new RuntimeException(SqlCompilationError.doesNotExist("Projection policy",

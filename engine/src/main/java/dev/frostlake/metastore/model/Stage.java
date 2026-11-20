@@ -119,6 +119,8 @@ public class Stage extends SqlObject implements SessionScoped {
         copy.temporary = temporary;
         copy.credentials = credentials;
         copy.encryptionKey = encryptionKey;
+        copy.endpoint = endpoint;
+        copy.storageIntegration = storageIntegration;
         copy.directoryRefreshed = directoryRefreshed;
         if (url != null) {
             for (final Map.Entry<String, List<Object>> file : directoryRegistry.entrySet()) {
@@ -198,7 +200,7 @@ public class Stage extends SqlObject implements SessionScoped {
 
     /**
      * The cloud an external stage's location is in, by its scheme in any case: {@code AZURE://…} is an Azure stage as
-     * {@code azure://…} is (live-verified).
+     * {@code azure://…} is, and a stage on S3-compatible storage is an AWS stage (live-verified).
      *
      * @return AWS, AZURE or GCP, or null for a location in none, an internal stage's
      */
@@ -208,7 +210,7 @@ public class Stage extends SqlObject implements SessionScoped {
         }
         final int end = url.indexOf("://");
         final String scheme = end < 0 ? "" : url.substring(0, end).toLowerCase(Locale.ROOT);
-        return "s3".equals(scheme) ? "AWS" : "azure".equals(scheme) ? "AZURE" : "gcs".equals(scheme) ? "GCP" : null;
+        return "s3".equals(scheme) || "s3compat".equals(scheme) ? "AWS" : "azure".equals(scheme) ? "AZURE" : "gcs".equals(scheme) ? "GCP" : null;
     }
 
     public String getUrl() {
@@ -255,6 +257,29 @@ public class Stage extends SqlObject implements SessionScoped {
 
     public void setCredentials(final boolean credentials) {
         this.credentials = credentials;
+    }
+
+    // The ENDPOINT of a stage on S3-compatible storage, and the storage integration a stage reaches its location
+    // through, each as SHOW STAGES lists it; null for none.
+    private String endpoint;
+    private String storageIntegration;
+
+    /** The stage's ENDPOINT, or null for none. */
+    public String getEndpoint() {
+        return endpoint;
+    }
+
+    public void setEndpoint(final String endpoint) {
+        this.endpoint = endpoint;
+    }
+
+    /** The name of the storage integration the stage was given, or null for none. */
+    public String getStorageIntegration() {
+        return storageIntegration;
+    }
+
+    public void setStorageIntegration(final String storageIntegration) {
+        this.storageIntegration = storageIntegration;
     }
 
     /** Whether the stage's ENCRYPTION names a key: a MASTER_KEY or a KMS_KEY_ID. */

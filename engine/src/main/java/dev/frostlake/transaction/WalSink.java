@@ -20,8 +20,8 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Callback the {@link TransactionManager} invokes when a transaction commits successfully, handing over the
- * committed transaction's mutating SQL statements so a durability layer (the engine's write-ahead log) can
+ * Callback the {@link TransactionManager} invokes when a transaction commits, before its writes apply, handing over
+ * the committing transaction's mutating SQL statements so a durability layer (the engine's write-ahead log) can
  * append them as one atomic, fsync'd record. Implemented by an anonymous class in {@code DatabaseEngine};
  * declared here so the transaction layer need not depend on the persistence layer.
  */
@@ -33,4 +33,10 @@ public interface WalSink {
      */
     void appendTransaction(final List<String> statements, final List<Instant> instants,
                            final List<WalStatementContext> contexts);
+
+    /**
+     * The transaction whose statements {@link #appendTransaction} appended last did not apply: the log holds a record
+     * of work that is not there, which a restart must not replay.
+     */
+    void appendedNotApplied();
 }

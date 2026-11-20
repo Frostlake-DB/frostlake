@@ -140,7 +140,7 @@ public class MemoizableFunctionTest extends BaseDatabaseTest {
             + "AS $$ SELECT 'A' $$",
             "syntax error line 1 at position 84 unexpected 'AS'.");
         assertRefused("CREATE OR REPLACE FUNCTION m16() RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION = "
-            + "'3.10' HANDLER = 'h' MEMOIZABLE AS $$def h(): return 'A'$$",
+            + "'3.11' HANDLER = 'h' MEMOIZABLE AS $$def h(): return 'A'$$",
             "syntax error line 1 at position 115 unexpected 'AS'.");
         assertRefused("CREATE OR REPLACE FUNCTION m17() RETURNS VARCHAR LANGUAGE JAVA HANDLER = 'H.h' "
             + "MEMOIZABLE AS $$class H { public static String h() { return \"A\"; } }$$",
@@ -184,7 +184,7 @@ public class MemoizableFunctionTest extends BaseDatabaseTest {
             + "'H.h' AS $$class H { public static int h() { return 1; } }$$",
             "SQL compilation error: Memoizable function supports only SQL language.");
         assertRefused("CREATE OR REPLACE FUNCTION t13() RETURNS NUMBER LANGUAGE PYTHON MEMOIZABLE "
-            + "RUNTIME_VERSION = '3.10' HANDLER = 'h' AS $$def h(): return 1$$",
+            + "RUNTIME_VERSION = '3.11' HANDLER = 'h' AS $$def h(): return 1$$",
             "SQL compilation error: Memoizable function supports only SQL language.");
         assertRefused("CREATE OR REPLACE FUNCTION t15() RETURNS NUMBER LANGUAGE JAVASCRIPT MEMOIZABLE AS "
             + "$$ return 1; $$",

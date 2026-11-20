@@ -28,6 +28,7 @@ import dev.frostlake.executor.StorageIntegrationReference;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.FileFormat;
+import dev.frostlake.metastore.model.Integration;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Stage;
@@ -49,6 +50,7 @@ import org.slf4j.LoggerFactory;
  *                               once, by its last value; nothing is applied when one of them is refused
  *   SET COMMENT = NULL          takes the comment away; = 5 is  invalid value [5] for parameter 'COMMENT'
  *   SET FOO = 'x'               invalid property 'FOO' for 'STAGE'
+ *   SET ENDPOINT = 'host'       judged at the location the statement leaves the stage at (see StageEndpoint)
  *   SET URL | CREDENTIALS | ENCRYPTION on an internal stage
  *                               Cannot set URL, credentials, or encryption key of an internal or temporary stage.
  *   SET DIRECTORY = ( … )       see {@link StageDirectoryOptions}
@@ -314,7 +316,16 @@ final class AlterStageHandler {
             refuseOnInternalStage(stage);
             StageCredentials.requireFilled(setting.parenOptionList(), location);
         } else if ("STORAGE_INTEGRATION".equals(key)) {
-            requireIntegration(setting);
+            final Integration integration = requireIntegration(setting);
+            if (apply) {
+                stage.setStorageIntegration(integration == null ? null : integration.getName());
+            }
+        } else if (StageEndpoint.PROPERTY.equals(key)) {
+            final String endpoint = StageEndpoint.read(setting.copyOptionValue());
+            StageEndpoint.require(endpoint, location);
+            if (apply) {
+                stage.setEndpoint(endpoint);
+            }
         } else if ("DIRECTORY".equals(key)) {
             final StageDirectoryOptions options = StageDirectoryOptions.read(setting.parenOptionList(), false);
             if (apply) {
@@ -338,9 +349,9 @@ final class AlterStageHandler {
         }
     }
 
-    /** STORAGE_INTEGRATION names an integration that exists. */
-    private void requireIntegration(final FrostlakeParser.StageSettingContext setting) {
-        StorageIntegrationReference.require(catalog, queryExecutor.getSecurityManager(),
+    /** STORAGE_INTEGRATION names an integration that exists: the integration, or null for no value. */
+    private Integration requireIntegration(final FrostlakeParser.StageSettingContext setting) {
+        return StorageIntegrationReference.require(catalog, queryExecutor.getSecurityManager(),
             setting.copyOptionValue());
     }
 

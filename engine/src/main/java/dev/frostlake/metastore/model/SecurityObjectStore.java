@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The network rules, network policies, password policies and secrets of one container — a schema, or the account
- * — keyed by kind and exact canonical name, and, in the account's store, which password and network policies are
+ * — keyed by kind and exact canonical name, and, in the account's store, which policies are
  * attached to the account and to users.
  */
 public final class SecurityObjectStore {
@@ -59,17 +59,18 @@ public final class SecurityObjectStore {
         return new ArrayList<>(objects.get(kind).values());
     }
 
-    /** What is attached under a key, e.g. the password policy of a user, or null. */
     /**
-     * The password policy attached to a user.
+     * The policy of a kind attached to a user.
      *
+     * @param kind     the policy's kind as attachments record it, e.g. {@code PASSWORD_POLICY}
      * @param userName the user's name, as the account holds it
      * @return the policy's qualified name, or null when the user holds none of its own
      */
-    public String userPasswordPolicy(final String userName) {
-        return attachment("PASSWORD_POLICY|USER|" + userName);
+    public String userPolicy(final String kind, final String userName) {
+        return attachment(kind + "|USER|" + userName);
     }
 
+    /** What is attached under a key, e.g. the password policy of a user, or null. */
     public String attachment(final String key) {
         return attachments.get(key);
     }

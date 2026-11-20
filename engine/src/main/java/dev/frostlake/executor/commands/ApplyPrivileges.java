@@ -50,10 +50,38 @@ public final class ApplyPrivileges {
      *                         does for every privilege
      */
     public static void require(final QueryExecutor queryExecutor, final Privilege accountPrivilege, final String kind,
-                        final String fullName, final String owner) {
+                               final String fullName, final String owner) {
+        require(queryExecutor, accountPrivilege, kind, fullName, owner, null);
+    }
+
+    /**
+     * Refuses attaching or detaching a policy on a table the session may not apply there. The account's APPLY of the
+     * kind applies every policy of it to every table, without any privilege on the table; APPLY on the one policy
+     * applies it to a table the session owns, and only there (documented).
+     *
+     * @param queryExecutor    the executor, for the session's rights
+     * @param accountPrivilege the account's privilege that applies every object of the kind
+     * @param kind             the object's kind as privileges record it ({@code MASKING_POLICY}, ...)
+     * @param fullName         the object's name in full
+     * @param owner            the role that owns the object, or null when none is recorded
+     * @param ownedTable       the table's name parts, or null where no table is altered
+     */
+    public static void require(final QueryExecutor queryExecutor, final Privilege accountPrivilege, final String kind,
+                               final String fullName, final String owner, final String[] ownedTable) {
         final SecurityManager security = queryExecutor.getSecurityManager();
-        if (security == null || security.holdsAccountPrivilege(accountPrivilege)
-                || security.holdsPrivilege(Privilege.APPLY, kind, fullName, owner)) {
+        if (security == null || security.holdsAccountPrivilege(accountPrivilege)) {
+            return;
+        }
+        requireOnPolicy(queryExecutor, kind, fullName, owner);
+        if (ownedTable != null) {
+            queryExecutor.requireOwnership("TABLE", ownedTable, null);
+        }
+    }
+
+    private static void requireOnPolicy(final QueryExecutor queryExecutor, final String kind, final String fullName,
+                                        final String owner) {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        if (security.holdsPrivilege(Privilege.APPLY, kind, fullName, owner)) {
             return;
         }
         throw new PrivilegeRefusal(SqlAccessControlError.privilegeRequired(kind, QualifiedName.parse(fullName).last(),

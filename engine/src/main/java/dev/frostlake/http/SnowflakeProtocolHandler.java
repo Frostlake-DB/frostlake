@@ -22,6 +22,7 @@ import dev.frostlake.ExecutionResult;
 import dev.frostlake.executor.DynamicStatementCount;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.QueryResultCache;
+import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.StatementCancellation;
 import dev.frostlake.executor.StatementCount;
 import dev.frostlake.executor.commands.FailureCode;
@@ -99,12 +100,17 @@ final class SnowflakeProtocolHandler implements HttpHandler {
     /** The code and SQLSTATE of a statement whose session token is unknown or expired. */
     private static final String EXPIRED_CODE = "390112";
 
+    /** The code of a login whose role the session cannot take. */
+    private static final String ROLE_REFUSED_CODE = "390189";
+
     /** The code of an answer that starts an asynchronous statement. */
     private static final String ASYNC_CODE = "333334";
     /** The JSON_INDENT the account lays semi-structured values out at while a session sets none. */
     private static final int ACCOUNT_JSON_INDENT = 2;
 
     private final ConcurrentDatabaseEngine engine;
+    /** The most bytes a request body may hold, as sent and once unzipped; 0 for no bound. */
+    private final long maxRequestBytes;
     /** The asynchronous statements still running, by query ID. */
     private final Set<String> asyncRunning = ConcurrentHashMap.newKeySet();
     /** The refusals of asynchronous statements, by query ID, for a status asked after the statement ended. */
@@ -133,14 +139,24 @@ final class SnowflakeProtocolHandler implements HttpHandler {
             }
         });
 
-    SnowflakeProtocolHandler(final ConcurrentDatabaseEngine engine) {
+    /**
+     * @param engine          the engine the endpoints answer for
+     * @param maxRequestBytes the most bytes a request body may hold, as sent and once unzipped, or 0 for no bound: a
+     *                        larger one is answered 413
+     */
+    SnowflakeProtocolHandler(final ConcurrentDatabaseEngine engine, final long maxRequestBytes) {
         this.engine = engine;
+        this.maxRequestBytes = maxRequestBytes;
     }
 
     @Override
     public void handle(final HttpExchange exchange) throws IOException {
         final SnowflakeReply reply = answer(SnowflakeRequest.of(exchange));
-        HttpResponses.send(exchange, reply.status(), reply.json());
+        if (reply.status() == 413) {
+            HttpResponses.tooLarge(exchange, reply.status(), reply.json());
+        } else {
+            HttpResponses.send(exchange, reply.status(), reply.json());
+        }
     }
 
     /**
@@ -154,6 +170,11 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         final String path = request.path();
         final Map<String, String> query = queryParameters(request.rawQuery());
         try {
+            if (changesState(path) && request.method() != null && !"POST".equals(request.method())) {
+                // Only a POST opens a session or runs anything: a request a page could make by merely naming the
+                // address - a GET - changes nothing.
+                return httpRefusal(405, "Method " + request.method() + " is not allowed on " + path + "; use POST.");
+            }
             if ("/session/v1/login-request".equals(path)) {
                 return ok(login(readJson(request), query));
             } else if ("/queries/v1/query-request".equals(path)) {
@@ -176,10 +197,19 @@ final class SnowflakeProtocolHandler implements HttpHandler {
             }
             return new SnowflakeReply(404, MAPPER.writeValueAsString(failure("390400",
                 "Unknown endpoint " + path, null)));
+        } catch (final RequestTooLargeException tooLarge) {
+            return httpRefusal(413, tooLarge.getMessage());
         } catch (final IOException | RuntimeException fault) {
             logger.error("Error handling a Snowflake driver request to {}", path, fault);
             return ok(failure("000603", fault.getMessage() == null ? fault.toString() : fault.getMessage(), null));
         }
+    }
+
+    /** Whether a path names an endpoint that opens or changes a session or runs a statement: POST only. */
+    private static boolean changesState(final String path) {
+        return "/session/v1/login-request".equals(path) || "/queries/v1/query-request".equals(path)
+            || "/session".equals(path) || "/session/heartbeat".equals(path) || "/session/token-request".equals(path)
+            || "/queries/v1/abort-request".equals(path) || "/telemetry/send".equals(path);
     }
 
     /** Opens a session for a login, in the namespace the connection names. */
@@ -191,11 +221,18 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         session.getSettings().setDefaultJsonIndent(Integer.valueOf(ACCOUNT_JSON_INDENT));
         final String user = data.path("LOGIN_NAME").isMissingNode() ? engine.currentUser()
             : data.path("LOGIN_NAME").asString();
-        // The namespace the connection names, set as a USE sets it; a name that reaches nothing leaves the
-        // session where it is, as the account's login does.
+        // The namespace the connection names, set as a USE sets it; a database, schema or warehouse that reaches
+        // nothing leaves the session where it is, as the account's login does. A role the session cannot take
+        // refuses the login (live-verified).
         use(session, "DATABASE", query.get("databaseName"));
         use(session, "SCHEMA", query.get("schemaName"));
-        use(session, "ROLE", query.get("roleName"));
+        final String role = query.get("roleName");
+        if (!use(session, "ROLE", role)) {
+            engine.endSession(session);
+            return failure(ROLE_REFUSED_CODE, "Role '" + SqlIdentifiers.canonicalText(role) + "' specified in the "
+                + "connect string does not exist or not authorized. Contact your local system administrator, or "
+                + "attempt to login with another role, e.g. PUBLIC.", "08001");
+        }
         use(session, "WAREHOUSE", query.get("warehouse"));
         applySessionParameters(session, data.path("SESSION_PARAMETERS"));
         final ObjectNode answer = JsonNodeFactory.instance.objectNode();
@@ -218,20 +255,25 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         putText(info, "databaseName", session.getCurrentDatabase());
         putText(info, "schemaName", session.getCurrentSchema());
         putText(info, "warehouseName", session.getCurrentWarehouse());
-        putText(info, "roleName", query.get("roleName") == null ? null
-            : query.get("roleName").toUpperCase(Locale.ROOT));
+        putText(info, "roleName", engine.sessionRole(session));
         return success(answer);
     }
 
-    /** Runs {@code USE <kind> IDENTIFIER('<name>')} in a session, the name read as the connection wrote it. */
-    private void use(final SessionContext session, final String kind, final String name) {
+    /**
+     * Runs {@code USE <kind> IDENTIFIER('<name>')} in a session, the name read as the connection wrote it.
+     *
+     * @return false where the session refused it; true where it ran, or no name was given
+     */
+    private boolean use(final SessionContext session, final String kind, final String name) {
         if (name == null || name.isEmpty()) {
-            return;
+            return true;
         }
         try {
             engine.execute("USE " + kind + " IDENTIFIER('" + name.replace("'", "''") + "')", session);
+            return true;
         } catch (final RuntimeException refused) {
             logger.debug("Login left {} {} unset: {}", kind, name, refused.getMessage());
+            return false;
         }
     }
 
@@ -306,6 +348,11 @@ final class SnowflakeProtocolHandler implements HttpHandler {
                     final ObjectNode answer = query(session, body);
                     if (!answer.path("success").asBoolean()) {
                         asyncRefusals.put(queryId, answer);
+                    } else if (answer.path("data").isObject()) {
+                        // Kept under the ID the driver was told, which it reads the ids of a text of several's
+                        // statements from (getChildQueryIds).
+                        ((ObjectNode) answer.path("data")).put("queryId", queryId);
+                        keptResults.put(queryId, answer);
                     }
                 } catch (final RuntimeException failed) {
                     asyncRefusals.put(queryId, refusal(failed.getMessage(), failed));
@@ -483,7 +530,9 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         final List<String> ids = new ArrayList<>();
         final List<String> kinds = new ArrayList<>();
         for (int i = 0; i < results.size(); i++) {
-            final String id = UUID.randomUUID().toString();
+            // Each statement's result under the query ID it took, which RESULT_SCAN reads it back by.
+            final String taken = results.get(i).getQueryId();
+            final String id = taken == null || ids.contains(taken) ? UUID.randomUUID().toString() : taken;
             final ObjectNode data = JsonNodeFactory.instance.objectNode();
             SnowflakeRowset.write(results.get(i), data, false);
             final long type = SnowflakeStatementTypes.answered(eachStatements ? types.get(i).longValue()
@@ -525,7 +574,7 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         putText(data, "finalDatabaseName", session.getCurrentDatabase());
         putText(data, "finalSchemaName", session.getCurrentSchema());
         putText(data, "finalWarehouseName", session.getCurrentWarehouse());
-        data.putNull("finalRoleName");
+        putText(data, "finalRoleName", engine.sessionRole(session));
         data.put("numberOfBinds", JdbcMarshaling.bindCount(written));
         data.put("arrayBindSupported", SnowflakeArrayBinds.supported(written));
         data.put("statementTypeId", statementType);
@@ -566,14 +615,14 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         final long now = System.currentTimeMillis();
         final QueryHistory history = engine.getEngine().getExecutor().getQueryHistoryTracker().getQueryById(queryId);
         final ObjectNode refused = asyncRefusals.get(queryId);
-        if (keptResults.containsKey(queryId)) {
-            statusRow(queries, queryId, "SUCCESS", 0, null, now, now, null);
-        } else if (history != null && !"RUNNING".equals(history.getStatus())) {
+        if (history != null && !"RUNNING".equals(history.getStatus())) {
             final boolean succeeded = "SUCCESS".equals(history.getStatus());
             statusRow(queries, queryId, succeeded ? "SUCCESS" : "FAILED_WITH_ERROR",
                 succeeded || history.getErrorCode() == null ? 0 : history.getErrorCode().intValue(),
                 succeeded ? null : history.getErrorMessage(), millis(history.getStartInstant(), now),
                 millis(history.getEndInstant(), now), history.getQueryText());
+        } else if (keptResults.containsKey(queryId)) {
+            statusRow(queries, queryId, "SUCCESS", 0, null, now, now, null);
         } else if (history != null || asyncRunning.contains(queryId)) {
             statusRow(queries, queryId, "RUNNING", 0, null,
                 history == null ? now : millis(history.getStartInstant(), now), 0, null);
@@ -727,13 +776,15 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         }
     }
 
-    /** A request's JSON body, unzipped where the driver sent it compressed. */
-    private static JsonNode readJson(final SnowflakeRequest request) throws IOException {
-        final byte[] raw = request.body();
+    /** A request's JSON body, unzipped where the driver sent it compressed, each at most the bound. */
+    private JsonNode readJson(final SnowflakeRequest request) throws IOException {
+        final byte[] raw = request.body(maxRequestBytes);
         final String encoding = request.header("Content-Encoding");
         final byte[] body;
         if (encoding != null && encoding.toLowerCase(Locale.ROOT).contains("gzip")) {
-            try (InputStream unzipped = new GZIPInputStream(new ByteArrayInputStream(raw))) {
+            // Unzipped at most to the bound: a small body can unzip to a thousand times its size.
+            try (InputStream unzipped = new BoundedRequestStream(new GZIPInputStream(new ByteArrayInputStream(raw)),
+                    maxRequestBytes)) {
                 body = unzipped.readAllBytes();
             }
         } else {
@@ -755,6 +806,16 @@ final class SnowflakeProtocolHandler implements HttpHandler {
             parameters.put(name, value);
         }
         return parameters;
+    }
+
+    /** A request the endpoint does not serve, refused by its HTTP status, the reason beside it. */
+    private static SnowflakeReply httpRefusal(final int status, final String reason) {
+        final ObjectNode answer = JsonNodeFactory.instance.objectNode();
+        answer.putNull("data");
+        answer.putNull("code");
+        answer.put("message", reason);
+        answer.put("success", false);
+        return new SnowflakeReply(status, MAPPER.writeValueAsString(answer));
     }
 
     /** An answer the driver reads from a 200, a refusal included. */

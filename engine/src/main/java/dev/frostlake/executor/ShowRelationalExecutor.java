@@ -94,7 +94,7 @@ final class ShowRelationalExecutor {
         if (col.isAutoIncrement() || col.getDefaultValue() instanceof SequenceDefault) {
             return "";
         }
-        return col.getDefaultValue() != null
+        return col.getDefaultValue() != null && !"NULL".equals(col.getDefaultValue())
             ? ShowResultHelpers.renderDefaultExpression(col.getDefaultValue()) : "";
     }
 
@@ -1478,6 +1478,15 @@ final class ShowRelationalExecutor {
                              final String written, final String reportedKind) {
         if (seen(objectType, schema, found, owner)) {
             return;
+        }
+        // A relation of a container the role may not use is refused as the container (documented).
+        final String missed = ownership.missedContainer(schema.getDatabaseName(), schema.getName());
+        if ("DATABASE".equals(missed)) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Database", schema.getDatabaseName()));
+        }
+        if ("SCHEMA".equals(missed)) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Schema",
+                QualifiedName.join(schema.getDatabaseName(), schema.getName())));
         }
         final String echoed = QualifiedName.parse(written).size() == 1 ? QualifiedName.join(found)
             : QualifiedName.join(schema.getDatabaseName(), schema.getName(), found);

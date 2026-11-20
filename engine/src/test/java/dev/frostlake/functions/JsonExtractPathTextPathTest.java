@@ -1,0 +1,252 @@
+/*
+ * Copyright 2026 MLorek
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package dev.frostlake.functions;
+
+import dev.frostlake.query.MeasuredCellsTestSupport;
+import org.junit.jupiter.api.Test;
+
+/**
+ * JSON_EXTRACT_PATH_TEXT reads its path as GET_PATH does - quoted names, bracketed names and positions, the same
+ * refusals in the same words, a literal path judged before the statement runs and a computed one with the row - and
+ * reads its document as PARSE_JSON does (live-verified).
+ */
+public class JsonExtractPathTextPathTest extends MeasuredCellsTestSupport {
+
+    @Test
+    public void pathRules() {
+        assertCells(new String[][] {
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a.b\":1}','\"a.b\"')",
+                "1"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a.b\":1}'),'\"a.b\"')",
+                "1"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}','[''a''].b')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":{\"b\":2}}'),'[''a''].b')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}','a[\"b\"]')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":{\"b\":2}}'),'a[\"b\"]')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[1')",
+                "REFUSED Invalid extraction path 'a[1': dangling square bracket at position 2."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[1')",
+                "REFUSED Invalid extraction path 'a[1': dangling square bracket at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[99999999999]')",
+                "REFUSED Invalid extraction path '99,999,999,999': array index 99,999,999,999 is off limits; "
+                + "must be between 0 and 2,147,483,647."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[99999999999]')",
+                "REFUSED Invalid extraction path '99,999,999,999': array index 99,999,999,999 is off limits; "
+                + "must be between 0 and 2,147,483,647."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[1]')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[1]')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','')",
+                "REFUSED Bad compound object's field path name '' in GET_PATH"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'')",
+                "REFUSED Bad compound object's field path name '' in GET_PATH"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a.')",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a.')",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','.a')",
+                "REFUSED Invalid extraction path '.a': invalid token at position 0."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'.a')",
+                "REFUSED Invalid extraction path '.a': invalid token at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a..b')",
+                "REFUSED Invalid extraction path 'a..b': empty (unquoted) field name at position 2."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a..b')",
+                "REFUSED Invalid extraction path 'a..b': empty (unquoted) field name at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('[10,20]','[0]')",
+                "10"},
+            {"SELECT GET_PATH(PARSE_JSON('[10,20]'),'[0]')",
+                "10"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[-1]')",
+                "REFUSED Invalid extraction path 'a[-1]': invalid number at position 3."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[-1]')",
+                "REFUSED Invalid extraction path 'a[-1]': invalid number at position 3."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[x]')",
+                "REFUSED Invalid extraction path 'a[x]': invalid number at position 3."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[x]')",
+                "REFUSED Invalid extraction path 'a[x]': invalid number at position 3."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a b\":3}','\"a b\"')",
+                "3"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a b\":3}'),'\"a b\"')",
+                "3"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a b\":3}','a b')",
+                "REFUSED Invalid extraction path 'a b': invalid token at position 2."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a b\":3}'),'a b')",
+                "REFUSED Invalid extraction path 'a b': invalid token at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"A\":4}','a')",
+                "null"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"A\":4}'),'a')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b.c\":5}}','a.\"b.c\"')",
+                "5"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":{\"b.c\":5}}'),'a.\"b.c\"')",
+                "5"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b.c\":5}}','a[\"b.c\"]')",
+                "5"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":{\"b.c\":5}}'),'a[\"b.c\"]')",
+                "5"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[ 1 ]')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[ 1 ]')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a]')",
+                "REFUSED Invalid extraction path 'a]': invalid field at position 0."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a]')",
+                "REFUSED Invalid extraction path 'a]': invalid field at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','\"a')",
+                "REFUSED Invalid extraction path '\"a': dangling quote at position 1."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'\"a')",
+                "REFUSED Invalid extraction path '\"a': dangling quote at position 1."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1}','a.b')",
+                "null"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":1}'),'a.b')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":\"x\"}}','a')",
+                "{\"b\":\"x\"}"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":\"x\\\\\"y\"}','a')",
+                "x\"y"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":null}','a')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1}','a[0]')",
+                "null"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":1}'),'a[0]')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[1][0]')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[[1,2]]}','a[0][1]')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[[1,2]]}'),'a[0][1]')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[2147483648]')",
+                "REFUSED Invalid extraction path '2,147,483,648': array index 2,147,483,648 is off limits; "
+                + "must be between 0 and 2,147,483,647."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[2147483648]')",
+                "REFUSED Invalid extraction path '2,147,483,648': array index 2,147,483,648 is off limits; "
+                + "must be between 0 and 2,147,483,647."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[1.0]')",
+                "REFUSED Invalid extraction path 'a[1.0]': invalid number at position 3."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[1.0]')",
+                "REFUSED Invalid extraction path 'a[1.0]': invalid number at position 3."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}',' a')",
+                "REFUSED Invalid extraction path ' a': invalid token at position 0."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),' a')",
+                "REFUSED Invalid extraction path ' a': invalid token at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"$x\":7}','$x')",
+                "7"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"$x\":7}'),'$x')",
+                "7"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}','a:b')",
+                "2"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":{\"b\":2}}'),'a:b')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[''1'']')",
+                "null"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\":[1,2]}'),'a[''1'']')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\"\"b\":8}','\"a\"\"b\"')",
+                "REFUSED Error parsing JSON: missing colon, pos 5"},
+            {"SELECT GET_PATH(PARSE_JSON('{\"a\"\"b\":8}'),'\"a\"\"b\"')",
+                "REFUSED Error parsing JSON: missing colon, pos 5"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('not json','a')",
+                "REFUSED Error parsing JSON: unknown keyword \"not\", pos 4"},
+            {"EXECUTE IMMEDIATE $$ BEGIN RETURN JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}','a[1'); END; $$",
+                "REFUSED Uncaught exception of type 'EXPRESSION_ERROR' on line 1 at position 14 : Invalid "
+                + "extraction path 'a[1': dangling square bracket at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}', NULL)",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"1\":9}','1')",
+                "REFUSED Invalid extraction path '1': invalid field at position 0."},
+            {"SELECT GET_PATH(PARSE_JSON('{\"1\":9}'),'1')",
+                "REFUSED Invalid extraction path '1': invalid field at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1.5e0}','a')",
+                "1.5"},
+        });
+    }
+
+    @Test
+    public void documentAndComputedPaths() {
+        engine.execute("CREATE OR REPLACE TABLE jt (j VARCHAR, p VARCHAR)");
+        engine.execute("INSERT INTO jt VALUES ('{\"a\":{\"b.c\":5,\"b\":[7,8]}}', 'a.\"b.c\"'), "
+            + "('{\"a\":{\"b.c\":5,\"b\":[7,8]}}', 'a.b[1]'), ('{\"a\":{\"b.c\":5,\"b\":[7,8]}}', "
+            + "'a[\"b\"][0]')");
+        assertCells(new String[][] {
+            {"SELECT JSON_EXTRACT_PATH_TEXT(j, 'a.') FROM jt WHERE 1 = 0",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT(NULL, 'a.')",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT(j, p || '.') FROM jt ORDER BY p",
+                "REFUSED Bad compound object's field path name 'a.\"b.c\".' in GET_PATH"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT(NULL, p || '.') FROM jt ORDER BY p",
+                "REFUSED Bad compound object's field path name 'a.\"b.c\".' in GET_PATH"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1}', 'a' || '.')",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('not json', 'a.')",
+                "REFUSED Invalid extraction path 'a.': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('not json', p) FROM jt ORDER BY p",
+                "REFUSED Error parsing JSON: unknown keyword \"not\", pos 4"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT(PARSE_JSON('{\"a\":{\"b\":3}}'), 'a.b')",
+                "3"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1}', 'a:')",
+                "REFUSED Invalid extraction path 'a:': dangling dot at position 2."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}', 'a[1]  ')",
+                "REFUSED Invalid extraction path 'a[1]  ': invalid token at position 4."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', 'a. b')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', 'a\"b\"')",
+                "REFUSED Invalid extraction path 'a\"b\"': invalid field at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}', 'a[-0]')",
+                "REFUSED Invalid extraction path 'a[-0]': invalid number at position 3."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,2]}', 'a[' || '-1]')",
+                "REFUSED Invalid extraction path 'a[-1]': invalid number at position 3."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('', 'a')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":\"x\"}', '')",
+                "REFUSED Bad compound object's field path name '' in GET_PATH"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":true}', 'a')",
+                "true"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":[1,\"x\",null]}', 'a')",
+                "[1,\"x\",null]"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"é\":1}', 'é')",
+                "1"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT(j, NULL) FROM jt WHERE 1 = 0",
+                ""},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', ':a.b')",
+                "REFUSED Invalid extraction path ':a.b': invalid token at position 0."},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', 'a.\"b\"')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', '\"a\".\"b\"')",
+                "2"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":{\"b\":2}}', 'A.B')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1}', 'a', 'b')",
+                "REFUSED SQL compilation error: error line 1 at position 7 | too many arguments for function "
+                + "[JSON_EXTRACT_PATH_TEXT('{\"a\":1}', 'a', 'b')] expected 2, got 3"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('[1,[2,3]]', '[1][1]')",
+                "3"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('{\"a\":1} trailing', 'a')",
+                "REFUSED Error parsing JSON: garbage after valid input document"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('  ', 'a')",
+                "null"},
+            {"SELECT JSON_EXTRACT_PATH_TEXT('null', 'a')",
+                "null"},
+        });
+    }
+}

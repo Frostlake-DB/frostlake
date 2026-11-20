@@ -119,7 +119,7 @@ final class QueryTypeNames {
             return "MERGE";
         }
         if (dml.copyIntoStatement() != null) {
-            return dml.copyIntoStatement().qualifiedName() != null ? "COPY" : "UNLOAD";
+            return dml.copyIntoStatement().stageRef() == null && dml.copyIntoStatement().STRING_LITERAL() == null ? "COPY" : "UNLOAD";
         }
         return "INSERT";
     }

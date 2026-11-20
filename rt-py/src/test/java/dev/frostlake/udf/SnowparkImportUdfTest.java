@@ -36,7 +36,7 @@ public class SnowparkImportUdfTest extends BaseDatabaseTest {
             CREATE OR REPLACE FUNCTION spudf(x VARCHAR)
             RETURNS STRING
             LANGUAGE PYTHON
-            RUNTIME_VERSION='3.10'
+            RUNTIME_VERSION='3.11'
             HANDLER='main'
             AS $$
             from snowflake.snowpark.types import *
@@ -54,7 +54,7 @@ public class SnowparkImportUdfTest extends BaseDatabaseTest {
             CREATE OR REPLACE PROCEDURE spproc()
             RETURNS STRING
             LANGUAGE PYTHON
-            RUNTIME_VERSION='3.10'
+            RUNTIME_VERSION='3.11'
             PACKAGES=('snowflake-snowpark-python')
             HANDLER='main'
             AS $$

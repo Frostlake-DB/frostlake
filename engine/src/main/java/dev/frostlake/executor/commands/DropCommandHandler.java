@@ -1086,6 +1086,11 @@ public class DropCommandHandler implements CommandHandler {
                 try {
                     queryExecutor.requireOwnership("TAG", dropNameParts(ctx), null);
                     final Tag droppedTag = catalog.getTagExact(tagName);
+                    if (droppedTag.hasMaskingPolicies()) {
+                        // A tag carrying a masking policy stays until the policy is unset from it (live-verified).
+                        throw new RuntimeException(SqlCompilationError.PREFIX + " Tag " + droppedTag.getName()
+                            + " cannot be dropped/replaced as it is associated with one or more policies.");
+                    }
                     catalog.dropTagExact(tagName);
                     final String[] tagParts = dropNameParts(ctx);
                     final String tagDb = tagParts.length == 3 ? tagParts[0] : catalog.getCurrentDatabase();

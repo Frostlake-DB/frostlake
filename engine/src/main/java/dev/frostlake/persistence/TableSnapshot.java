@@ -33,6 +33,9 @@ public class TableSnapshot implements Serializable {
     public String comment;
     /** The user whose DDL created the relation (LAST_DDL_BY); null in a snapshot taken before it was kept. */
     public String lastDdlBy;
+    /** The table's number and its clone line's (INFORMATION_SCHEMA.TABLE_STORAGE_METRICS); 0 in an older snapshot. */
+    public long tableId;
+    public long cloneGroupId;
     public Instant createdAt;
     /** INFORMATION_SCHEMA's LAST_DDL. Null on snapshots written before it was saved, which report the CREATE. */
     public Instant lastDdlAt;

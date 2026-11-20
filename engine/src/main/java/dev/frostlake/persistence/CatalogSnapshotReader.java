@@ -529,6 +529,7 @@ final class CatalogSnapshotReader {
                 table.setHybrid(tableSnapshot.hybrid);
                 table.setComment(tableSnapshot.comment);
                 table.setLastDdlBy(tableSnapshot.lastDdlBy);
+                table.restoreIds(tableSnapshot.tableId, tableSnapshot.cloneGroupId);
                 if (tableSnapshot.owner != null) {
                     table.setOwner(tableSnapshot.owner);
                 }
@@ -1260,6 +1261,10 @@ final class CatalogSnapshotReader {
                     tag.restoreId(tagSnapshot.id);
                     tag.setPropagate(tagSnapshot.propagate);
                     tag.setOnConflict(tagSnapshot.onConflict);
+                    tag.setMaskingPolicies(tagSnapshot.maskingPolicies);
+                    if (tag.hasMaskingPolicies()) {
+                        catalog.noteTagMasking();
+                    }
                     schema.addTag(tag);
                 }
             }

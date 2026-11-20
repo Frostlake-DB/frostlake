@@ -18,6 +18,7 @@ package dev.frostlake.metastore.model;
 
 import dev.frostlake.executor.ExpressionColumns;
 import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.StatementClock;
 import dev.frostlake.metastore.SqlObject;
 import dev.frostlake.metastore.StatementDraws;
@@ -172,6 +173,9 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
     private boolean catalogResident;
     // Set only on a self-join's second instance of a table: the catalog table it was copied from.
     private Table copiedFrom;
+    // The table's own number, and the number of the table its clone line starts at (0: itself).
+    private long tableId = TableIds.next();
+    private long cloneGroupId;
     private String qualifiedName;
     // CHANGE_TRACKING: off on creation; flipped by the table option, ALTER … SET, or the creation
     // of a stream over the table (which enables it implicitly). The CHANGES clause requires it.
@@ -281,6 +285,42 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
      */
     public void markCopiedFrom(final Table source) {
         this.copiedFrom = source;
+    }
+
+    /**
+     * The table's own number, which no other table holds: a rename keeps it, a CREATE OR REPLACE draws another.
+     *
+     * @return the number
+     */
+    public long getTableId() {
+        return tableId;
+    }
+
+    /**
+     * The number of the table this one's clone line starts at: its own for a table no clone made, the source's for
+     * a clone, so every clone of a clone names the first table of the line.
+     *
+     * @return the number
+     */
+    public long getCloneGroupId() {
+        return cloneGroupId != 0 ? cloneGroupId : tableId;
+    }
+
+    /**
+     * Gives back the numbers a snapshot of the engine's state kept; a snapshot written before they were kept holds
+     * none, and the table keeps the number it drew.
+     *
+     * @param id      the table's number, or 0 for none kept
+     * @param groupId its clone line's number, or 0 for none kept
+     */
+    public void restoreIds(final long id, final long groupId) {
+        if (id <= 0) {
+            return;
+        }
+        TableIds.advancePast(id);
+        TableIds.advancePast(groupId);
+        this.tableId = id;
+        this.cloneGroupId = groupId == id ? 0 : groupId;
     }
 
     /** Called by {@code Schema.addTable} as the table enters the catalog. One-way on purpose: a
@@ -403,6 +443,8 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
         }
         final Table copy = new Table(newName, copiedColumns, temporary, transientTable);
         copy.setHighestOrdinal(highestOrdinal);
+        // A clone is a table of its own, in its source's clone line.
+        copy.cloneGroupId = getCloneGroupId();
         copyConstraintsInto(copy);
         copy.clusterKeys = getClusterKeys();
         copy.clusterByText = clusterByText;
@@ -1822,19 +1864,19 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
      * optimization, the columns a row access or aggregation policy is attached on and the data metric functions. A
      * foreign key in another table naming this column is the caller's to follow ({@code ColumnRenames}).
      *
-     * @param oldName the column, as written
+     * @param oldName the column's canonical name, which must spell it exactly: bee and "bee" miss a column "Bee"
      * @param newName its new name
      * @return the column's name before the rename, as the table spelled it
      */
     public String renameColumn(final String oldName, final String newName) {
-        final Integer index = indexOf(oldName);
+        final Integer index = exactColumnIndex.get(oldName);
         if (index == null) {
             throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint("Object", oldName));
         }
         if (exactColumnIndex.containsKey(newName)) {
             // The account treats the rename target as an OBJECT, spelled table.column.
-            throw new RuntimeException(SqlCompilationError.of("Object '" + getName().toUpperCase(Locale.ROOT)
-                + "." + newName.toUpperCase(Locale.ROOT) + "' already exists."));
+            throw new RuntimeException(SqlCompilationError.of("Object '" + SqlIdentifiers.spellCanonical(getName())
+                + "." + SqlIdentifiers.spellCanonical(newName) + "' already exists."));
         }
 
         final TableColumn oldColumn = columns.get(index);

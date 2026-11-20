@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.copy;
 
+import dev.frostlake.functions.scalar.semistructured.JsonFileRecords;
 import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.JsonParser;
@@ -26,6 +27,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -59,10 +61,14 @@ import java.util.TreeMap;
  */
 final class JsonSchemaScanner {
 
-    /** Reads what the account's reader reads past strict JSON: a trailing comma and a single-quoted string. */
+    /**
+     * Reads what the account's reader reads past strict JSON: a trailing comma, a single-quoted string and an
+     * unquoted name (which names the account refuses never reach it, see {@link JsonFileRecords}).
+     */
     private static final ObjectMapper MAPPER = JsonMapper.builder()
         .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
         .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
+        .enable(JsonReadFeature.ALLOW_UNQUOTED_PROPERTY_NAMES)
         .build();
 
     private final InferenceFile file;
@@ -97,11 +103,40 @@ final class JsonSchemaScanner {
      * @throws IOException when the file cannot be read
      */
     static List<FileColumn> scan(final InferenceFile file, final SchemaScanOptions options) throws IOException {
-        try (RetainingReader text = new RetainingReader(
-                StagedFileIo.pastByteOrderMark(StagedFileIo.reader(file.path())));
+        // The whole file is read before any record is typed: a malformed record refuses the call even after one
+        // that is no object. The records then stand one to a line, whatever parted them in the file.
+        final JsonFileRecords read = JsonFileRecords.of(
+            StagedFileIo.withoutByteOrderMark(StagedFileIo.readString(file.path())), options.stripOuterArray(),
+            options.allowDuplicate());
+        if (read.fault() != null) {
+            throw named(file, read.fault());
+        }
+        try (RetainingReader text = new RetainingReader(new StringReader(oneToALine(read.records(),
+                options.stripOuterArray())));
              JsonParser parser = MAPPER.createParser(text)) {
             return new JsonSchemaScanner(file, options, text, parser).read();
         }
+    }
+
+    /**
+     * Records one to a line, a record no value fills written as a JSON null; under STRIP_OUTER_ARRAY within one
+     * outer array, so that a record that is an array stays one record.
+     */
+    private static String oneToALine(final List<String> records, final boolean stripOuterArray) {
+        final StringBuilder text = new StringBuilder();
+        if (stripOuterArray) {
+            text.append('[');
+        }
+        for (int i = 0; i < records.size(); i++) {
+            if (i > 0) {
+                text.append(stripOuterArray ? ",\n" : "\n");
+            }
+            text.append(records.get(i) == null ? "null" : records.get(i));
+        }
+        if (stripOuterArray) {
+            text.append(']');
+        }
+        return text.toString();
     }
 
     private List<FileColumn> read() {
@@ -352,6 +387,10 @@ final class JsonSchemaScanner {
 
     /** A fault's refusal: its sentence, the stored file with the place and the row, then the file as listed. */
     private RuntimeException named(final JsonRecordFault fault) {
+        return named(file, fault);
+    }
+
+    private static RuntimeException named(final InferenceFile file, final JsonRecordFault fault) {
         return new RuntimeException("Error parsing JSON: " + fault.sentence()
             + fault.placeLines(file.storedName(), true) + fault.fileLine(file.relativeName())
             + "\n  Row 0 starts at line 0, column $1");

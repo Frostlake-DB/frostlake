@@ -716,8 +716,27 @@ public final class SharedFunctionHelpers {
             }
             return scanned.atZone(zone).toOffsetDateTime();
         }
-        return scanned.toInstant(ZoneOffset.ofTotalSeconds(offset[0] * 60))
-            .atZone(zone).toOffsetDateTime();
+        return writtenOffsetTimestamp(scanned, offset[0]).toInstant().atZone(zone).toOffsetDateTime();
+    }
+
+    /** The widest offset a zone offset holds, in minutes: 18 hours. */
+    private static final int WIDEST_HELD_OFFSET_MINUTES = 18 * 60;
+
+    /**
+     * A wall clock written with an offset of minutes, as the instant it names at that offset. Live reads any
+     * offset of two-digit hours, '... +25:00' naming the instant 25 hours before the wall clock (live-verified). A
+     * zone offset spans 18 hours at most, so a wider one is held at Z with its instant kept: it compares, converts
+     * and counts as live does, while the offset it was written with is not kept.
+     *
+     * @param wall    the wall clock written
+     * @param minutes the offset written, in minutes
+     * @return the timestamp
+     */
+    private static ZonedDateTime writtenOffsetTimestamp(final LocalDateTime wall, final int minutes) {
+        if (Math.abs(minutes) <= WIDEST_HELD_OFFSET_MINUTES) {
+            return wall.atOffset(ZoneOffset.ofTotalSeconds(minutes * 60)).toZonedDateTime();
+        }
+        return wall.minusMinutes(minutes).atZone(ZoneOffset.UTC);
     }
 
     /**
@@ -780,7 +799,7 @@ public final class SharedFunctionHelpers {
             }
             return scanned.atZone(zone).withFixedOffsetZone();
         }
-        return scanned.atOffset(ZoneOffset.ofTotalSeconds(offset[0] * 60)).toZonedDateTime();
+        return writtenOffsetTimestamp(scanned, offset[0]);
     }
 
     /**
@@ -980,18 +999,42 @@ public final class SharedFunctionHelpers {
      * {@link #parseTimestampWithFormatOrScale}).
      */
     public static LocalDateTime epochToLocalDateTime(final long epoch) {
-        final long magnitude = Math.abs(epoch);
-        final Instant instant;
-        if (magnitude < 31_536_000_000L) {
-            instant = Instant.ofEpochSecond(epoch);
-        } else if (magnitude < 31_536_000_000_000L) {
-            instant = Instant.ofEpochMilli(epoch);
-        } else if (magnitude < 31_536_000_000_000_000L) {
-            instant = Instant.ofEpochSecond(epoch / 1_000_000L, (epoch % 1_000_000L) * 1_000L);
+        return epochAtUtc(BigInteger.valueOf(epoch));
+    }
+
+    /**
+     * {@link #epochToLocalDateTime} over an integer of any size: a string of digits past a long still reads, in
+     * nanoseconds ({@code TO_DATE('10000000000000000000')} is 2286-11-20, live-verified), or null when the instant
+     * lies past the timestamps there are.
+     *
+     * @param epoch the epoch, in the unit its magnitude picks
+     * @return the UTC wall clock, or null
+     */
+    private static LocalDateTime epochAtUtc(final BigInteger epoch) {
+        final BigInteger magnitude = epoch.abs();
+        final long unitsPerSecond;
+        if (magnitude.compareTo(BigInteger.valueOf(31_536_000_000L)) < 0) {
+            unitsPerSecond = 1L;
+        } else if (magnitude.compareTo(BigInteger.valueOf(31_536_000_000_000L)) < 0) {
+            unitsPerSecond = 1_000L;
+        } else if (magnitude.compareTo(BigInteger.valueOf(31_536_000_000_000_000L)) < 0) {
+            unitsPerSecond = 1_000_000L;
         } else {
-            instant = Instant.ofEpochSecond(epoch / 1_000_000_000L, epoch % 1_000_000_000L);
+            unitsPerSecond = 1_000_000_000L;
         }
-        return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
+        final BigInteger[] split = epoch.divideAndRemainder(BigInteger.valueOf(unitsPerSecond));
+        BigInteger seconds = split[0];
+        long units = split[1].longValue();
+        if (units < 0) {
+            seconds = seconds.subtract(BigInteger.ONE);
+            units += unitsPerSecond;
+        }
+        if (seconds.compareTo(BigInteger.valueOf(EpochOutOfRange.LAST_SECOND)) > 0
+                || seconds.compareTo(BigInteger.valueOf(EpochOutOfRange.FIRST_SECOND)) < 0) {
+            return null;
+        }
+        return LocalDateTime.ofEpochSecond(seconds.longValue(), (int) (units * (1_000_000_000L / unitsPerSecond)),
+            ZoneOffset.UTC);
     }
 
     /**
@@ -1012,6 +1055,10 @@ public final class SharedFunctionHelpers {
      */
     private static Instant epochDecimalInstant(final BigDecimal seconds) {
         final BigDecimal whole = seconds.setScale(0, RoundingMode.FLOOR);
+        if (whole.compareTo(BigDecimal.valueOf(EpochOutOfRange.LAST_SECOND)) > 0
+                || whole.compareTo(BigDecimal.valueOf(EpochOutOfRange.FIRST_SECOND)) < 0) {
+            throw new EpochOutOfRange(whole.toBigInteger());
+        }
         final long nanos = seconds.subtract(whole).movePointRight(9).longValue();
         return Instant.ofEpochSecond(whole.longValueExact(), nanos);
     }
@@ -1043,12 +1090,10 @@ public final class SharedFunctionHelpers {
                 return epochDecimalInstant(exactNumber(value)).atZone(SessionZone.current()).toOffsetDateTime();
             case "TIMESTAMP_TZ":
             case "TIMESTAMPTZ":
-                return epochDecimalInstant(exactNumber(value)).atZone(SessionZone.current())
-                    .withFixedOffsetZone();
+                return writtenOffsetEpoch(value);
             case "TIMESTAMP":
                 if ("TIMESTAMP_TZ".equals(SessionTimestampMapping.current())) {
-                    return epochDecimalInstant(exactNumber(value)).atZone(SessionZone.current())
-                        .withFixedOffsetZone();
+                    return writtenOffsetEpoch(value);
                 }
                 return SessionTimestampMapping.isZoned()
                     ? epochDecimalInstant(exactNumber(value)).atZone(SessionZone.current()).toOffsetDateTime()
@@ -1059,6 +1104,15 @@ public final class SharedFunctionHelpers {
                 return epochDecimalToLocalDateTime(exactNumber(value));
             default:
                 return value;
+        }
+    }
+
+    /** A number as a TIMESTAMP_TZ: the epoch at the session's offset, refused as a TIMESTAMP_TZ words it. */
+    private static ZonedDateTime writtenOffsetEpoch(final Number value) {
+        try {
+            return epochDecimalInstant(exactNumber(value)).atZone(SessionZone.current()).withFixedOffsetZone();
+        } catch (final EpochOutOfRange past) {
+            throw past.withSessionOffset();
         }
     }
 
@@ -1144,31 +1198,24 @@ public final class SharedFunctionHelpers {
         }
         final String text = value.toString().trim();
         if (isIntegerText(text)) {
-            try {
-                return epochToLocalDateTime(Long.parseLong(text));
-            } catch (final NumberFormatException tooLarge) {
-                throw new RuntimeException("Cannot parse date/time: " + text);
+            final LocalDateTime epoch = epochAtUtc(new BigInteger(text));
+            if (epoch == null) {
+                throw new RuntimeException("Timestamp '" + text + "' is not recognized");
             }
+            return epoch;
         }
         return toLocalDateTime(value);
     }
 
     /**
      * The UTC wall clock a string of digits names as an epoch, its unit picked by magnitude (see
-     * {@link #epochToLocalDateTime}), or null when the text is no signed run of digits that fits a long.
+     * {@link #epochToLocalDateTime}), or null when the text is no signed run of digits or names no timestamp.
      * Live reads such text this way for EVERY temporal target, a DATE included: {@code
      * '1579046400'::TIMESTAMP_NTZ} is 2020-01-15 00:00:00 and {@code '20200115'::DATE} is 1970-08-22,
      * twenty million seconds and never a date written without separators.
      */
     private static LocalDateTime digitEpochAtUtc(final String s) {
-        if (!isIntegerText(s)) {
-            return null;
-        }
-        try {
-            return epochToLocalDateTime(Long.parseLong(s));
-        } catch (final NumberFormatException tooLarge) {
-            return null;
-        }
+        return isIntegerText(s) ? epochAtUtc(new BigInteger(s)) : null;
     }
 
     /** Whether the text is an (optionally signed) run of digits — a string epoch for TO_TIMESTAMP. */
@@ -1224,7 +1271,11 @@ public final class SharedFunctionHelpers {
         }
         final String digits = value.toString().trim();
         if (digits.matches("-?\\d+")) {
-            return epochToLocalDateTime(Long.parseLong(digits)).toLocalDate();
+            final LocalDateTime epoch = epochAtUtc(new BigInteger(digits));
+            if (epoch == null) {
+                throw new RuntimeException("Date '" + digits + "' is not recognized");
+            }
+            return epoch.toLocalDate();
         }
         if (format != null && value instanceof String) {
             // A text no AUTO form reads is refused naming the format written for it (live-verified):

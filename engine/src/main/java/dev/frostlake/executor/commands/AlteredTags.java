@@ -87,6 +87,26 @@ final class AlteredTags {
     }
 
     /**
+     * Judge the tags a SET TAG or an UNSET TAG names without applying any: a column the action names is looked for
+     * only after its tags are (live-verified).
+     *
+     * @param set   the SET TAG action, or null
+     * @param unset the UNSET TAG action, or null
+     */
+    void requireNamed(final FrostlakeParser.TagSetContext set, final FrostlakeParser.TagUnsetContext unset) {
+        if (set != null) {
+            for (final FrostlakeParser.TagAssignContext assign : set.tagAssign()) {
+                applicable(assign.qualifiedName());
+            }
+        }
+        if (unset != null) {
+            for (final FrostlakeParser.QualifiedNameContext name : unset.qualifiedName()) {
+                applicable(name);
+            }
+        }
+    }
+
+    /**
      * The tag an action names, which must exist (live-verified on every kind that takes tags) and be one the session
      * may apply: APPLY TAG on the account, or APPLY on the tag beside the privilege on the object the statement already
      * asks (documented, "Tag privileges"; see ApplyPrivileges). A missing tag named bare is refused by that name alone

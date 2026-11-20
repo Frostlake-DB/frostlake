@@ -20,6 +20,7 @@ import dev.frostlake.DatabaseEngine;
 import dev.frostlake.SessionWork;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.StagePathSegments;
 import dev.frostlake.parser.FrostlakeParser;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
@@ -141,7 +142,7 @@ final class SnowflakeFileTransfer {
         data.put("command", "DOWNLOAD");
         final ArrayNode sources = data.putArray("src_locations");
         for (final Path file : files) {
-            sources.add(root[0].relativize(file).toString().replace('\\', '/'));
+            sources.add(StagePathSegments.relativeText(root[0], file));
         }
         data.put("localLocation", target[0]);
         data.putArray("presignedUrls");

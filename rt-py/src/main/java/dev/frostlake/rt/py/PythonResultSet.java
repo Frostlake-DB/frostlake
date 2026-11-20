@@ -51,6 +51,11 @@ public class PythonResultSet {
         this.rows = resultSet.getRows();
     }
 
+    /** @return the result set these rows are read from */
+    ResultSet resultSet() {
+        return resultSet;
+    }
+
     public boolean next() {
         currentRow++;
         return currentRow < rows.size();

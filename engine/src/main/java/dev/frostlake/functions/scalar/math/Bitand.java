@@ -13,25 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package dev.frostlake.functions.scalar.math;
 
-import dev.frostlake.functions.NumericArgumentFunction;
-import dev.frostlake.types.IntegerResultWidths;
+import java.math.BigInteger;
 
-import java.util.List;
-
-public class Bitand extends NumericArgumentFunction {
-    public Bitand() { super("BITAND", IntegerResultWidths.WIDEST); }
+public class Bitand extends BitwisePair {
+    public Bitand() { super("BITAND", BitwiseOperation.AND); }
 
     @Override
-    public Object evaluate(final List<Object> args) {
-        if (args.get(0) == null || args.get(1) == null) return null;
-        return BitwiseOperand.result(BitwiseOperand.wide(args.get(0)).and(BitwiseOperand.wide(args.get(1))));
+    protected BigInteger numeric(final BigInteger first, final BigInteger second) {
+        return first.and(second);
     }
-
-    @Override
-    public int getMinArgCount() { return 2; }
-    @Override
-    public int getMaxArgCount() { return 2; }
 }

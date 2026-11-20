@@ -58,6 +58,11 @@ public class EngineConfig {
      */
     public static final String PROP_HTTP_SESSION_IDLE_TIMEOUT_MINUTES = "http.session.idleTimeoutMinutes";
     /**
+     * The most bytes a request body may hold, as sent and, for a compressed one, once unzipped; a larger one is
+     * answered 413 before it is read whole. 0 or less sets no bound.
+     */
+    public static final String PROP_HTTP_MAX_REQUEST_BYTES = "http.maxRequestBytes";
+    /**
      * The port of the server's HTTPS listener, which serves every endpoint the plain one serves - what a Snowflake
      * driver connects to with its default {@code ssl=on}. None by default; it needs {@link #PROP_HTTP_TLS_KEYSTORE}.
      */
@@ -80,6 +85,9 @@ public class EngineConfig {
     public static final String PROP_TIME_TRAVEL_ENABLED = "timeTravel.enabled";
     public static final String PROP_EXECUTION_WINDOW_FRAME_VECTORS = "execution.window.frameVectors";
     public static final String PROP_TRANSACTION_DEFERRED_APPLY = "transaction.deferredApply";
+    public static final String PROP_TRANSACTION_DEADLOCK_DETECTION_SECONDS = "transaction.deadlockDetectionSeconds";
+    /** How long a wait that closes a deadlock lasts before its statement is refused, as an account takes. */
+    public static final int DEFAULT_DEADLOCK_DETECTION_SECONDS = 300;
     public static final String PROP_COMMAND_REMOVE_ENABLED = "command.removeEnabled";
     public static final String PROP_DEFAULT_USER = "default.user";
     public static final String PROP_STORAGE_IN_MEMORY = "storage.inMemory";
@@ -116,6 +124,11 @@ public class EngineConfig {
     private static final int DEFAULT_REST_SYNC_WAIT_MS = 30000;
     private static final int DEFAULT_REST_RESULT_RETENTION_MS = 3600000;
     private static final int DEFAULT_SESSION_IDLE_TIMEOUT_MINUTES = 240;
+    /**
+     * 256 MiB: more than any body the endpoints can run, whose statement text reads at most 100,000,000 characters
+     * (the JSON reader's longest string), so the bound refuses only what could not have run.
+     */
+    private static final int DEFAULT_MAX_REQUEST_BYTES = 256 * 1024 * 1024;
     private static final String DEFAULT_DATABASE = "SNOWFLAKE";
     private static final String DEFAULT_SCHEMA = "PUBLIC";
     private static final String DEFAULT_ACCOUNT_ID = "ABC12345";
@@ -212,6 +225,8 @@ public class EngineConfig {
         properties.setProperty(PROP_CONSTRAINTS_ENFORCE_TYPES, "true");
         properties.setProperty(PROP_TIME_TRAVEL_ENABLED, "true");
         properties.setProperty(PROP_TRANSACTION_DEFERRED_APPLY, "true");
+        properties.setProperty(PROP_TRANSACTION_DEADLOCK_DETECTION_SECONDS,
+            String.valueOf(DEFAULT_DEADLOCK_DETECTION_SECONDS));
         properties.setProperty(PROP_COMMAND_REMOVE_ENABLED, "false");
         properties.setProperty(PROP_DEFAULT_USER, DEFAULT_USER);
         properties.setProperty(PROP_STORAGE_IN_MEMORY, "true");
@@ -324,6 +339,16 @@ public class EngineConfig {
     }
 
     /**
+     * The most bytes a request body may hold, as sent and once unzipped; 0 when bodies are not bounded.
+     *
+     * @return the bound in bytes, or 0
+     */
+    public int getMaxRequestBytes() {
+        final int bytes = getIntProperty(PROP_HTTP_MAX_REQUEST_BYTES, DEFAULT_MAX_REQUEST_BYTES);
+        return Math.max(0, bytes);
+    }
+
+    /**
      * How long an HTTP session may sit idle before the server ends it, in minutes; 0 when sessions never idle out.
      * A negative value keeps the default.
      */
@@ -398,6 +423,14 @@ public class EngineConfig {
      */
     public boolean isDeferredApply() {
         return getBooleanProperty(PROP_TRANSACTION_DEFERRED_APPLY, true);
+    }
+
+    /**
+     * How long, in seconds, a statement whose wait for a table or stream lock closes a deadlock waits before it is
+     * refused as the deadlock's victim: 300 by default, about what an account takes to detect one.
+     */
+    public int getDeadlockDetectionSeconds() {
+        return getIntProperty(PROP_TRANSACTION_DEADLOCK_DETECTION_SECONDS, DEFAULT_DEADLOCK_DETECTION_SECONDS);
     }
 
     /**

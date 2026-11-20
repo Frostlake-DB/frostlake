@@ -45,6 +45,8 @@ public class ResultSet {
     /** The rows a CTAS wrote or a TRUNCATE removed, when this is that statement's status; null otherwise. */
     private Long rowsInserted;
     private Long rowsDeleted;
+    /** The query ID of the statement of a request this result answers, or null (see {@link #markQueryId}). */
+    private String queryId;
 
     public ResultSet(final List<ResultSetColumn> columns, final List<Row> rows) {
         this.columns = new ArrayList<>(columns);
@@ -74,6 +76,7 @@ public class ResultSet {
         copy.scriptingAnswer = scriptingAnswer;
         copy.rowsInserted = rowsInserted;
         copy.rowsDeleted = rowsDeleted;
+        copy.queryId = queryId;
         return copy;
     }
 
@@ -170,6 +173,27 @@ public class ResultSet {
      */
     public ResultSet markJdbcUpdateCount(final Long count) {
         this.jdbcUpdateCount = count;
+        return this;
+    }
+
+    /**
+     * The query ID of the statement of a request this result answers, as RESULT_SCAN reads it back, or null when the
+     * statement took none.
+     *
+     * @return the query ID, or null
+     */
+    public String getQueryId() {
+        return queryId;
+    }
+
+    /**
+     * Record the query ID the statement this result answers took.
+     *
+     * @param id the query ID
+     * @return this result
+     */
+    public ResultSet markQueryId(final String id) {
+        this.queryId = id;
         return this;
     }
 

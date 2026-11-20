@@ -16,7 +16,6 @@
 
 package dev.frostlake.functions.scalar.context;
 
-import dev.frostlake.executor.SessionZone;
 import dev.frostlake.executor.StatementClock;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.types.DateTimeType;
@@ -37,7 +36,7 @@ public class CurrentTimestamp extends BuiltInFunction {
     @Override
     public Object evaluate(final List<Object> args) {
         // Live types this TIMESTAMP_LTZ, which is an OffsetDateTime here.
-        return StatementClock.observed().atZone(SessionZone.current()).toOffsetDateTime();
+        return StatementClock.nowInSession();
     }
 
     @Override

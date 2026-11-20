@@ -317,8 +317,10 @@ enum ShowListing {
             case DBT_PROJECTS:
             case AUTHENTICATION_POLICIES:
             case PACKAGES_POLICIES:
-            case EXTERNAL_FUNCTIONS:
             case DATA_METRIC_FUNCTIONS:
+            // An external function needs an API integration to be created on an account, so which of the two
+            // scopes its unscoped listing reads is not told apart either.
+            case EXTERNAL_FUNCTIONS:
                 return true;
             default:
                 return false;

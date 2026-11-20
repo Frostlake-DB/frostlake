@@ -52,7 +52,7 @@ public final class SnowflakeDirectEndpoint implements AutoCloseable {
     private SnowflakeDirectEndpoint(final DatabaseEngine engine, final String directName) {
         this.engine = engine;
         this.sessions = ConcurrentDatabaseEngine.sharing(engine);
-        this.handler = new SnowflakeProtocolHandler(sessions);
+        this.handler = new SnowflakeProtocolHandler(sessions, engine.getConfig().getMaxRequestBytes());
         this.directName = directName;
     }
 

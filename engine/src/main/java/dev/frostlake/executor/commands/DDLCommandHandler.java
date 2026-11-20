@@ -507,8 +507,8 @@ public class DDLCommandHandler implements CommandHandler {
         final String[] writtenSourceParts = queryExecutor.resolveObjectNameParts(ctx.streamSource().objectName());
         final String sourceName = QualifiedName.join(writtenSourceParts);
 
-        // The kind of source: a table (an event table is one), a view, a stage's directory table, a
-        // dynamic table, or an external table — which this engine has none of, so only its refusals apply.
+        // The kind of source: a table (an event table and an external table are ones), a view, a stage's
+        // directory table, or a dynamic table.
         final FrostlakeParser.StreamSourceKindContext kind = ctx.streamSourceKind();
         final StreamSourceType sourceType = kind.VIEW() != null ? StreamSourceType.VIEW
             : kind.STAGE() != null ? StreamSourceType.STAGE
@@ -558,11 +558,20 @@ public class DDLCommandHandler implements CommandHandler {
         Table sourceTable = null;
         DynamicTable sourceDynamicTable = null;
         if (kind.EXTERNAL() != null) {
-            // Every refusal live gives an external-table stream here: this engine keeps no external tables.
-            if (sourceSchema.hasTable(sourceObjectName)) {
+            // An external table takes an INSERT_ONLY stream alone; an ordinary table is no external table
+            // (live-verified).
+            if (!sourceSchema.hasTable(sourceObjectName)) {
+                throw new RuntimeException(SqlCompilationError.doesNotExist("External table", sourceQualified));
+            }
+            final Table external = sourceSchema.getTable(sourceObjectName);
+            if (external.getExternalMetadata() == null) {
                 throw new RuntimeException(SqlCompilationError.objectOfOtherType("TABLE", "EXTERNAL_TABLE"));
             }
-            throw new RuntimeException(SqlCompilationError.doesNotExist("External table", sourceQualified));
+            if (!insertOnly) {
+                throw new RuntimeException("Streams on External Tables or Iceberg tables with an external catalog"
+                    + " must have INSERT_ONLY set to true.");
+            }
+            sourceTable = external;
         } else if (sourceType == StreamSourceType.STAGE) {
             final Stage stage = sourceSchema.getStage(sourceObjectName);
             if (!stage.isDirectoryEnabled()) {
@@ -613,6 +622,11 @@ public class DDLCommandHandler implements CommandHandler {
             if (table == null) {
                 throw new RuntimeException(SqlCompilationError.doesNotExist("Table", sourceName));
             }
+            if (table.getExternalMetadata() != null) {
+                // An external table is named as one where a table is asked for (live-verified).
+                throw new RuntimeException(SqlCompilationError.objectOfOtherType("EXTERNAL_TABLE",
+                    kind.EVENT() != null ? "EVENT_TABLE" : "TABLE"));
+            }
             if (kind.EVENT() != null && !table.isEventTable()) {
                 throw new RuntimeException(SqlCompilationError.objectOfOtherType("TABLE", "EVENT_TABLE"));
             }
@@ -629,6 +643,10 @@ public class DDLCommandHandler implements CommandHandler {
             // account: CREATE STREAM s ON VIEW non_existent_view fails "SQL compilation
             // error: View 'NON_EXISTENT_VIEW' does not exist or not authorized." — so the lookup is
             // guarded rather than letting the catalog's generic "View does not exist: x" surface.
+            if (!sourceSchema.hasView(sourceObjectName) && sourceSchema.hasTable(sourceObjectName)
+                    && sourceSchema.getTable(sourceObjectName).getExternalMetadata() != null) {
+                throw new RuntimeException(SqlCompilationError.objectOfOtherType("EXTERNAL_TABLE", "VIEW"));
+            }
             if (!sourceSchema.hasView(sourceObjectName)) {
                 throw new RuntimeException(SqlCompilationError.doesNotExistAsSpelled("View",
                     sourceObjectName.toUpperCase(Locale.ROOT)));
@@ -655,13 +673,17 @@ public class DDLCommandHandler implements CommandHandler {
                 + "INSERT_ONLY is not supported on queries with 'TABLE' inside views, saw '"
                 + catalog.resolveTable(viewBaseTables.get(0)).getName() + "'. (inside view '" + sourceQualified + "').");
         }
-        if (insertOnly) {
+        if (insertOnly && kind.EXTERNAL() == null) {
             throw new RuntimeException("Streams of type INSERT_ONLY can only be created on external tables or "
                 + "Iceberg tables with an external catalog integration.");
         }
+        if (sourceView != null) {
+            requireViewStreamSource(sourceView, sourceSchema, viewBaseTables);
+        }
 
         try {
-            final StreamType type = appendOnly ? StreamType.APPEND_ONLY : StreamType.STANDARD;
+            final StreamType type = kind.EXTERNAL() != null ? StreamType.INSERT_ONLY
+                : appendOnly ? StreamType.APPEND_ONLY : StreamType.STANDARD;
             // A stream on a stage or a dynamic table names its source fully, the way SHOW STREAMS reports it.
             final String recordedSource = sourceType == StreamSourceType.STAGE
                 || sourceType == StreamSourceType.DYNAMIC_TABLE ? sourceQualified : sourceName;
@@ -739,6 +761,55 @@ public class DDLCommandHandler implements CommandHandler {
         } catch (final RuntimeException e) {
             handleIfNotExists(ifNotExists, e, "object", streamParts);
             logger.debug("Stream already exists (IF NOT EXISTS): {}", streamName);
+        }
+        return null;
+    }
+
+    /**
+     * Refuse a stream on a view the creating role may not read or may not start tracking: SELECT on the view is asked,
+     * as SELECT on a table is for a stream on the table, and where change tracking is still off on the view, on a
+     * view below it or on a table it reads, the role must be allowed to turn it on there (documented: only a role
+     * owning the view and its underlying tables creates the first stream on it). Nothing is asked before every check
+     * passes, so a refused stream leaves change tracking as it found it.
+     *
+     * @param view       the view
+     * @param home       the schema the view lives in
+     * @param baseTables the names of the tables the view reads, as its query writes them
+     */
+    private void requireViewStreamSource(final View view, final Schema home, final List<String> baseTables) {
+        final String[] viewParts = {home.getDatabaseName(), home.getName(), view.getName()};
+        queryExecutor.requirePrivilege(Privilege.SELECT, "VIEW", viewParts, null);
+        if (!view.isChangeTracking()) {
+            queryExecutor.requireChangeTrackingAllowed(viewParts);
+        }
+        for (final View inner : queryExecutor.viewStreamInnerViews(view, home)) {
+            final Schema innerHome = viewHolder(inner);
+            if (!inner.isChangeTracking() && innerHome != null) {
+                queryExecutor.requireChangeTrackingAllowed(
+                    new String[] {innerHome.getDatabaseName(), innerHome.getName(), inner.getName()});
+            }
+        }
+        final List<Table> tables = baseTables == null ? null : StreamSources.viewBases(catalog, home, baseTables);
+        if (tables == null) {
+            return;
+        }
+        for (final Table table : tables) {
+            final Schema tableHome = StreamSources.holderOf(catalog, table);
+            if (!table.isChangeTracking() && tableHome != null) {
+                queryExecutor.requireChangeTrackingAllowed(
+                    new String[] {tableHome.getDatabaseName(), tableHome.getName(), table.getName()});
+            }
+        }
+    }
+
+    /** The schema holding a view, matched by identity, or null when none holds it. */
+    private Schema viewHolder(final View view) {
+        for (final Database database : catalog.getAllDatabases()) {
+            for (final Schema schema : database.getAllSchemas()) {
+                if (schema.hasView(view.getName()) && schema.getView(view.getName()) == view) {
+                    return schema;
+                }
+            }
         }
         return null;
     }
@@ -1715,11 +1786,20 @@ public class DDLCommandHandler implements CommandHandler {
         final Object restored = undrop(ctx);
         // A two-word kind is named with an underscore: Dynamic_table D successfully restored. (live-verified).
         if ((ctx.ICEBERG() != null || ctx.DYNAMIC() != null) && restored == null) {
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
             return StatusResults.of((ctx.ICEBERG() != null ? "Iceberg_table " : "Dynamic_table ")
                 + parts[parts.length - 1] + " successfully restored.");
         }
         return restored;
+    }
+
+    /**
+     * The canonical parts of the name an UNDROP restores: an IDENTIFIER() reference resolved to the name it holds, as
+     * any object name is.
+     */
+    private String[] undroppedParts(final FrostlakeParser.UndropStatementContext ctx) {
+        return ctx.undroppedName() != null ? queryExecutor.resolveObjectNameParts(ctx.undroppedName().objectName())
+            : qualifiedNameParts(ctx.qualifiedName());
     }
 
     private Object undrop(final FrostlakeParser.UndropStatementContext ctx) {
@@ -1729,7 +1809,7 @@ public class DDLCommandHandler implements CommandHandler {
         if (ctx.SESSION() != null || ctx.AUTHENTICATION() != null || ctx.PACKAGES() != null) {
             // No dropped session, authentication or packages policy is kept: a name a policy holds is taken, and any
             // other is refused as the kind no UNDROP restores (live-verified).
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
             final Schema owner = catalog.requireOwningSchema(QualifiedName.of(parts));
             if (owner.policyKindHolding(parts[parts.length - 1]) != null) {
                 throw new RuntimeException(SqlCompilationError.of("Object '"
@@ -1740,8 +1820,8 @@ public class DDLCommandHandler implements CommandHandler {
                 + "_POLICY'.");
         }
         if (ctx.DYNAMIC() != null) {
-            final String name = getText(ctx.qualifiedName());
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
+            final String name = QualifiedName.join(parts);
             final String databaseName = parts.length == 3 ? parts[0] : catalog.getCurrentDatabase();
             final Schema schema = undropSchema(parts);
             final String tableName = parts[parts.length - 1];
@@ -1765,8 +1845,8 @@ public class DDLCommandHandler implements CommandHandler {
             ((DynamicTable) dropped.getObject()).markDdl(catalog.currentUserForDdl());
             logger.trace("Undropped dynamic table: {}", name);
         } else if (ctx.TABLE() != null) {
-            final String name = getText(ctx.qualifiedName());
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
+            final String name = QualifiedName.join(parts);
             final String databaseName = parts.length == 3 ? parts[0] : catalog.getCurrentDatabase();
             final Schema schema = undropSchema(parts);
             final String tableName = parts[parts.length - 1];
@@ -1813,8 +1893,8 @@ public class DDLCommandHandler implements CommandHandler {
             MaterializedViewValidity.baseTableRestored(catalog, databaseName, schema.getName(), table.getName());
             logger.trace("Undropped table: {}", name);
         } else if (ctx.SCHEMA() != null) {
-            final String name = getText(ctx.qualifiedName());
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
+            final String name = QualifiedName.join(parts);
             final String databaseName = parts.length == 1 ? catalog.getCurrentDatabase() : parts[0];
             final String schemaName = parts.length == 1 ? parts[0] : parts[1];
             if (databaseName == null) {
@@ -1840,8 +1920,8 @@ public class DDLCommandHandler implements CommandHandler {
             restoredSchema.markDdl(catalog.currentUserForDdl());
             logger.trace("Undropped schema: {}", name);
         } else if (ctx.TAG() != null) {
-            final String name = getText(ctx.qualifiedName());
-            final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+            final String[] parts = undroppedParts(ctx);
+            final String name = QualifiedName.join(parts);
             final String dbName = parts.length == 3 ? parts[0] : catalog.getCurrentDatabase();
             final Schema schema = undropSchema(parts);
             final String tagName = parts[parts.length - 1];

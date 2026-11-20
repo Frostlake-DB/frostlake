@@ -40,7 +40,7 @@ public class PythonSemiStructuredArgumentTest extends BaseDatabaseTest {
     /** Reports the Python type name of its single argument, whatever it is declared as. */
     private void createTypeProbe(final String name, final String declaredType) {
         engine.execute("CREATE OR REPLACE FUNCTION " + name + "(v " + declaredType + ") "
-            + "RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h' AS $$\n"
+            + "RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h' AS $$\n"
             + "def h(v):\n"
             + "    return type(v).__name__\n"
             + "$$");
@@ -50,7 +50,7 @@ public class PythonSemiStructuredArgumentTest extends BaseDatabaseTest {
     public void anArrayOfObjectsIsIterableWithGet() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION pick_values(attributes ARRAY, name VARCHAR)
-            RETURNS ARRAY LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS ARRAY LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(attributes, name):
     out = []
@@ -67,7 +67,7 @@ def h(attributes, name):
     public void anObjectSupportsItems() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION has_non_null(obj OBJECT)
-            RETURNS BOOLEAN LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS BOOLEAN LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(obj):
     for k, v in obj.items():
@@ -83,7 +83,7 @@ def h(obj):
     public void nestedContainersAreIndexable() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION deep(v VARIANT)
-            RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS VARCHAR LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(v):
     return str(v['a'][1]['b'])
@@ -128,7 +128,7 @@ def h(v):
     public void aRoundTripPreservesIntegersAndAddedKeys() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION roundtrip(v VARIANT)
-            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(v):
     v['added'] = 1
@@ -166,7 +166,7 @@ def hasValues(obj):
     public void strictIsASynonymAndAnyNullArgumentShortCircuits() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION joiner(a VARCHAR, b VARCHAR) RETURNS VARCHAR
-            LANGUAGE PYTHON STRICT RUNTIME_VERSION='3.10' HANDLER='h'
+            LANGUAGE PYTHON STRICT RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(a, b):
     return a + b
@@ -180,7 +180,7 @@ def h(a, b):
     public void theDefaultCalledOnNullInputStillRunsTheBody() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION lenient(s VARCHAR) RETURNS VARCHAR
-            LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(s):
     return 'was-' + str(s)
@@ -205,7 +205,7 @@ def h(s):
     public void aDatetimeInsideADictKeepsItsNaiveFieldsAndPythonStrFormat() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION dt_dict()
-            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 import datetime
 def h():
@@ -218,7 +218,7 @@ def h():
     public void aBareDatetimeReturnBecomesALocalDateTimeWithTheNaiveFields() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION dt_bare()
-            RETURNS TIMESTAMP_NTZ LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS TIMESTAMP_NTZ LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 import datetime
 def h():
@@ -235,7 +235,7 @@ def h():
         // shifted the day backwards in any zone east of UTC.
         engine.execute("""
             CREATE OR REPLACE FUNCTION d_dict()
-            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 import datetime
 def h():
@@ -248,7 +248,7 @@ def h():
     public void aWholeSecondDatetimeHasNoFractionLikePythonStr() {
         engine.execute("""
             CREATE OR REPLACE FUNCTION dt_whole()
-            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS VARIANT LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 import datetime
 def h():
@@ -263,7 +263,7 @@ def h():
         engine.execute("INSERT INTO docs SELECT PARSE_JSON('{\"n\":3}')");
         engine.execute("""
             CREATE OR REPLACE FUNCTION read_n(v VARIANT)
-            RETURNS INTEGER LANGUAGE PYTHON RUNTIME_VERSION='3.10' HANDLER='h'
+            RETURNS INTEGER LANGUAGE PYTHON RUNTIME_VERSION='3.11' HANDLER='h'
             AS $$
 def h(v):
     return v['n']

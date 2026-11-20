@@ -224,6 +224,10 @@ final class UnmodelledListings {
         if (kept != null) {
             return new ResultSet(columns.getColumns(), kept);
         }
+        if (listing == ShowListing.EXTERNAL_FUNCTIONS && schemas != null) {
+            // The external functions of the scope's schemas, as SHOW USER FUNCTIONS lists them.
+            return queryExecutor.getShowExecutor().showExternalFunctions(schemas);
+        }
         if (modelled != null && schemas != null) {
             // The kinds listed here that are modelled: the session, authentication or packages policies of the
             // scope's schemas.

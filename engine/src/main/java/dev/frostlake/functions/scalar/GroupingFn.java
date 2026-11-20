@@ -22,11 +22,10 @@ import dev.frostlake.types.IntegerResultWidths;
 import java.util.List;
 
 /**
- * GROUPING(col) — returns 1 if the column is aggregated (NULL due to ROLLUP/CUBE),
- * 0 if the column participates in grouping for this row.
- * In plain GROUP BY context this always returns 0.
- * The actual 0/1 logic for ROLLUP/CUBE rows is handled in QueryExecutor
- * by examining whether the value was set to NULL by a super-group expansion.
+ * GROUPING(e1, …, en) — 1 for each argument a ROLLUP, CUBE or GROUPING SETS row aggregates over, 0 for each it groups
+ * by. A super-group row's mask is read from its grouping set wherever the call stands (see
+ * {@code GroupingSetScope}); this base result is the one of a plain GROUP BY, which groups by every key: 0, whether
+ * or not the key's value is NULL.
  */
 public class GroupingFn extends BuiltInFunction {
 
@@ -36,9 +35,6 @@ public class GroupingFn extends BuiltInFunction {
 
     @Override
     public Object evaluate(final List<Object> args) {
-        // If the argument is NULL (set by ROLLUP/CUBE expansion) → 1
-        // otherwise → 0
-        if (args.isEmpty() || args.get(0) == null) return 1L;
         return 0L;
     }
 

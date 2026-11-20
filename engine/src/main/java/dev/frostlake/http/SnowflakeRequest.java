@@ -34,13 +34,16 @@ import java.util.TreeMap;
  */
 final class SnowflakeRequest {
 
+    private final String method;
     private final String path;
     private final String rawQuery;
     private final Map<String, List<String>> headers;
     private final InputStream source;
     private byte[] body;
 
-    private SnowflakeRequest(final URI uri, final Map<String, List<String>> headers, final InputStream source) {
+    private SnowflakeRequest(final String method, final URI uri, final Map<String, List<String>> headers,
+                             final InputStream source) {
+        this.method = method;
         this.path = uri.getPath() == null || uri.getPath().isEmpty() ? "/" : uri.getPath();
         this.rawQuery = uri.getRawQuery();
         this.headers = new TreeMap<String, List<String>>(String.CASE_INSENSITIVE_ORDER);
@@ -67,8 +70,8 @@ final class SnowflakeRequest {
      * @return the request
      */
     static SnowflakeRequest of(final HttpExchange exchange) {
-        return new SnowflakeRequest(exchange.getRequestURI(), exchange.getRequestHeaders(),
-            exchange.getRequestBody());
+        return new SnowflakeRequest(exchange.getRequestMethod(), exchange.getRequestURI(),
+            exchange.getRequestHeaders(), exchange.getRequestBody());
     }
 
     /**
@@ -80,7 +83,13 @@ final class SnowflakeRequest {
      * @return the request
      */
     static SnowflakeRequest of(final URI uri, final Map<String, List<String>> headers, final byte[] body) {
-        return new SnowflakeRequest(uri, headers, new ByteArrayInputStream(body == null ? new byte[0] : body));
+        return new SnowflakeRequest(null, uri, headers,
+            new ByteArrayInputStream(body == null ? new byte[0] : body));
+    }
+
+    /** The request's method, or null for a request handed over in process, which names none. */
+    String method() {
+        return method;
     }
 
     /** The decoded path, {@code /} when the URI has none. */
@@ -100,14 +109,16 @@ final class SnowflakeRequest {
     }
 
     /**
-     * The body, read once.
+     * The body, read once and at most so far.
      *
+     * @param limit the most bytes it may hold, 0 or less for no bound
      * @return the body's bytes, empty when it has none
-     * @throws IOException if the body cannot be read
+     * @throws IOException if the body cannot be read, a {@link RequestTooLargeException} where it is larger than
+     *                     the bound
      */
-    byte[] body() throws IOException {
+    byte[] body(final long limit) throws IOException {
         if (body == null) {
-            body = source.readAllBytes();
+            body = new BoundedRequestStream(source, limit).readAllBytes();
         }
         return body;
     }

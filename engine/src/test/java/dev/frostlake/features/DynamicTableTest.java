@@ -90,7 +90,7 @@ public class DynamicTableTest extends BaseDatabaseTest {
         // table reports its RESOLVED refresh mode, both live-verified.
         assertEquals("1 minute", dtCell("sales_agg", "target_lag"));
         assertEquals("WH1", dtCell("sales_agg", "warehouse"));
-        assertEquals("INCREMENTAL", dtCell("sales_agg", "refresh_mode"));
+        assertEquals("ADAPTIVE", dtCell("sales_agg", "refresh_mode"));
         assertEquals("ACTIVE", dtCell("sales_agg", "scheduling_state"));
         logger.info("Created basic dynamic table");
     }

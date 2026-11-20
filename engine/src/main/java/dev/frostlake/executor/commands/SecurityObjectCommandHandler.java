@@ -38,6 +38,7 @@ import dev.frostlake.metastore.model.SecurityObjectStore;
 import dev.frostlake.metastore.model.SecurityPropertySpec;
 import dev.frostlake.metastore.model.SecurityPropertySpecs;
 import dev.frostlake.metastore.model.SecurityPropertyType;
+import dev.frostlake.metastore.model.User;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.PropertyListKeys;
@@ -92,6 +93,14 @@ public final class SecurityObjectCommandHandler {
 
     private static final String PASSWORD_POLICY_PREFIX = "PASSWORD_POLICY|";
     private static final String NETWORK_POLICY_PREFIX = "NETWORK_POLICY|";
+    /** The scopes an account's authentication or session policy is set for besides the whole account. */
+    private static final String PERSON_USERS = "PERSON_USERS";
+    private static final String SERVICE_USERS = "SERVICE_USERS";
+    private static final String AUTHENTICATION_POLICY_PREFIX = "AUTHENTICATION_POLICY|";
+    private static final String SESSION_POLICY_PREFIX = "SESSION_POLICY|";
+    /** The prefixes of every kind of policy the account or a user holds. */
+    private static final String[] HOLDER_POLICY_PREFIXES = {NETWORK_POLICY_PREFIX, PASSWORD_POLICY_PREFIX,
+        AUTHENTICATION_POLICY_PREFIX, SESSION_POLICY_PREFIX};
     private static final String NETWORK_RULE_LIST = "_NETWORK_RULE_LIST";
     /** What a policy's description shows in a cell that holds nothing. */
     private static final String NO_VALUE = "null";
@@ -114,8 +123,9 @@ public final class SecurityObjectCommandHandler {
      * @param userName the user's name, as the account holds it
      */
     static void forgetUser(final Catalog catalog, final String userName) {
-        catalog.getSecurityObjects().detach(NETWORK_POLICY_PREFIX + "USER|" + userName);
-        catalog.getSecurityObjects().detach(PASSWORD_POLICY_PREFIX + "USER|" + userName);
+        for (final String prefix : HOLDER_POLICY_PREFIXES) {
+            catalog.getSecurityObjects().detach(prefix + "USER|" + userName);
+        }
     }
 
     /**
@@ -135,7 +145,7 @@ public final class SecurityObjectCommandHandler {
             return null;
         }
         try {
-            final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(attached));
+            final QualifiedName name = QualifiedName.parse(attached);
             return catalog.databaseExact(name.part(0)).schemaExact(name.part(1)).getSecurityObjects()
                 .get(SecurityObjectKind.PASSWORD_POLICY, name.last());
         } catch (final RuntimeException gone) {
@@ -153,7 +163,7 @@ public final class SecurityObjectCommandHandler {
      */
     static void renameUser(final Catalog catalog, final String oldName, final String newName) {
         final SecurityObjectStore account = catalog.getSecurityObjects();
-        for (final String prefix : new String[] {NETWORK_POLICY_PREFIX, PASSWORD_POLICY_PREFIX}) {
+        for (final String prefix : HOLDER_POLICY_PREFIXES) {
             final String attached = account.attachment(prefix + "USER|" + oldName);
             if (attached != null) {
                 account.detach(prefix + "USER|" + oldName);
@@ -317,8 +327,9 @@ public final class SecurityObjectCommandHandler {
             // Replacing an object needs OWNERSHIP of it.
             queryExecutor.requireOwnership(kind.name(), nameParts(ctx, kind, name), null);
         }
-        if (existing != null && ctx.or_replace() != null && kind == SecurityObjectKind.PASSWORD_POLICY
-                && isAttached(PASSWORD_POLICY_PREFIX, display(kind, schema, name))) {
+        // A password, an authentication or a session policy set on the account or on a user is not replaced.
+        if (existing != null && ctx.or_replace() != null && kind.isSchemaObject() && holderPrefix(kind) != null
+                && isAttached(holderPrefix(kind), display(kind, schema, name))) {
             throw policyInUse(name);
         }
         if (existing != null && ctx.or_replace() != null && kind == SecurityObjectKind.NETWORK_RULE) {
@@ -883,7 +894,10 @@ public final class SecurityObjectCommandHandler {
             + " cannot be dropped/replaced as it is associated with one or more entities.");
     }
 
-    /** Whether a password or network policy, named as attachments record it, is attached to anything. */
+    /**
+     * Whether a password, an authentication, a session or a network policy, named as attachments record it, is
+     * attached to anything.
+     */
     private boolean isAttached(final String prefix, final String attached) {
         for (final Map.Entry<String, String> attachment : catalog.getSecurityObjects().attachments().entrySet()) {
             if (attachment.getKey().startsWith(prefix) && attachment.getValue().equals(attached)) {
@@ -1024,14 +1038,32 @@ public final class SecurityObjectCommandHandler {
             throw DropPurge.refusal(parts);
         }
         queryExecutor.requireOwnership(kind.name(), parts, null);
+        // An authentication or a session policy set on the account or on a user cannot be dropped either.
+        final String prefix = holderPrefix(kind);
+        if (prefix != null && isAttached(prefix, schema.qualifiedName(name))) {
+            throw policyInUse(name);
+        }
         schema.getSecurityObjects().remove(kind, name);
         return true;
     }
 
+    /** The prefix the attachments of a kind the account or a user holds are recorded under, or null. */
+    private static String holderPrefix(final SecurityObjectKind kind) {
+        if (kind == SecurityObjectKind.PASSWORD_POLICY) {
+            return PASSWORD_POLICY_PREFIX;
+        }
+        if (kind == SecurityObjectKind.NETWORK_POLICY) {
+            return NETWORK_POLICY_PREFIX;
+        }
+        if (kind == SecurityObjectKind.AUTHENTICATION_POLICY) {
+            return AUTHENTICATION_POLICY_PREFIX;
+        }
+        return kind == SecurityObjectKind.SESSION_POLICY ? SESSION_POLICY_PREFIX : null;
+    }
+
     /** Moves (or, when {@code renamed} is null, removes) every attachment of a policy that is renamed or dropped. */
     private void forgetAttachments(final SecurityObjectKind kind, final String attached, final String renamed) {
-        final String prefix = kind == SecurityObjectKind.PASSWORD_POLICY ? PASSWORD_POLICY_PREFIX
-            : kind == SecurityObjectKind.NETWORK_POLICY ? NETWORK_POLICY_PREFIX : null;
+        final String prefix = holderPrefix(kind);
         if (prefix == null) {
             return;
         }
@@ -1262,9 +1294,10 @@ public final class SecurityObjectCommandHandler {
     }
 
     /**
-     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD POLICY} and {@code … NETWORK_POLICY}: the attachment is
-     * recorded, where {@code SHOW PASSWORD POLICIES ON} reads it back. A password policy judges the passwords ALTER
-     * USER sets (see {@link PasswordPolicyCheck}); a network policy is never enforced.
+     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD | AUTHENTICATION | SESSION POLICY} and {@code …
+     * NETWORK_POLICY}: the attachment is recorded, where {@code SHOW PASSWORD POLICIES ON} and POLICY_REFERENCES read
+     * it back. A password policy judges the passwords ALTER USER sets (see {@link PasswordPolicyCheck}); the other
+     * kinds are never enforced.
      */
     private Object attach(final FrostlakeParser.SecurityObjectStatementContext ctx) {
         if (ctx.NETWORK_POLICY() != null && ctx.INTEGER_LITERAL() != null) {
@@ -1294,23 +1327,9 @@ public final class SecurityObjectCommandHandler {
             target = ACCOUNT;
         }
         final SecurityObjectStore account = catalog.getSecurityObjects();
-        if (ctx.PASSWORD() != null) {
-            if (ctx.UNSET() != null) {
-                account.detach(PASSWORD_POLICY_PREFIX + target);
-                return null;
-            }
-            final Schema schema = owningSchema(ctx.qualifiedName(0));
-            final String policy = lastPart(ctx.qualifiedName(0));
-            if (schema.getSecurityObjects().get(SecurityObjectKind.PASSWORD_POLICY, policy) == null) {
-                throw missing(SecurityObjectKind.PASSWORD_POLICY, schema, policy);
-            }
-            if (ctx.USER() != null && ctx.FORCE() == null
-                    && account.attachment(PASSWORD_POLICY_PREFIX + target) != null) {
-                throw new RuntimeException("Object " + target.substring("USER|".length())
-                    + " already has a PASSWORD_POLICY. Only one PASSWORD_POLICY is allowed at a time.");
-            }
-            account.attach(PASSWORD_POLICY_PREFIX + target, schema.qualifiedName(policy));
-            return null;
+        if (ctx.POLICY() != null) {
+            return attachPolicy(ctx, ctx.accountUserType() == null ? target
+                : target + "|" + userType(ctx.accountUserType()));
         }
         if (ctx.UNSET() != null) {
             account.detach(NETWORK_POLICY_PREFIX + target);
@@ -1332,6 +1351,45 @@ public final class SecurityObjectCommandHandler {
         return null;
     }
 
+    /**
+     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD | AUTHENTICATION | SESSION POLICY}: the policy must be there,
+     * and a user — or, for an authentication or a session policy, the account and each type of its users — holds one
+     * policy of a kind at a time unless FORCE replaces it. UNSET takes the kind's policy off, set or not.
+     *
+     * @param ctx the statement
+     * @param target what the policy is set on: {@code ACCOUNT}, {@code ACCOUNT|PERSON_USERS}, {@code
+     *               ACCOUNT|SERVICE_USERS} or
+     *               {@code USER|<name>}
+     * @return null: the statement answers with its status sentence
+     */
+    private Object attachPolicy(final FrostlakeParser.SecurityObjectStatementContext ctx, final String target) {
+        final SecurityObjectKind kind = kindOf(ctx);
+        final String prefix = holderPrefix(kind);
+        final SecurityObjectStore account = catalog.getSecurityObjects();
+        if (ctx.UNSET() != null) {
+            account.detach(prefix + target);
+            return null;
+        }
+        final Schema schema = owningSchema(ctx.qualifiedName(0));
+        final String policy = lastPart(ctx.qualifiedName(0));
+        if (schema.getSecurityObjects().get(kind, policy) == null) {
+            throw missing(kind, schema, policy);
+        }
+        final boolean held = ctx.USER() != null || kind != SecurityObjectKind.PASSWORD_POLICY;
+        if (held && ctx.FORCE() == null && account.attachment(prefix + target) != null) {
+            final String holder = ctx.USER() != null ? target.substring("USER|".length()) : catalog.getAccountLocator();
+            throw new RuntimeException("Object " + holder + " already has a " + kind.name() + ". Only one "
+                + kind.name() + " is allowed at a time.");
+        }
+        account.attach(prefix + target, schema.qualifiedName(policy));
+        return null;
+    }
+
+    /** The scope of an account's policy set for one type of user: {@code PERSON_USERS} or {@code SERVICE_USERS}. */
+    private static String userType(final FrostlakeParser.AccountUserTypeContext clause) {
+        return clause.userType.getStart().getType() == FrostlakeParser.SERVICE ? SERVICE_USERS : PERSON_USERS;
+    }
+
     // ---- SHOW / DESCRIBE ---------------------------------------------------------------------------------------
 
     /**
@@ -1344,7 +1402,12 @@ public final class SecurityObjectCommandHandler {
         final SecurityObjectKind kind = ctx.RULE() != null || ctx.RULES() != null ? SecurityObjectKind.NETWORK_RULE
             : ctx.NETWORK() != null ? SecurityObjectKind.NETWORK_POLICY
             : ctx.SECRET() != null || ctx.SECRETS() != null ? SecurityObjectKind.SECRET
+            : ctx.AUTHENTICATION() != null ? SecurityObjectKind.AUTHENTICATION_POLICY
+            : ctx.SESSION() != null ? SecurityObjectKind.SESSION_POLICY
             : SecurityObjectKind.PASSWORD_POLICY;
+        if (kind == SecurityObjectKind.AUTHENTICATION_POLICY || kind == SecurityObjectKind.SESSION_POLICY) {
+            return showHeldPolicyOn(ctx, kind);
+        }
         if (ctx.DESCRIBE() != null || ctx.DESC() != null) {
             return describe(ctx, kind);
         }
@@ -1619,6 +1682,11 @@ public final class SecurityObjectCommandHandler {
 
     private static Row showRow(final SecurityObjectKind kind, final Schema schema, final SecurityObject object,
                                final String setOn) {
+        return showRow(kind, schema, object, setOn, "");
+    }
+
+    private static Row showRow(final SecurityObjectKind kind, final Schema schema, final SecurityObject object,
+                               final String setOn, final String options) {
         final List<Object> cells = new ArrayList<>();
         cells.add(ShowResultHelpers.createdOn(object.getCreatedTime()));
         cells.add(object.getName());
@@ -1644,7 +1712,7 @@ public final class SecurityObjectCommandHandler {
         }
         cells.add(ShowResultHelpers.ownerRoleType(object.getOwner()));
         if (sharesPolicyNames(kind)) {
-            cells.add("");
+            cells.add(options);
             if (setOn != null) {
                 cells.add(setOn);
             }
@@ -1808,7 +1876,7 @@ public final class SecurityObjectCommandHandler {
         final List<Row> rows = new ArrayList<>();
         final String attached = catalog.getSecurityObjects().attachment(PASSWORD_POLICY_PREFIX + target);
         if (attached != null) {
-            final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(attached));
+            final QualifiedName name = QualifiedName.parse(attached);
             final Schema schema = catalog.databaseExact(name.part(0)).schemaExact(name.part(1));
             final SecurityObject policy = schema.getSecurityObjects().get(SecurityObjectKind.PASSWORD_POLICY,
                 name.last());
@@ -1822,6 +1890,83 @@ public final class SecurityObjectCommandHandler {
                 "SYSTEM")));
         }
         return new ResultSet(showColumns(SecurityObjectKind.PASSWORD_POLICY, true), rows);
+    }
+
+    /**
+     * SHOW AUTHENTICATION | SESSION POLICIES ON ACCOUNT | USER: the policies in effect there. The account lists each
+     * policy set on it, its options naming the scopes it is set for — {@code {"target_scopes":["ACCOUNT"]}}, with
+     * {@code PERSON_USERS} and {@code SERVICE_USERS} for the policies set for one type of user. A user lists its own
+     * policy, else the account's for the user's type, else the account's for every user. With none in effect the
+     * listing is empty.
+     */
+    private ResultSet showHeldPolicyOn(final FrostlakeParser.SecurityObjectListingContext ctx,
+                                       final SecurityObjectKind kind) {
+        final String prefix = holderPrefix(kind);
+        final SecurityObjectStore account = catalog.getSecurityObjects();
+        final List<Row> rows = new ArrayList<>();
+        if (ctx.USER() != null) {
+            final User user = catalog.getUserExact(SqlIdentifiers.canonical(ctx.identifier()));
+            final String own = account.attachment(prefix + "USER|" + user.getName());
+            if (own != null) {
+                addHeldPolicyRow(rows, kind, own, "USER", "");
+            } else {
+                final boolean service = user.getUserType() != null && user.getUserType().endsWith("SERVICE");
+                final String scope = service ? SERVICE_USERS : PERSON_USERS;
+                final String typed = account.attachment(prefix + ACCOUNT + "|" + scope);
+                if (typed != null) {
+                    addHeldPolicyRow(rows, kind, typed, ACCOUNT, targetScopes(scope));
+                } else if (account.attachment(prefix + ACCOUNT) != null) {
+                    addHeldPolicyRow(rows, kind, account.attachment(prefix + ACCOUNT), ACCOUNT,
+                        targetScopes(ACCOUNT));
+                }
+            }
+        } else {
+            // One row per policy, naming every scope the account holds it for.
+            final Map<String, List<String>> scopes = new LinkedHashMap<>();
+            for (final String scope : new String[] {ACCOUNT, PERSON_USERS, SERVICE_USERS}) {
+                final String attached = account.attachment(prefix + ACCOUNT
+                    + (ACCOUNT.equals(scope) ? "" : "|" + scope));
+                if (attached != null) {
+                    if (!scopes.containsKey(attached)) {
+                        scopes.put(attached, new ArrayList<String>());
+                    }
+                    scopes.get(attached).add(scope);
+                }
+            }
+            for (final Map.Entry<String, List<String>> held : scopes.entrySet()) {
+                addHeldPolicyRow(rows, kind, held.getKey(), ACCOUNT,
+                    targetScopes(held.getValue().toArray(new String[0])));
+            }
+        }
+        final ResultSet listing = new ResultSet(showColumns(kind, true), rows);
+        final FrostlakeParser.StringTextContext like = ctx.LIKE() != null ? ctx.stringText(0) : null;
+        return paged(ctx, kind, filter(listing, like == null ? null : ParseTreeText.stringValue(like)));
+    }
+
+    /** Adds the listing row of a held policy, named as attachments record it, when the policy is still there. */
+    private void addHeldPolicyRow(final List<Row> rows, final SecurityObjectKind kind, final String attached,
+                                  final String setOn, final String options) {
+        final QualifiedName name = QualifiedName.parse(attached);
+        final Schema schema;
+        try {
+            schema = catalog.databaseExact(name.part(0)).schemaExact(name.part(1));
+        } catch (final RuntimeException gone) {
+            // The policy's database or schema is no longer there: it is in effect nowhere.
+            return;
+        }
+        final SecurityObject policy = schema.getSecurityObjects().get(kind, name.last());
+        if (policy != null) {
+            rows.add(showRow(kind, schema, policy, setOn, options));
+        }
+    }
+
+    /** The options cell of a policy the account holds: the scopes it is set for, as JSON. */
+    private static String targetScopes(final String... scopes) {
+        final StringBuilder json = new StringBuilder("{\"target_scopes\":[");
+        for (int i = 0; i < scopes.length; i++) {
+            json.append(i == 0 ? "" : ",").append('"').append(scopes[i]).append('"');
+        }
+        return json.append("]}").toString();
     }
 
     /**

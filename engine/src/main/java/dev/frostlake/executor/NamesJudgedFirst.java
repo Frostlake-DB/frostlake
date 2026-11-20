@@ -139,10 +139,11 @@ final class NamesJudgedFirst {
         final boolean plainTable = comment.TABLE() != null && comment.DYNAMIC() == null;
         final boolean plainView = comment.VIEW() != null && comment.MATERIALIZED() == null;
         if (comment.if_exists() != null || comment.COLUMN() != null || !plainTable && !plainView
-                || comment.qualifiedName() == null) {
+                || comment.containerName() == null || !isPlain(comment.containerName().objectName())) {
             return false;
         }
-        final String named = String.join(".", ParseTreeText.qualifiedNameParts(comment.qualifiedName()));
+        final String named = String.join(".",
+            ParseTreeText.qualifiedNameParts(comment.containerName().objectName().qualifiedName()));
         return plainTable ? !holdsTable(named, catalog) : !holdsView(named, catalog);
     }
 
@@ -150,10 +151,10 @@ final class NamesJudgedFirst {
     private static boolean restoresNothing(final FrostlakeParser.UndropStatementContext undrop,
                                            final Catalog catalog) {
         if (undrop.TABLE() == null || undrop.ICEBERG() != null || undrop.DYNAMIC() != null
-                || undrop.qualifiedName() == null) {
+                || undrop.undroppedName() == null || !isPlain(undrop.undroppedName().objectName())) {
             return false;
         }
-        final String[] parts = ParseTreeText.qualifiedNameParts(undrop.qualifiedName());
+        final String[] parts = ParseTreeText.qualifiedNameParts(undrop.undroppedName().objectName().qualifiedName());
         if (holdsTable(String.join(".", parts), catalog)) {
             return true;
         }

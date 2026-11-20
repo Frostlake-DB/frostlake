@@ -39,8 +39,8 @@ import java.util.List;
  *
  * <p>{@code nulls_first} governs the VARIANT {@code undefined} elements ONLY. A JSON null is a VALUE and
  * is sorted by the comparator, which ranks it above every other variant type — so it lands last ascending
- * and first descending whatever the flag says. Two numeric elements are compared by value; otherwise
- * elements are compared lexically.
+ * and first descending whatever the flag says. Elements order as VARIANT values do under ORDER BY: by
+ * type first (BOOLEAN, NUMBER, STRING, OBJECT, ARRAY, JSON null), then by value within the type.
  */
 public class ArraySort extends BuiltInFunction {
     public ArraySort() { super("ARRAY_SORT", ArrayType.ARRAY); }

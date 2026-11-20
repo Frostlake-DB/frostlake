@@ -230,7 +230,7 @@ public final class ScriptingStatementPlacement {
                 || type == FrostlakeLexer.FOR || type == FrostlakeLexer.OPEN || type == FrostlakeLexer.FETCH
                 || type == FrostlakeLexer.CLOSE || type == FrostlakeLexer.AWAIT || type == FrostlakeLexer.ASYNC
                 || type == FrostlakeLexer.BREAK || type == FrostlakeLexer.CONTINUE || type == FrostlakeLexer.RETURN
-                || type == FrostlakeLexer.RAISE;
+                || type == FrostlakeLexer.RAISE || type == FrostlakeLexer.ITERATE;
             return scripting ? token : null;
         }
         return null;

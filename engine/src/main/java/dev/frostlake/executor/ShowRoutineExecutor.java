@@ -432,6 +432,28 @@ final class ShowRoutineExecutor {
         return new ResultSet(functionColumns(), rows);
     }
 
+    /**
+     * SHOW EXTERNAL FUNCTIONS: the rows SHOW USER FUNCTIONS lists of the schemas in scope, its columns too, kept to
+     * the external functions (live-verified column for column; the rows documented).
+     *
+     * @param schemas the schemas the listing's scope reaches
+     * @return the external functions' rows
+     */
+    public ResultSet showExternalFunctions(final List<Schema> schemas) {
+        final int externalColumn = 16;
+        final List<Row> rows = new ArrayList<>();
+        for (final Schema schema : schemas) {
+            final List<Row> functions = new ArrayList<>();
+            appendUserFunctionRows(schema, schema.getDatabaseName(), functions);
+            for (final Row row : functions) {
+                if ("Y".equals(row.getValue(externalColumn))) {
+                    rows.add(row);
+                }
+            }
+        }
+        return new ResultSet(functionColumns(), rows);
+    }
+
     private void appendUserFunctionRows(final Schema schema, final String dbName, final List<Row> rows) {
         final List<Function> functions = schema.getFunctions();
         Collections.sort(functions, new Comparator<Function>() {
@@ -532,7 +554,7 @@ final class ShowRoutineExecutor {
         return new Row(Arrays.asList(
             null,                    // created_on
             name,                    // name
-            null,                    // schema_name (built-ins are not in a user schema)
+            "",                      // schema_name: empty, built-ins are in no schema (live-verified)
             "Y",                     // is_builtin
             isAggregate ? "Y" : "N", // is_aggregate
             "N",                     // is_ansi
@@ -540,12 +562,12 @@ final class ShowRoutineExecutor {
             maxArgs,                 // max_num_arguments (-1 when variadic)
             args,                    // arguments
             null,                    // description
-            null,                    // catalog_name
+            "",                      // catalog_name: empty, as schema_name
             functionRegistry.hasTableFunction(name) ? "Y" : "N", // is_table_function
             "N",                     // valid_for_clustering
-            "N",                     // is_secure
-            null,                    // secrets
-            null,                    // external_access_integrations
+            null,                    // is_secure: NULL on every built-in (live-verified)
+            "",                      // secrets
+            "",                      // external_access_integrations
             "N",                     // is_external_function
             "SQL",                   // language
             "N",                     // is_memoizable

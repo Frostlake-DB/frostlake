@@ -97,6 +97,10 @@ public class Transaction {
     private volatile String waitingFor;
     /** Whether the lock that statement waits for is a stream's. */
     private volatile boolean waitingForStream;
+    /** The transaction holding the lock a statement of this transaction waits for, or null (see TableLockWait). */
+    private volatile Transaction waitingOn;
+    /** When that statement began waiting ({@link System#nanoTime()}). */
+    private volatile long waitingOnSince;
 
     /** The query ID of the statement that waits, which SHOW LOCKS and its refusal name. */
     private volatile String waitingQueryId;
@@ -466,8 +470,31 @@ public class Transaction {
         waitingFor = resource.toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * The transaction a statement of this transaction waits for, and since when: an edge of the graph a deadlock is
+     * found in (see TableLockWait).
+     *
+     * @param holder the transaction holding the lock
+     * @param since  when the wait began ({@link System#nanoTime()})
+     */
+    void waitOn(final Transaction holder, final long since) {
+        waitingOnSince = since;
+        waitingOn = holder;
+    }
+
+    /** The transaction holding the lock a statement of this transaction waits for, or null when none waits. */
+    Transaction getWaitingOn() {
+        return waitingOn;
+    }
+
+    /** When the statement of this transaction that waits began waiting ({@link System#nanoTime()}). */
+    long getWaitingOnSince() {
+        return waitingOnSince;
+    }
+
     /** The waiting statement took its lock or gave up. */
     public void endWaiting() {
+        waitingOn = null;
         waitingFor = null;
         waitingQueryId = null;
         waitingForStream = false;

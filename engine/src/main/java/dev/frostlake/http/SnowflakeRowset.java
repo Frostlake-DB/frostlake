@@ -252,9 +252,7 @@ final class SnowflakeRowset {
         node.put("type", kind);
         // Whether the column can hold NULL as the account's metadata tells it: worked out from the projection's
         // expression where the engine did, a NOT NULL column read as it is staying NOT NULL.
-        final Boolean reported = column.getReportedNullable();
-        node.put("nullable", reported != null ? reported.booleanValue()
-            : !column.isNullabilityKnown() || column.isNullable());
+        node.put("nullable", column.isDescribedNullable());
         final DataType type = column.getDataType();
         if ("fixed".equals(kind)) {
             node.put("precision", ((NumericType) type).getPrecision());

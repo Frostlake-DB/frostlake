@@ -1092,10 +1092,17 @@ public final class SetOperations {
             scanValueClasses(right, hasString, hasBoolean, hasDateTime, hasDate, hasTime,
                     hasNumber, hasBigDecimal, mixedNumberClasses, numberClass);
         }
+        final boolean[] hasVariant = new boolean[width];
+        scanVariants(left, hasVariant);
+        if (right != null) {
+            scanVariants(right, hasVariant);
+        }
 
         final SetOpColumnCoercion[] coercions = new SetOpColumnCoercion[width];
         for (int i = 0; i < width; i++) {
-            if (hasDateTime[i] && (hasString[i] || hasDate[i])) {
+            if (hasVariant[i]) {
+                coercions[i] = SetOpColumnCoercion.VARIANT;
+            } else if (hasDateTime[i] && (hasString[i] || hasDate[i])) {
                 coercions[i] = SetOpColumnCoercion.TIMESTAMP;
             } else if (hasDate[i] && hasString[i]) {
                 coercions[i] = SetOpColumnCoercion.DATE;
@@ -1110,6 +1117,18 @@ public final class SetOperations {
             }
         }
         return coercions;
+    }
+
+    /** Marks the columns where any row holds a semi-structured value. */
+    private static void scanVariants(final List<Row> rows, final boolean[] hasVariant) {
+        for (final Row row : rows) {
+            final List<Object> values = row.getValues();
+            for (int i = 0; i < values.size() && i < hasVariant.length; i++) {
+                if (values.get(i) instanceof VariantValue) {
+                    hasVariant[i] = true;
+                }
+            }
+        }
     }
 
     private static void scanValueClasses(final List<Row> rows, final boolean[] hasString,
@@ -1159,13 +1178,14 @@ public final class SetOperations {
      * (live: {@code SELECT 'zz' = TRUE} is FALSE).
      */
     private static Object normalizeValue(final SetOpColumnCoercion coercion, final Object value) {
-        if (value instanceof VariantValue) {
-            // Set-operation keys compare semi-structured values by their JSON text, so a typed value
-            // dedups/intersects against a text-carried equal one.
-            return ((VariantValue) value).text();
-        }
         if (value == null) {
             return null;
+        }
+        if (value instanceof VariantValue || coercion == SetOpColumnCoercion.VARIANT) {
+            // A semi-structured value keys as = compares it — a number by its value whatever its notation or
+            // carrier, so 1, 1.0, 1e0 and TO_VARIANT(1::FLOAT) are one row, an object whatever its key order —
+            // and a number a VARIANT column carries unwrapped keys alike (live-verified).
+            return ValueComparisons.canonicalGroupKeyValue(value);
         }
         if (coercion == SetOpColumnCoercion.NONE) {
             // A column of doubles keeps its values as its keys, with one adjustment: the two zeros are

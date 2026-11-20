@@ -187,35 +187,14 @@ public final class ArrayFunctionHelper {
             return new TypedScalarNode(((BinaryValue) value).toHex(), value);
         }
         final String s = value.toString();
-        // In this engine's value model a VARIANT JSON null IS the text "null" (path extraction of a
-        // present-but-null field yields it, distinct from SQL NULL for an absent field). Embedding it
-        // back into an object/array restores a real JSON null — so OBJECT_CONSTRUCT keeps the pair with
-        // a null value, exactly as Snowflake keeps a VARIANT-null pair while dropping SQL-NULL ones.
-        if ("null".equals(s)) {
-            return mapper.getNodeFactory().nullNode();
-        }
+        // A VARCHAR 'null' is a STRING member, never a JSON null: live ARRAY_CONSTRUCT('null') is ["null"]
+        // and the member's TYPEOF is VARCHAR. A JSON null arrives as a typed VariantValue, handled above.
         // A VARCHAR stays a STRING member however much its text looks like JSON. Live:
         // ARRAY_CONSTRUCT('[1,2]') is ["[1,2]"], OBJECT_CONSTRUCT('a','[1,2]') is {"a":"[1,2]"}, and
         // TYPEOF of either member is VARCHAR — the same rule PARSE_JSON follows for its argument. A
         // value that really IS semi-structured arrives as a VariantValue and was handled above; text
-        // was being re-read as structure here, which made ARRAY_CONSTRUCT('[1,2]')[0] an ARRAY.
-        final String trimmed = s.trim();
-        // A path access over {"v": "[]"} or {"v": "null"} yields the QUOTED carrier form ("\"[]\"") so
-        // a string whose content merely LOOKS structural — or IS the JSON-null marker text — stays
-        // distinguishable from a real array/object/null (see JsonPathExtractor). Embedding the carrier
-        // must restore the plain STRING member — without this it double-encoded, e.g. OBJECT_AGG stored
-        // {"plans":"\"[]\""} instead of {"plans":"[]"}.
-        if (trimmed.startsWith("\"")) {
-            try {
-                final JsonNode parsed = mapper.readTree(trimmed);
-                if (parsed.isTextual()) {
-                    final String content = parsed.asText().trim();
-                    if (content.startsWith("{") || content.startsWith("[") || "null".equals(content)) {
-                        return parsed;
-                    }
-                }
-            } catch (final Exception ignored) {}
-        }
+        // was being re-read as structure here, which made ARRAY_CONSTRUCT('[1,2]')[0] an ARRAY. A text in
+        // JSON quotes stays the string it spells, quotes included: ARRAY_CONSTRUCT('"[1]"') is ["\"[1]\""].
         return mapper.getNodeFactory().textNode(s);
     }
 
@@ -249,25 +228,14 @@ public final class ArrayFunctionHelper {
     }
 
     /**
-     * Ordering comparison between two JsonNodes: numeric-aware (two numeric nodes compare by value),
-     * otherwise a lexical comparison of their textual form. Used by ARRAY_SORT / ARRAY_MIN / ARRAY_MAX.
+     * Ordering comparison between two array elements, used by ARRAY_SORT / ARRAY_MIN / ARRAY_MAX: the
+     * VARIANT order ORDER BY uses (see {@link VariantOrder}). The type decides first — BOOLEAN &lt; NUMBER
+     * &lt; STRING &lt; OBJECT &lt; ARRAY &lt; JSON null — then the value within the type. Live-verified:
+     * ARRAY_SORT(['a', TRUE, 5, '!']) is [true,5,"!","a"], ARRAY_SORT([TRUE, null, 1]) is [true,1,null],
+     * ARRAY_MAX([10, TRUE]) is 10 and ARRAY_MAX([{"a":1}, [1]]) is [1].
      */
     public static int compareNodes(final JsonNode a, final JsonNode b) {
-        // A JSON null is a VALUE that ranks ABOVE every other variant type — live-verified:
-        // ARRAY_SORT(['z', PARSE_JSON('null')]) is ["z",null], ARRAY_SORT([TRUE, null, 1]) is [true,1,null],
-        // ARRAY_SORT([{"a":1}, 1, null]) is [1,{"a":1},null] and ARRAY_MAX(PARSE_JSON('[1,null,2]')) is the
-        // JSON null. A lexical fallback ranked it by the text "null", which put it before 'z'.
-        final boolean aNull = a.isNull();
-        final boolean bNull = b.isNull();
-        if (aNull || bNull) {
-            return aNull && bNull ? 0 : aNull ? 1 : -1;
-        }
-        if (a.isNumber() && b.isNumber()) {
-            return a.decimalValue().compareTo(b.decimalValue());
-        }
-        final String sa = a.isTextual() ? a.asText() : a.toString();
-        final String sb = b.isTextual() ? b.asText() : b.toString();
-        return sa.compareTo(sb);
+        return VariantOrder.compare(a, b);
     }
 
     /**
@@ -300,7 +268,9 @@ public final class ArrayFunctionHelper {
         if (UuidTextNode.holds(node)) return VariantValue.ofNode(node);
         // So does a DECFLOAT: TYPEOF(ARRAY_CONSTRUCT(CAST(1.5 AS DECFLOAT))[0]) is DECFLOAT (live-verified).
         if (DecfloatTextNode.holds(node)) return VariantValue.ofNode(node);
-        if (node.isTextual()) return node.asText();
+        // A string that could be mistaken for a JSON null or JSON structure stays a VARIANT string —
+        // live TYPEOF(GET(PARSE_JSON('{"a":"null"}'),'a')) is VARCHAR.
+        if (node.isTextual()) return VariantValue.ofStringMember(node);
         if (node.isBoolean()) return node.asBoolean();
         if (node.isLong() || node.isInt()) return node.asLong();
         // A whole DECIMAL out of a scaled NUMBER stays a VARIANT — see JsonPathExtractor.

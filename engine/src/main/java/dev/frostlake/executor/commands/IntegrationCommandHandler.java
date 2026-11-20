@@ -354,7 +354,8 @@ public final class IntegrationCommandHandler {
 
     /**
      * DESCRIBE [kind] INTEGRATION: one row per property — ENABLED, the kind's own properties as written, and the
-     * comment — with lists comma-joined, nested property lists as JSON objects and secrets masked.
+     * comment — with lists comma-joined, secrets masked, and a nested property list as its members
+     * ({@link IntegrationNestedDescription}).
      */
     public ResultSet describe(final FrostlakeParser.IntegrationKindContext kindContext,
                               final FrostlakeParser.IdentifierContext nameContext) {
@@ -419,6 +420,11 @@ public final class IntegrationCommandHandler {
                 final String provider = String.valueOf(integration.text("API_PROVIDER"));
                 if ("PYPI".equals(provider)) {
                     return new String[][] {enabled, {"API_PROVIDER", "String", ""}};
+                }
+                if ("EXTERNAL_MCP".equals(provider)) {
+                    return new String[][] {enabled, {"API_PROVIDER", "String", ""},
+                        {"API_USER_AUTHENTICATION", "Object", ""}, {"API_ALLOWED_PREFIXES", "List", "[]"},
+                        {"API_BLOCKED_PREFIXES", "List", "[]"}};
                 }
                 if ("GIT_HTTPS_API".equals(provider)) {
                     return new String[][] {enabled, {"USE_PRIVATELINK_ENDPOINT", "Boolean", "false"},
@@ -603,6 +609,17 @@ public final class IntegrationCommandHandler {
                 return "false";
             }
             return "TLS_TRUSTED_CERTIFICATES".equals(key) ? "[]" : "";
+        }
+        if (value.getKind() == PropertyValueKind.PROPERTIES) {
+            if (integration.getKind() == IntegrationKind.CATALOG && "REST_CONFIG".equals(key)) {
+                return IntegrationNestedDescription.restConfig(integration, value);
+            }
+            if (integration.getKind() == IntegrationKind.CATALOG && "REST_AUTHENTICATION".equals(key)) {
+                return IntegrationNestedDescription.restAuthentication(integration, value, accountRegion());
+            }
+            if (integration.getKind() == IntegrationKind.API && "API_USER_AUTHENTICATION".equals(key)) {
+                return IntegrationNestedDescription.userAuthentication(value);
+            }
         }
         if (value.getKind() == PropertyValueKind.PAIRS) {
             final StringBuilder out = new StringBuilder("{");

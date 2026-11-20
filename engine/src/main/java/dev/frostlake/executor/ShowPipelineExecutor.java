@@ -168,7 +168,7 @@ final class ShowPipelineExecutor {
                 baseTablesText(stream, source, tableGone),
                 "DELTA",
                 stale ? "true" : "false",
-                stream.getStreamType() == StreamType.APPEND_ONLY ? "APPEND_ONLY" : "DEFAULT",
+                stream.getStreamType() == StreamType.STANDARD ? "DEFAULT" : stream.getStreamType().name(),
                 stale ? null : ShowResultHelpers.createdOn(staleAfter(stream, home)),
                 "N/A",
                 ShowResultHelpers.OWNER_ROLE_TYPE
@@ -482,10 +482,16 @@ final class ShowPipelineExecutor {
             || StreamSources.missingBaseOf(catalog, stream) != null;
     }
 
-    /** Live capitalises the source kind as words (Table, View, Stage, Dynamic Table), not as the enum constant. */
+    /**
+     * Live capitalises the source kind as words (Table, View, Stage, Dynamic Table, External Table), not as the enum
+     * constant. An insert-only stream is an external table's, the one kind of table that takes one.
+     */
     private String sourceTypeText(final Stream stream) {
         if (stream.getSourceType() == null) {
             return null;
+        }
+        if (stream.getStreamType() == StreamType.INSERT_ONLY) {
+            return "External Table";
         }
         if (stream.getSourceType() == StreamSourceType.DYNAMIC_TABLE) {
             return "Dynamic Table";
@@ -968,16 +974,16 @@ final class ShowPipelineExecutor {
     }
 
     /**
-     * The refresh_mode CELL reports the RESOLVED mode: a dynamic table configured AUTO runs (and
-     * reads back) INCREMENTAL, or FULL where its query holds a construct an incremental refresh does
-     * not follow (see DynamicTableRefreshReason), live-verified, while configured_refresh_mode keeps
-     * the declared word.
+     * The refresh_mode CELL reports the RESOLVED mode: a dynamic table configured AUTO reads back
+     * ADAPTIVE, or FULL where its query holds a construct an incremental refresh does not follow (see
+     * DynamicTableRefreshReason), live-verified, while configured_refresh_mode keeps the declared word.
+     * Its refreshes are INCREMENTAL in the refresh history all the same.
      */
     private static String resolvedRefreshMode(final DynamicTable dt) {
         if (dt.getRefreshMode() != RefreshMode.AUTO) {
             return dt.getRefreshMode().name();
         }
-        return dt.getFullRefreshReason() != null ? RefreshMode.FULL.name() : RefreshMode.INCREMENTAL.name();
+        return dt.getFullRefreshReason() != null ? RefreshMode.FULL.name() : "ADAPTIVE";
     }
 
     /** SHOW DYNAMIC TABLES in live's column order — the definition column is named {@code text}. */

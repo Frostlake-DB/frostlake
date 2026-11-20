@@ -19,6 +19,7 @@ package dev.frostlake.metastore;
 import dev.frostlake.metastore.model.FutureGrant;
 import dev.frostlake.metastore.model.Role;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -46,6 +47,18 @@ public final class CreationGrants {
         this.holders = holders;
         this.covering = covering;
         this.owner = FutureGrants.ownerAmong(catalog, holders, covering);
+    }
+
+    /**
+     * The same object created with COPY GRANTS: it inherits none of the future grants defined for its kind in the
+     * schema or database, so the role creating it owns it, and only the privileges copied onto it are its own
+     * (documented). The name is still taken: a dropped object's privileges are not the new object's.
+     *
+     * @return the grants of the new object, without the future grants
+     */
+    public CreationGrants withoutFutureGrants() {
+        return new CreationGrants(catalog, objectKind, qualified, takesName, new ArrayList<Role>(),
+            new ArrayList<FutureGrant>());
     }
 
     /**

@@ -48,7 +48,7 @@ public final class JsonRecordFault {
      */
     public static JsonRecordFault first(final String text, final boolean stripOuterArray,
                                         final boolean duplicatesAllowed) {
-        return JsonFaultReader.recordFaultOf(text, stripOuterArray, duplicatesAllowed);
+        return JsonFaultReader.recordsOf(text, stripOuterArray, duplicatesAllowed).fault();
     }
 
     /**
@@ -85,5 +85,25 @@ public final class JsonRecordFault {
     /** @return the fault, as PARSE_JSON words it without its place */
     public String sentence() {
         return sentence;
+    }
+
+    /** @return the file's line the fault stands on, the first being 1; -1 when the fault has no place */
+    public int line() {
+        return line;
+    }
+
+    /** @return the fault's character within its line, counted in bytes from 1; -1 when it has no place */
+    public int character() {
+        return character;
+    }
+
+    /** @return the row being read, the first being 0 */
+    public int row() {
+        return row;
+    }
+
+    /** @return the line the row being read starts on */
+    public int rowLine() {
+        return rowLine;
     }
 }

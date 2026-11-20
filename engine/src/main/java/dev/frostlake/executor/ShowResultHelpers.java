@@ -22,6 +22,7 @@ import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DefaultValueExpression;
 import dev.frostlake.metastore.model.Schema;
+import dev.frostlake.metastore.model.StringLiteralDefault;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
@@ -184,6 +185,9 @@ public final class ShowResultHelpers {
         }
         if (def instanceof DefaultValueExpression) {
             return ((DefaultValueExpression) def).getToldText();
+        }
+        if (def instanceof StringLiteralDefault) {
+            return ((StringLiteralDefault) def).toSql();
         }
         if (def instanceof Boolean) {
             // A boolean default is told in capitals, TRUE (live-verified).

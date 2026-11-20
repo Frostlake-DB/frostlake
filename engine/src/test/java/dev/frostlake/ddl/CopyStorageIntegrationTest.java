@@ -103,6 +103,34 @@ public class CopyStorageIntegrationTest extends BaseDatabaseTest {
     }
 
     @Test
+    public void aStageListsTheIntegrationItWasGiven() {
+        if (isLiveSnowflake()) {
+            // An integration is the account's to create.
+            return;
+        }
+        engine.execute("CREATE OR REPLACE STORAGE INTEGRATION si_gcs1 TYPE = EXTERNAL_STAGE STORAGE_PROVIDER = 'GCS'"
+            + " ENABLED = TRUE STORAGE_ALLOWED_LOCATIONS = ('gcs://bucket/path/')");
+        engine.execute("CREATE OR REPLACE STORAGE INTEGRATION si_gcs2 TYPE = EXTERNAL_STAGE STORAGE_PROVIDER = 'GCS'"
+            + " ENABLED = TRUE STORAGE_ALLOWED_LOCATIONS = ('gcs://bucket/path/')");
+        try {
+            engine.execute("CREATE OR REPLACE STAGE st_gcs URL = 'gcs://bucket/path/' STORAGE_INTEGRATION = si_gcs1");
+            assertEquals("SI_GCS1", integrationOf("ST_GCS"));
+            engine.execute("ALTER STAGE st_gcs SET STORAGE_INTEGRATION = si_gcs2");
+            assertEquals("SI_GCS2", integrationOf("ST_GCS"));
+            assertEquals(null, integrationOf("ST_DEFAULT"));
+        } finally {
+            engine.execute("DROP STAGE IF EXISTS st_gcs");
+            engine.execute("DROP INTEGRATION IF EXISTS si_gcs1");
+            engine.execute("DROP INTEGRATION IF EXISTS si_gcs2");
+        }
+    }
+
+    private Object integrationOf(final String stage) {
+        return engine.executeQuery("SHOW STAGES LIKE '" + stage + "' ->> SELECT \"storage_integration\" FROM $1")
+            .getRows().get(0).getValue(0);
+    }
+
+    @Test
     public void anIntegrationOfAnotherKindIsNoStorageIntegration() {
         if (isLiveSnowflake()) {
             // An integration is the account's to create; the sentence was read off one the account already holds.

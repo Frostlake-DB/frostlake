@@ -818,7 +818,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
      */
     private static final Set<String> STAGE_OPTION_NAMES = Set.of(
         "CREDENTIALS", "STORAGE_INTEGRATION", "DIRECTORY", "COPY_OPTIONS",
-        "AWS_ROLE", "AWS_EXTERNAL_ID", "SNOWFLAKE_IAM_USER", "ENCRYPTION");
+        "AWS_ROLE", "AWS_EXTERNAL_ID", "SNOWFLAKE_IAM_USER", "ENCRYPTION", StageEndpoint.PROPERTY);
 
     /** Whether a word names a stage property a CREATE STAGE or an ALTER STAGE … SET takes by a plain name. */
     static boolean isStageOption(final String name) {
@@ -932,6 +932,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             boolean sawFileFormat = false;
             boolean sawCloudAccessOption = false;
             Integration storageIntegration = null;
+            String endpoint = null;
             boolean credentials = false;
             FrostlakeParser.ParenOptionListContext credentialsGroup = null;
             StageDirectoryOptions directory = null;
@@ -1015,6 +1016,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
                                 : ParseTreeText.getOriginalText(option.copyOptionValue());
                             continue;
                         }
+                        if (StageEndpoint.PROPERTY.equals(key)) {
+                            // Judged once the location, which may be written after it, is known (see StageEndpoint).
+                            endpoint = StageEndpoint.read(option.copyOptionValue());
+                            continue;
+                        }
                         if ("STORAGE_INTEGRATION".equals(key)) {
                             // The integration is looked up before the stage's own shape is judged.
                             storageIntegration = StorageIntegrationReference.require(catalog,
@@ -1054,6 +1060,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
                     + " including accessing public stages, has been forbidden for GCS stages. See your account"
                     + " administrator for details."));
             }
+            StageEndpoint.require(endpoint, url);
             refuseLocalUrlUnlessEnabled(url);
             // A replacement drops the stage it replaces once the new one is judged whole, so a refused statement
             // leaves that stage as it was (live-verified).
@@ -1082,6 +1089,8 @@ public class CreateInfrastructureHandler implements CommandHandler {
             created.getCopyOptions().putAll(copyOptions);
             created.setEncryptionType(judgedEncryption == null ? null : judgedEncryption.type());
             created.setCredentials(credentials);
+            created.setEndpoint(endpoint);
+            created.setStorageIntegration(storageIntegration == null ? null : storageIntegration.getName());
             created.setEncryptionKey(judgedEncryption != null && judgedEncryption.key());
             if (directory != null) {
                 directory.applyTo(created);
@@ -1407,6 +1416,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
         // full path (live-verified).
         final FileFormat fileFormat = catalog.getFileFormatExact(name);
         if (fileFormat == null) {
+            // The options' names and values are judged before the format is looked for, IF EXISTS or not
+            // (live-verified).
+            if (ctx.fileFormatAction().SET() != null) {
+                FileFormatClause.judgeWithoutFormat(ctx.fileFormatAction().copyFormatOption());
+            }
             if (ctx.if_exists() != null) {
                 return null;
             }

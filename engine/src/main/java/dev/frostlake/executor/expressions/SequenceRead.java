@@ -26,12 +26,13 @@ import java.math.BigDecimal;
  * declares NUMBER(19,0), which a result column, a CTAS and a view over it carry, and it is tagged [SB8], the
  * signed 64-bit integer a sequence counts in, though nineteen digits alone would need sixteen bytes. That
  * interval survives being picked and negated but nothing computed from it: {@code -s.NEXTVAL} and
- * {@code IFF(TRUE, s.NEXTVAL, 1)} are [SB8], {@code s.NEXTVAL + 0} is NUMBER(20,0)[SB16] (live-verified).
+ * {@code IFF(TRUE, s.NEXTVAL, 1)} are [SB8], {@code s.NEXTVAL + 0} is NUMBER(20,0)[SB16] (live-verified). The NEXTVAL
+ * column of {@code TABLE(GETNEXTVAL(s))} is declared and tagged alike.
  */
-final class SequenceRead {
+public final class SequenceRead {
 
     /** The declared type of a sequence read. */
-    static final NumericType TYPE = new NumericType("NUMBER", 19, 0);
+    public static final NumericType TYPE = new NumericType("NUMBER", 19, 0);
 
     /** Every value a sequence may hand out, symmetric so a negation stays within the same width. */
     private static final ValueRange RANGE = ValueRange.between(BigDecimal.valueOf(-Long.MAX_VALUE),
@@ -45,7 +46,7 @@ final class SequenceRead {
      *
      * @return the 64-bit interval, opaque to conditions and to computation
      */
-    static ValueRange range() {
+    public static ValueRange range() {
         return RANGE;
     }
 }

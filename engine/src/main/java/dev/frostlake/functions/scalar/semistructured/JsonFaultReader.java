@@ -17,7 +17,9 @@
 package dev.frostlake.functions.scalar.semistructured;
 
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
@@ -51,11 +53,14 @@ import java.util.Set;
  *   more than one document in the input
  * </pre>
  *
- * <p>A STAGED FILE'S records are read by the same vocabulary ({@link #recordFaultOf}), placed by line and
+ * <p>A STAGED FILE'S records are read by the same vocabulary ({@link #recordsOf}), placed by line and
  * character, with three sentences of their own: {@code not a number: '.'} for a point without a digit inside a
- * record, and after a stripped outer array {@code misplaced [} for another array and {@code garbage after outer ]}
- * for anything else. A comma may part two records, the records of a stripped outer array need none, and a keyword
- * reads in any case.
+ * record, and after a stripped outer array {@code misplaced [} or {@code misplaced &#123;} for another array or
+ * object, {@code misplaced comma} for a comma and {@code garbage after outer ]} for anything else. Records follow
+ * one another across lines or on one line, a comma may part two of them, and a comma where a record should start
+ * is a record of its own, a JSON null. Under STRIP_OUTER_ARRAY every top-level array is stripped; its records need
+ * no comma between them, an element a comma leaves empty is a null record, and the file may end before its
+ * closing bracket. A keyword reads in any case, and a string may be single-quoted.
  *
  * <p>THE POSITION IS 1-BASED and falls in one of two places. A fault about a TOKEN that was read
  * reports the index just PAST it — a five-character keyword is pos 6, and a document that simply ran
@@ -89,6 +94,8 @@ final class JsonFaultReader {
     /** The records read whole, and the line the next one starts on. */
     private int records;
     private int recordLine = 1;
+    /** Each record's start and end in the text, or null for a record no value fills; null unless records are read. */
+    private List<int[]> spans;
 
     private JsonFaultReader(final String document) {
         this.text = document;
@@ -145,40 +152,62 @@ final class JsonFaultReader {
     }
 
     /**
-     * The first fault among the records of a staged file's text: every top-level value is a record, and under
-     * STRIP_OUTER_ARRAY every element of a top-level array is.
+     * The records of a staged file's text and the first fault among them: every top-level value is a record, and
+     * under STRIP_OUTER_ARRAY every element of a top-level array is.
      *
      * @param document          the file's text
      * @param stripOuterArray   whether a top-level array's elements are records of their own
      * @param duplicatesAllowed whether an object may name a key twice
-     * @return the fault and where it stands, or null when this reader finds none
+     * @return the records read before any fault, and the fault where it stands
      */
-    static JsonRecordFault recordFaultOf(final String document, final boolean stripOuterArray,
-                                         final boolean duplicatesAllowed) {
+    static JsonFileRecords recordsOf(final String document, final boolean stripOuterArray,
+                                     final boolean duplicatesAllowed) {
         final JsonFaultReader reader = new JsonFaultReader(document);
         reader.duplicatesAllowed = duplicatesAllowed;
         reader.readsRecords = true;
-        reader.skipWhitespace();
-        final boolean stripped = stripOuterArray && !reader.atEnd() && reader.text.charAt(reader.at) == '[';
-        reader.outerArrayStripped = stripped;
-        while (!reader.atEnd()) {
-            final String fault = reader.value();
+        reader.spans = new ArrayList<int[]>();
+        final JsonRecordFault fault = reader.readRecords(stripOuterArray);
+        return new JsonFileRecords(document, reader.spans, fault);
+    }
+
+    /** The file's records, each span kept; the first fault, or null when this reader finds none. */
+    private JsonRecordFault readRecords(final boolean stripOuterArray) {
+        skipWhitespace();
+        while (!atEnd()) {
+            final char first = text.charAt(at);
+            if (first == ',') {
+                // A comma where a record should start parts an empty record, which is a JSON null.
+                at++;
+                spans.add(null);
+                recordRead();
+                skipWhitespace();
+                continue;
+            }
+            final boolean stripped = stripOuterArray && first == '[';
+            outerArrayStripped = stripped;
+            final int start = at;
+            final String fault = value();
             if (fault != null) {
-                return reader.recordFault(fault);
+                return recordFault(fault);
             }
             if (!stripped) {
-                reader.recordRead();
+                spans.add(new int[] {start, at});
+                recordRead();
             }
-            reader.skipWhitespace();
-            if (stripped && !reader.atEnd()) {
-                // Nothing follows the outer array: another array is misplaced, anything else garbage.
-                return reader.recordFault(reader.text.charAt(reader.at) == '['
-                    ? reader.misplaced('[') : "garbage after outer ], " + reader.placed(reader.at));
+            skipWhitespace();
+            if (stripped && !atEnd()) {
+                // Nothing follows a stripped outer array.
+                final char after = text.charAt(at);
+                if (after == ',') {
+                    return recordFault("misplaced comma, " + placed(at));
+                }
+                return recordFault(after == '[' || after == '{' || after == ']' || after == '}'
+                    ? misplaced(after) : "garbage after outer ], " + placed(at));
             }
-            if (!reader.atEnd() && reader.text.charAt(reader.at) == ',') {
+            if (!atEnd() && text.charAt(at) == ',') {
                 // A comma may part two records.
-                reader.at++;
-                reader.skipWhitespace();
+                at++;
+                skipWhitespace();
             }
         }
         return null;
@@ -279,7 +308,7 @@ final class JsonFaultReader {
                 depth--;
             }
         }
-        if (c == '"') {
+        if (c == '"' || c == '\'' && readsRecords) {
             return string();
         }
         if (c == '}' || c == ']') {
@@ -321,7 +350,8 @@ final class JsonFaultReader {
                 return "misplaced comma, " + placed(at);
             }
             final int keyStart = at;
-            if (start == '"') {
+            final boolean quoted = start == '"' || start == '\'' && readsRecords;
+            if (quoted) {
                 final String unfinished = string();
                 if (unfinished != null) {
                     return unfinished;
@@ -339,7 +369,7 @@ final class JsonFaultReader {
             } else {
                 return invalidCharacter(start);
             }
-            final String key = start == '"'
+            final String key = quoted
                 ? text.substring(keyStart + 1, at - 1) : text.substring(keyStart, at);
             if (!keys.add(key) && !duplicatesAllowed) {
                 return "duplicate object attribute \"" + key + "\", " + placed(at - 1);
@@ -417,7 +447,8 @@ final class JsonFaultReader {
         at++;
         skipWhitespace();
         if (atEnd()) {
-            return incomplete("array");
+            // A stripped outer array's records may end with the file, its bracket never closed.
+            return elementsAreRecords ? null : incomplete("array");
         }
         if (text.charAt(at) == ']') {
             at++;
@@ -426,7 +457,7 @@ final class JsonFaultReader {
         while (true) {
             skipWhitespace();
             if (atEnd()) {
-                return incomplete("array");
+                return elementsAreRecords ? null : incomplete("array");
             }
             if (text.charAt(at) == '}') {
                 return misplaced('}');
@@ -437,17 +468,23 @@ final class JsonFaultReader {
             }
             if (text.charAt(at) != ',') {
                 // A comma straight away is an element live reads as `undefined`, not a fault.
+                final int start = at;
                 final String element = value();
                 if (element != null) {
                     return element;
                 }
                 if (elementsAreRecords) {
+                    spans.add(new int[] {start, at});
                     recordRead();
                 }
+            } else if (elementsAreRecords) {
+                // The outer array's empty element is a record of its own, a JSON null.
+                spans.add(null);
+                recordRead();
             }
             skipWhitespace();
             if (atEnd()) {
-                return incomplete("array");
+                return elementsAreRecords ? null : incomplete("array");
             }
             final char after = text.charAt(at);
             if (after == ']') {
@@ -461,6 +498,10 @@ final class JsonFaultReader {
                 // The outer array's records need no comma between them.
                 continue;
             }
+            if (after == '{') {
+                // An object straight after an element is misplaced; any other value lacks its comma.
+                return misplaced(after);
+            }
             if (after != ',') {
                 return "missing comma, " + placed(at);
             }
@@ -468,7 +509,9 @@ final class JsonFaultReader {
         }
     }
 
+    /** A string, closed by the quote that opens it. */
     private String string() {
+        final char quote = text.charAt(at);
         at++;
         while (!atEnd()) {
             final char c = text.charAt(at);
@@ -485,7 +528,7 @@ final class JsonFaultReader {
                 return unterminated(text, at);
             }
             at++;
-            if (c == '"') {
+            if (c == quote) {
                 return null;
             }
         }

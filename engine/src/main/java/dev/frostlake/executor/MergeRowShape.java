@@ -24,9 +24,11 @@ import dev.frostlake.storage.Row;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The MERGE evaluation shape for one (source table, target table, aliases) combination: the merged
@@ -36,10 +38,9 @@ import java.util.Map;
  * for every candidate PAIR (a fresh column list, {@code Table} (with its name-index map), and
  * evaluator per pair, up to three cross-product passes deep).
  *
- * <p>Two modes mirror the two former builders exactly, slot for slot: the CONDITION shape (source
- * qualified-only, target qualified + bare) and the VALUE shape (source additionally exposed under a
- * {@code __S__} bare prefix, and optionally re-exposed bare LAST so a WHEN-NOT-MATCHED insert
- * resolves unqualified names to the SOURCE via the name index's last-wins rule).
+ * <p>Both relations are exposed qualified, and a bare name reads the relation that has the column: the target where
+ * both do, unless only the source is in scope (a WHEN NOT MATCHED condition or value), when every source column is
+ * re-exposed bare and LAST so the name index's last-wins rule resolves unqualified names to the SOURCE.
  */
 public final class MergeRowShape {
 
@@ -59,7 +60,7 @@ public final class MergeRowShape {
 
     public static MergeRowShape build(final Table targetTable, final Table sourceTable,
                                       final String targetAlias, final String sourceAlias,
-                                      final boolean valueMode, final boolean unqualifiedFromSource,
+                                      final boolean unqualifiedFromSource,
                                       final FunctionRegistry functionRegistry, final Catalog catalog,
                                       final QueryExecutor executor) {
         final List<TableColumn> mergedCols = new ArrayList<>();
@@ -79,13 +80,6 @@ public final class MergeRowShape {
                 indexes.add(Integer.valueOf(i));
                 if (!srcTableName.equals(sAlias)) {
                     mergedCols.add(new TableColumn(srcTableName + "." + col.getName().toUpperCase(Locale.ROOT),
-                        col.getDataType(), true, null, false, false, false));
-                    fromSource.add(Boolean.TRUE);
-                    indexes.add(Integer.valueOf(i));
-                }
-                if (valueMode) {
-                    // bare source column (lower priority than target bare)
-                    mergedCols.add(new TableColumn("__S__" + col.getName().toUpperCase(Locale.ROOT),
                         col.getDataType(), true, null, false, false, false));
                     fromSource.add(Boolean.TRUE);
                     indexes.add(Integer.valueOf(i));
@@ -115,14 +109,24 @@ public final class MergeRowShape {
             indexes.add(Integer.valueOf(i));
         }
 
-        if (valueMode && unqualifiedFromSource && sourceTable != null) {
-            // WHEN NOT MATCHED insert: re-expose the source columns BARE and LAST, so the name
-            // index's last-wins rule resolves unqualified names to the source for this shape.
+        if (sourceTable != null && (unqualifiedFromSource || sourceTable != targetTable)) {
+            // A bare name reads the one relation that has the column; the statement's compilation has refused one
+            // both have where both are in scope. Where only the source is in scope (a WHEN NOT MATCHED condition
+            // or value) every source column is re-exposed bare and LAST, so the name index's last-wins rule
+            // resolves an unqualified name to the source. A VALUES source shares the target's shape, so its
+            // columns stay behind the target's.
+            final Set<String> targetNames = new HashSet<>();
+            for (final TableColumn col : targetCols) {
+                targetNames.add(col.getName().toUpperCase(Locale.ROOT));
+            }
             final List<TableColumn> sourceCols = sourceTable.getColumns();
             for (int i = 0; i < sourceCols.size(); i++) {
                 final TableColumn col = sourceCols.get(i);
-                mergedCols.add(new TableColumn(col.getName().toUpperCase(Locale.ROOT),
-                    col.getDataType(), true, null, false, false, false));
+                final String bare = col.getName().toUpperCase(Locale.ROOT);
+                if (!unqualifiedFromSource && targetNames.contains(bare)) {
+                    continue;
+                }
+                mergedCols.add(new TableColumn(bare, col.getDataType(), true, null, false, false, false));
                 fromSource.add(Boolean.TRUE);
                 indexes.add(Integer.valueOf(i));
             }
@@ -149,6 +153,8 @@ public final class MergeRowShape {
             relations.add(sourceTable);
         }
         evaluator.setDeclaredTypeBase(targetTable, aliasToTable, relations);
+        // The statement's compilation judged its correlated scalar subqueries over the two relations' statistics.
+        evaluator.setCorrelationsPlanned(true);
         return new MergeRowShape(mergedTable, evaluator, slotFromSource, slotIndex);
     }
 

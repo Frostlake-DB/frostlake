@@ -114,7 +114,7 @@ final class SnowscriptStatementKind {
         }
         if (dml.copyIntoStatement() != null) {
             // A COPY INTO a table loads it as an INSERT does; one into a location unloads.
-            return dml.copyIntoStatement().qualifiedName() != null ? "INSERT" : "UNLOAD";
+            return dml.copyIntoStatement().stageRef() == null && dml.copyIntoStatement().STRING_LITERAL() == null ? "INSERT" : "UNLOAD";
         }
         return UNMEASURED;
     }

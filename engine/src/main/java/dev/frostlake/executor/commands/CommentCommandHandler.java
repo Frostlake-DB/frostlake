@@ -109,6 +109,10 @@ public class CommentCommandHandler implements CommandHandler {
         try {
             final boolean ifExists = ctx.if_exists() != null;
             final String comment = ParseTreeText.stringValue(ctx.stringText());
+            // The commented object's name, an IDENTIFIER() reference resolved to the name it holds; a secret is
+            // refused whatever it names, before the name is read.
+            final String[] named = ctx.SECRET() != null || ctx.containerName() == null ? null
+                : queryExecutor.resolveObjectNameParts(ctx.containerName().objectName());
 
             if (ctx.commentedKind() != null) {
                 new KindComments(catalog, queryExecutor, visitor).comment(ctx.commentedKind(), ctx.qualifiedName(),
@@ -119,8 +123,7 @@ public class CommentCommandHandler implements CommandHandler {
             } else if (ctx.DATABASE() != null) {
                 // COMMENT ON DATABASE; a name of several parts is refused whatever IF EXISTS says (see
                 // DatabaseNames).
-                final String dbName = DatabaseNames.of(
-                    queryExecutor.resolveObjectNameParts(ctx.containerName().objectName()), catalog);
+                final String dbName = DatabaseNames.of(named, catalog);
                 final Database db;
                 try {
                     db = catalog.getDatabase(dbName);
@@ -146,8 +149,8 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.SCHEMA() != null && ctx.COLUMN() == null) {
                 // COMMENT ON SCHEMA
-                final String schemaName = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String schemaName = QualifiedName.join(named);
+                final String[] parts = named;
                 queryExecutor.requirePrivilege(Privilege.MODIFY, "SCHEMA", parts, null);
 
                 final Schema schema;
@@ -181,12 +184,12 @@ public class CommentCommandHandler implements CommandHandler {
             } else if (ctx.DYNAMIC() != null) {
                 // COMMENT ON DYNAMIC TABLE sets the comment cell; the re-printed CREATE text keeps what it was
                 // written with (live-verified).
-                final DynamicTable dynamicTable = dynamicTableOrNull(qualifiedNameParts(ctx.qualifiedName()));
+                final DynamicTable dynamicTable = dynamicTableOrNull(named);
                 if (dynamicTable == null) {
                     if (ifExists) {
                         return null;
                     }
-                    final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                    final String[] parts = named;
                     throw new RuntimeException(SqlCompilationError.doesNotExist("Dynamic table",
                         catalog.requireOwningSchema(QualifiedName.of(parts)).qualifiedName(parts[parts.length - 1])));
                 }
@@ -195,11 +198,11 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.TABLE() != null) {
                 // COMMENT ON TABLE, and COMMENT ON ICEBERG TABLE, which is the same statement (live-verified)
-                final String tableName = visitor.getText(ctx.qualifiedName());
-                InformationSchemaGuard.refuseWrite(catalog, qualifiedNameParts(ctx.qualifiedName()));
+                final String tableName = QualifiedName.join(named);
+                InformationSchemaGuard.refuseWrite(catalog, named);
                 queryExecutor.requireOnRelation(Privilege.MODIFY, tableName);
                 // A dynamic table is a table to COMMENT ON TABLE too (live-verified).
-                final DynamicTable dynamicTable = dynamicTableOrNull(qualifiedNameParts(ctx.qualifiedName()));
+                final DynamicTable dynamicTable = dynamicTableOrNull(named);
                 if (dynamicTable != null) {
                     dynamicTable.setComment(comment);
                     dynamicTable.markDdl(catalog.currentUserForDdl());
@@ -207,7 +210,7 @@ public class CommentCommandHandler implements CommandHandler {
                 }
                 final Table table;
                 try {
-                    table = catalog.resolveTable(QualifiedName.of(qualifiedNameParts(ctx.qualifiedName())));
+                    table = catalog.resolveTable(QualifiedName.of(named));
                 } catch (final RuntimeException e) {
                     if (ifExists) {
                         logger.debug("Table does not exist (IF EXISTS): {}", tableName);
@@ -235,8 +238,8 @@ public class CommentCommandHandler implements CommandHandler {
             } else if (ctx.COLUMN() != null) {
                 // COMMENT ON COLUMN — the qualified name's parts come from the parse tree's identifier
                 // list, not from splitting its flattened text on '.'. (The full text is kept for logging.)
-                final String qualifiedColumn = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String qualifiedColumn = QualifiedName.join(named);
+                final String[] parts = named;
 
                 if (parts.length < 2) {
                     throw new RuntimeException("Column name must be qualified: table.column");
@@ -276,27 +279,30 @@ public class CommentCommandHandler implements CommandHandler {
 
                 // COMMENT ON COLUMN reports a missing column as an OBJECT, the way RENAME COLUMN does —
                 // live: "Object 'NONEXISTENT' does not exist or not authorized." — rather than
-                // the "invalid identifier" a query would answer with.
-                final TableColumn column = table.findColumn(columnName);
-                if (column == null) {
+                // the "invalid identifier" a query would answer with. The column is matched by its canonical
+                // name, so neither bee nor "bee" reaches a column "Bee", and the sentence spells the name
+                // without quotes: Object 'bee' (live-verified).
+                if (!table.hasColumnExactly(columnName)) {
                     if (ifExists) {
                         logger.debug("Column does not exist (IF EXISTS): {}", columnName);
                         return null;
                     }
-                    throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint("Object", columnName));
+                    throw new RuntimeException(SqlCompilationError.of(
+                        "Object '" + columnName + "' does not exist or not authorized."));
                 }
+                final TableColumn column = table.getColumn(columnName);
                 column.setComment(comment);
                 table.markDdl(catalog.currentUserForDdl());
                 logger.trace("Set comment on column: {}", qualifiedColumn);
 
             } else if (ctx.VIEW() != null) {
                 // COMMENT ON VIEW
-                final String viewName = visitor.getText(ctx.qualifiedName());
+                final String viewName = QualifiedName.join(named);
                 queryExecutor.requireOnRelation(Privilege.MODIFY, viewName);
                 final View view;
                 try {
                     // Named exactly, as ALTER VIEW names it: an unquoted LX_V reaches no "lx_v".
-                    final String[] viewParts = qualifiedNameParts(ctx.qualifiedName());
+                    final String[] viewParts = named;
                     view = catalog.requireOwningSchema(QualifiedName.of(viewParts))
                         .getViewExact(viewParts[viewParts.length - 1]);
                 } catch (final RuntimeException e) {
@@ -325,8 +331,8 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.FUNCTION() != null) {
                 // COMMENT ON FUNCTION — qualified-name parts from the parse tree, not a text split.
-                final String functionName = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String functionName = QualifiedName.join(named);
+                final String[] parts = named;
 
                 final Schema schema;
                 final String funcName;
@@ -360,8 +366,8 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.PROCEDURE() != null) {
                 // COMMENT ON PROCEDURE
-                final String procedureName = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String procedureName = QualifiedName.join(named);
+                final String[] parts = named;
 
                 final Schema schema;
                 final String procName;
@@ -394,8 +400,8 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.STREAM() != null) {
                 // COMMENT ON STREAM
-                final String streamName = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String streamName = QualifiedName.join(named);
+                final String[] parts = named;
 
                 final Schema schema;
                 final String strmName;
@@ -427,8 +433,8 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.TASK() != null) {
                 // COMMENT ON TASK
-                final String taskName = visitor.getText(ctx.qualifiedName());
-                final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+                final String taskName = QualifiedName.join(named);
+                final String[] parts = named;
 
                 final Schema schema;
                 final String tskName;
@@ -482,7 +488,7 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.STAGE() != null) {
                 // COMMENT ON STAGE
-                final String stageName = visitor.getText(ctx.qualifiedName());
+                final String stageName = QualifiedName.join(named);
                 final Stage stage;
                 try {
                     // Named exactly: a quoted name in another case is another stage, which is not there
@@ -554,7 +560,7 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.TAG() != null) {
                 // COMMENT ON TAG
-                final String tagName = visitor.getText(ctx.qualifiedName());
+                final String tagName = QualifiedName.join(named);
                 final Tag tag;
                 try {
                     // Named exactly, as a stage is (live-verified).
@@ -577,7 +583,7 @@ public class CommentCommandHandler implements CommandHandler {
                 logger.trace("Set comment on tag: {}", tagName);
             } else if (ctx.CONTACT() != null) {
                 // COMMENT ON CONTACT, the contact named exactly as ALTER CONTACT names it (live-verified).
-                final String contactName = visitor.getText(ctx.qualifiedName());
+                final String contactName = QualifiedName.join(named);
                 final Contact contact;
                 try {
                     contact = catalog.findContact(contactName);
@@ -599,18 +605,18 @@ public class CommentCommandHandler implements CommandHandler {
                 contact.setComment(comment);
                 logger.trace("Set comment on contact: {}", contactName);
             } else if (ctx.SEQUENCE() != null) {
-                final String n = visitor.getText(ctx.qualifiedName());
+                final String n = QualifiedName.join(named);
                 try {
                     // Named exactly, as a stage is (live-verified).
-                    final Sequence sequence = commentTargetSchema(ctx.qualifiedName())
-                        .getSequenceExact(commentSimpleName(ctx.qualifiedName()));
+                    final Sequence sequence = commentTargetSchema(named)
+                        .getSequenceExact(named[named.length - 1]);
                     sequence.setComment(comment);
                     sequence.markDdl();
                 } catch (final RuntimeException e) {
                     if (!ifExists) throw e;
                 }
             } else if (ctx.PIPE() != null) {
-                final String n = visitor.getText(ctx.qualifiedName());
+                final String n = QualifiedName.join(named);
                 try {
                     final Pipe pipe = catalog.getPipe(n);
                     pipe.setComment(comment);
@@ -620,8 +626,8 @@ public class CommentCommandHandler implements CommandHandler {
                 }
             } else if (ctx.MASKING() != null && ctx.POLICY() != null) {
                 // Named exactly, as a stage is, and refused by its full path when missing (live-verified).
-                final Schema home = commentTargetSchema(ctx.qualifiedName());
-                final String n = commentSimpleName(ctx.qualifiedName());
+                final Schema home = commentTargetSchema(named);
+                final String n = named[named.length - 1];
                 final MaskingPolicy p = home.getMaskingPolicyExact(n);
                 if (p != null) {
                     p.setComment(comment);
@@ -630,8 +636,8 @@ public class CommentCommandHandler implements CommandHandler {
                         home.qualifiedName(n)));
                 }
             } else if (ctx.ROW() != null && ctx.ACCESS() != null && ctx.POLICY() != null) {
-                final Schema home = commentTargetSchema(ctx.qualifiedName());
-                final String n = commentSimpleName(ctx.qualifiedName());
+                final Schema home = commentTargetSchema(named);
+                final String n = named[named.length - 1];
                 final RowAccessPolicy p = home.getRowAccessPolicyExact(n);
                 if (p != null) {
                     p.setComment(comment);
@@ -640,7 +646,7 @@ public class CommentCommandHandler implements CommandHandler {
                         home.qualifiedName(n)));
                 }
             } else if (ctx.FILE() != null && ctx.FORMAT() != null) {
-                final String n = visitor.getText(ctx.qualifiedName());
+                final String n = QualifiedName.join(named);
                 // Named exactly, as a stage is, and refused by its full path when missing (live-verified).
                 final FileFormat ff = catalog.getFileFormatExact(n);
                 if (ff != null) {
@@ -662,9 +668,9 @@ public class CommentCommandHandler implements CommandHandler {
     }
 
     /** Resolve the schema owning a (possibly-qualified) object referenced in a COMMENT ON statement.
-     *  Parts come from the parse tree, so a quoted name containing a dot stays one part. */
-    private Schema commentTargetSchema(final FrostlakeParser.QualifiedNameContext nameCtx) {
-        return catalog.requireOwningSchema(QualifiedName.of(qualifiedNameParts(nameCtx)));
+     *  The parts are the resolved name's own, so a quoted name containing a dot stays one part. */
+    private Schema commentTargetSchema(final String[] parts) {
+        return catalog.requireOwningSchema(QualifiedName.of(parts));
     }
 
     /**
@@ -680,12 +686,6 @@ public class CommentCommandHandler implements CommandHandler {
             }
         }
         return argumentTypes;
-    }
-
-    /** Simple (unqualified) object name — the parse tree's last identifier part. */
-    private String commentSimpleName(final FrostlakeParser.QualifiedNameContext nameCtx) {
-        final String[] parts = qualifiedNameParts(nameCtx);
-        return parts[parts.length - 1];
     }
 
 }
