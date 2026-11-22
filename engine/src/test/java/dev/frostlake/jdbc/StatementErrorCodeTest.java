@@ -202,6 +202,18 @@ public class StatementErrorCodeTest extends BaseJdbcTest {
     }
 
     @Test
+    public void keyPropertyAndUserNameFamilies() throws SQLException {
+        statement.execute("CREATE OR REPLACE TABLE eckpt (a INT, b INT)");
+        assertFamilies(new String[][] {
+            {"ALTER TABLE eckpt ADD CONSTRAINT eckpu UNIQUE (a) NOT DEFERRABLE INITIALLY DEFERRED", "1460 42601"},
+            {"CREATE OR REPLACE TABLE eckpn (a INT UNIQUE INITIALLY DEFERRED NOT DEFERRABLE)", "1460 42601"},
+            {"ALTER TABLE eckpt ADD CONSTRAINT eckpu UNIQUE (a) RELY NORELY", "1461 42601"},
+            {"CREATE OR REPLACE TABLE eckpn (a INT, UNIQUE (a) DEFERRABLE NOT DEFERRABLE)", "1461 42601"},
+            {"SHOW USER WORKLOAD IDENTITY AUTHENTICATION METHODS FOR USER a.b.c.d", "906 42000"},
+        });
+    }
+
+    @Test
     public void signatureKeyAndTagFamilies() throws SQLException {
         statement.execute("CREATE OR REPLACE TABLE ec680t (a INT, b INT)");
         statement.execute("CREATE OR REPLACE TABLE ec680c (a INT, b INT)");

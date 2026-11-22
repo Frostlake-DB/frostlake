@@ -24,15 +24,24 @@ import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 
 /**
- * Where a BREAK, a CONTINUE and an EXIT may stand, judged when a body starts to run and before any of it does
- * (live-verified). Each stands inside a loop of its own body — a block nested in the loop, and a handler of such a
- * block, are inside it — or is refused as {@code  Break used outside of loop}, the one sentence for the three
- * words. One that names a label names a loop around it, or is refused as {@code  Label 'NOSUCH' not found}. Both
- * are refused at the word, on a branch that never runs and after a RETURN too. A procedure or a function whose
- * body holds one is created all the same and refused when it is called, so no body can end or skip a loop of the
- * body that called it.
+ * Where a BREAK, a CONTINUE, an EXIT and an ITERATE may stand, judged when a body starts to run and before any of
+ * it does (live-verified). Each stands inside a loop of its own body — a block nested in the loop, and a handler of
+ * such a block, are inside it — or is refused as {@code  Break used outside of loop} (92208 / P0000), the one
+ * sentence for the four words. One that names a label names a loop around it, or is refused as
+ * {@code  Label 'NOSUCH' not found} (92209 / P0000). Both are refused at the word, on a branch that never runs and
+ * after a RETURN too. A procedure or a function whose body holds one is created all the same and refused when it is
+ * called, so no body can end or skip a loop of the body that called it.
  */
 public final class LoopControlPlacement {
+
+    /** The sentence of a word standing outside every loop of its body. */
+    static final String OUTSIDE_LOOP = "\n Break used outside of loop";
+
+    /** How the sentence of a label no loop around the word carries opens. */
+    static final String LABEL_OPENING = "\n Label '";
+
+    /** How the sentence of a label no loop around the word carries closes. */
+    static final String LABEL_CLOSING = "' not found";
 
     private LoopControlPlacement() {
     }
@@ -78,11 +87,11 @@ public final class LoopControlPlacement {
         final Token at = statement.getStart();
         if (!inLoop) {
             throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
-                " Break used outside of loop"));
+                OUTSIDE_LOOP.substring(1)));
         }
         if (!named) {
             throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
-                " Label '" + wanted + "' not found"));
+                LABEL_OPENING.substring(1) + wanted + LABEL_CLOSING));
         }
     }
 

@@ -124,7 +124,6 @@ import dev.frostlake.functions.scalar.datetime.MonthFn;
 import dev.frostlake.functions.scalar.datetime.MonthName;
 import dev.frostlake.functions.scalar.datetime.MonthsBetween;
 import dev.frostlake.functions.scalar.datetime.NextDay;
-import dev.frostlake.functions.scalar.datetime.NowFn;
 import dev.frostlake.functions.scalar.datetime.PlannedIntervalFunctions;
 import dev.frostlake.functions.scalar.datetime.PreviousDay;
 import dev.frostlake.functions.scalar.datetime.QuarterFn;
@@ -400,6 +399,7 @@ import dev.frostlake.functions.table.DynamicTableRefreshHistoryFunction;
 import dev.frostlake.functions.table.Flatten;
 import dev.frostlake.functions.table.Generator;
 import dev.frostlake.functions.table.GetContactsFunction;
+import dev.frostlake.functions.table.Getnextval;
 import dev.frostlake.functions.table.PolicyReferencesFunction;
 import dev.frostlake.functions.table.QueryRunner;
 import dev.frostlake.functions.table.ServerlessTaskHistoryFunction;
@@ -699,7 +699,6 @@ public class FunctionRegistry {
         register(new DayOfWeekFn());
         register(new DayOfYear());
         register(new CurrentTime());
-        register(new NowFn("NOW"));
         register(new TimeAdd());
         register(new TimeDiff());
 
@@ -992,8 +991,7 @@ public class FunctionRegistry {
         functions.put("TIMESTAMPDIFF", new DateDiff("TIMESTAMPDIFF"));  // TIMESTAMPDIFF == DATEDIFF (== TIMEDIFF)
         functions.put("DAYOFMONTH", new DayFn());        // DAYOFMONTH == DAY
         functions.put("LOCALTIME", new CurrentTime());   // LOCALTIME == CURRENT_TIME
-        // LOCALTIMESTAMP is CURRENT_TIMESTAMP, not SYSDATE: it declares TIMESTAMP_LTZ. Registering
-        // it as a NowFn made it TIMESTAMP_NTZ, which is SYSDATE's type and not this one's.
+        // LOCALTIMESTAMP is CURRENT_TIMESTAMP, not SYSDATE: it declares TIMESTAMP_LTZ.
         functions.put("LOCALTIMESTAMP", new CurrentTimestamp());
         // SYSTIMESTAMP is NOT SYSDATE: it answers in the session's zone and declares TIMESTAMP_LTZ,
         // where SYSDATE answers UTC as TIMESTAMP_NTZ (live-verified).
@@ -1113,6 +1111,7 @@ public class FunctionRegistry {
         registerTableFunction(new SplitToTable());
         registerTableFunction(new StrtokSplitToTable());
         registerTableFunction(new Flatten());
+        registerTableFunction(new Getnextval());
         registerTableFunction(new TaskHistoryFunction(catalog));
         registerTableFunction(new DynamicTableRefreshHistoryFunction(catalog));
         registerTableFunction(new ServerlessTaskHistoryFunction());

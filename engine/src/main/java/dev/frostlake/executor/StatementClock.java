@@ -18,6 +18,7 @@ package dev.frostlake.executor;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicLong;
@@ -212,15 +213,24 @@ public final class StatementClock {
     }
 
     /**
-     * The current statement's reading in the session's zone — what CURRENT_TIMESTAMP, LOCALTIMESTAMP,
-     * CURRENT_DATE, CURRENT_TIME, GETDATE and NOW answer with. The engine's session zone IS UTC (its
-     * TIMEZONE parameter), so this renders the instant in UTC — never the host's zone, whose offset
-     * would otherwise leak into every epoch extraction ({@code DATE_PART(EPOCH_SECOND,
-     * CURRENT_TIMESTAMP())} answers the true instant on a real account, live-verified). Unpinned, the
-     * clock is read afresh so a function called outside any statement still answers.
+     * The current statement's reading as a wall clock in the session's zone ({@link SessionZone}) — what
+     * CURRENT_DATE, CURRENT_TIME and LOCALTIME answer with, each the date or time of day CURRENT_TIMESTAMP
+     * shows (live-verified). Never the host's zone. Unpinned, the clock is read afresh so a function called
+     * outside any statement still answers.
      */
     public static LocalDateTime now() {
-        return LocalDateTime.ofInstant(observed(), ZoneOffset.UTC);
+        return LocalDateTime.ofInstant(observed(), SessionZone.current());
+    }
+
+    /**
+     * The current statement's reading as a TIMESTAMP_LTZ, at the session zone's offset — what
+     * CURRENT_TIMESTAMP, LOCALTIMESTAMP, GETDATE and SYSTIMESTAMP answer with. The instant is the true one,
+     * so an epoch extraction reads it whatever the zone.
+     *
+     * @return the statement's instant in the session's zone
+     */
+    public static OffsetDateTime nowInSession() {
+        return observed().atZone(SessionZone.current()).toOffsetDateTime();
     }
 
     /** The same instant in UTC — what SYSDATE answers with. */

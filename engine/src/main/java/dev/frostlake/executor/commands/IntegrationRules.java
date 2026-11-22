@@ -50,7 +50,9 @@ final class IntegrationRules {
         "COMMENT");
     private static final List<String> API_PROVIDERS = Arrays.asList("AWS_API_GATEWAY", "AWS_PRIVATE_API_GATEWAY",
         "AWS_GOV_API_GATEWAY", "AWS_GOV_PRIVATE_API_GATEWAY", "AZURE_API_MANAGEMENT",
-        "AZURE_PRIVATE_API_MANAGEMENT", "GOOGLE_API_GATEWAY", "GIT_HTTPS_API", "PYPI");
+        "AZURE_PRIVATE_API_MANAGEMENT", "GOOGLE_API_GATEWAY", "GIT_HTTPS_API", "EXTERNAL_MCP", "PYPI");
+    /** What ALTER may set on an external MCP server's integration beyond the common set (documented). */
+    private static final String MCP_SETS = "API_USER_AUTHENTICATION";
     /** What an API integration of the package index's provider takes: nothing of the gateways' own. */
     private static final List<String> PYPI_TAKES = Arrays.asList("API_PROVIDER", "ENABLED", "COMMENT");
 
@@ -66,6 +68,8 @@ final class IntegrationRules {
     /** Properties DESCRIBE tells of a security integration that no statement sets. */
     private static final List<String> SECURITY_TOLD_ONLY = Arrays.asList("OAUTH_USERNAME", "OAUTH_RESOURCE_URL",
         "OAUTH_ASSERTION_ISSUER", "PARENT_INTEGRATION");
+    /** What a JWT bearer flow's CREATE writes of them: who issues the assertion the token is asked for with. */
+    private static final String JWT_BEARER_OWN = "OAUTH_ASSERTION_ISSUER";
     private static final List<String> SECURITY_FIXED = Arrays.asList("TYPE", "AUTH_TYPE");
     private static final List<String> SECURITY_UNSETS = Arrays.asList("ENABLED", "COMMENT");
     private static final List<String> SECURITY_TYPES = Arrays.asList("API_AUTHENTICATION");
@@ -422,7 +426,8 @@ final class IntegrationRules {
     /**
      * Checks a security integration's CREATE. TYPE, ENABLED and AUTH_TYPE are asked for one at a time, and what
      * the authentication type needs beyond them is asked for as a list (live-verified). With ENABLED and AUTH_TYPE
-     * both left out the account names either one; ENABLED is named here.
+     * both left out the account names either one; ENABLED is named here. Of the properties no statement sets, a JWT
+     * bearer flow's ({@code OAUTH_GRANT = JWT_BEARER}) writes the assertion's issuer.
      */
     private static void checkCreateSecurity(final Map<String, PropertyValue> properties) {
         final PropertyValue writtenType = properties.get("TYPE");
@@ -432,7 +437,12 @@ final class IntegrationRules {
             checkCreateOwnSecurity(ownType, properties);
             return;
         }
+        final PropertyValue grant = properties.get("OAUTH_GRANT");
+        final boolean jwtBearer = grant != null && "JWT_BEARER".equalsIgnoreCase(grant.getText());
         for (final String key : properties.keySet()) {
+            if (jwtBearer && JWT_BEARER_OWN.equals(key)) {
+                continue;
+            }
             if (SECURITY_TOLD_ONLY.contains(key)) {
                 throw new RuntimeException(SqlCompilationError.of("invalid property '" + key
                     + "' for 'INTEGRATION - API_AUTHENTICATION'"));
@@ -473,7 +483,8 @@ final class IntegrationRules {
     /**
      * Checks the CREATE of a Snowflake OAuth, External OAuth, SAML2 or SCIM integration against its page: every
      * property one its type takes, each variant-choosing one set to a value the type knows, ENABLED asked for alone
-     * where the type requires it, and the rest the type requires asked for as a list (documented).
+     * where the type requires it, and the rest the type requires asked for as a list (documented). A SAML2 or SCIM
+     * integration may leave ENABLED out, which then defaults to TRUE as its page says.
      */
     private static void checkCreateOwnSecurity(final String type, final Map<String, PropertyValue> properties) {
         final List<String> takes = securityTakes(type);
@@ -497,10 +508,10 @@ final class IntegrationRules {
                 require(properties, missing, "OAUTH_REDIRECT_URI");
             }
         } else {
-            if (!properties.containsKey("ENABLED")) {
-                throw new RuntimeException(SqlCompilationError.of("Missing option(s): ENABLED"));
-            }
             if ("EXTERNAL_OAUTH".equals(type)) {
+                if (!properties.containsKey("ENABLED")) {
+                    throw new RuntimeException(SqlCompilationError.of("Missing option(s): ENABLED"));
+                }
                 choice(properties, "EXTERNAL_OAUTH_TYPE", EXTERNAL_OAUTH_TYPES);
                 choice(properties, "EXTERNAL_OAUTH_SNOWFLAKE_USER_MAPPING_ATTRIBUTE", USER_MAPPING_ATTRIBUTES);
                 choice(properties, "EXTERNAL_OAUTH_ANY_ROLE_MODE", ANY_ROLE_MODES);
@@ -588,8 +599,10 @@ final class IntegrationRules {
             }
             return;
         }
+        final boolean mcp = integration.getKind() == IntegrationKind.API
+            && "EXTERNAL_MCP".equals(integration.text("API_PROVIDER"));
         for (final String key : properties.keySet()) {
-            if (!sets(integration).contains(key)) {
+            if (!sets(integration).contains(key) && !(mcp && MCP_SETS.equals(key))) {
                 throw new RuntimeException(SqlCompilationError.of("invalid property '" + key + "' for 'INTEGRATION - "
                     + integration.getType() + "'"));
             }

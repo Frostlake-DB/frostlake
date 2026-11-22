@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.GrantedObject;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.PrivilegeRefusal;
@@ -64,6 +65,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -206,6 +208,11 @@ public class ShowCommandHandler implements CommandHandler {
             return new AppObjectListing(catalog).showVersions(ctx);
         }
         final ShowListing listing = ShowListing.of(ctx);
+        final ResultSet inGroup = new FailoverGroupCommandHandler(catalog,
+            AccountIdentity.of(queryExecutor.getEngineConfig())).listingInGroup(ctx, listing, queryExecutor);
+        if (inGroup != null) {
+            return inGroup;
+        }
         ShowScopeRefusal.refuseOverlongAccount(ctx, queryExecutor, listing);
         ShowScopeRefusal.refuseMissingModel(ctx);
         ShowScopeRefusal.refuseOverlongSchema(ctx, catalog, queryExecutor, listing, true);
@@ -503,11 +510,11 @@ public class ShowCommandHandler implements CommandHandler {
         } else if (ctx.EVENT() != null) {
             return EventTableCommandHandler.listing(tablesInScope(showExecutor, ctx, forced));
         } else if (ctx.EXTERNAL() != null && ctx.TABLES() != null) {
-            // The scope is still judged — IN TABLE is refused like any other schema-level listing's, and a
-            // schema or a database that does not exist as a table listing's is — but there is never anything
-            // to list: an external table reads files this engine cannot reach.
-            listingScope(ctx, ShowListing.EXTERNAL_TABLES, forced).schemas(catalog, true);
-            return ExternalTableListing.listing();
+            // The scope is judged — IN TABLE is refused like any other schema-level listing's, and a schema or a
+            // database that does not exist as a table listing's is — and the external tables declared in it are
+            // listed.
+            return new ResultSet(ExternalTableListing.listing().getColumns(), ExternalTableCommandHandler.rows(
+                listingScope(ctx, ShowListing.EXTERNAL_TABLES, forced).schemas(catalog, true)));
         } else if (ctx.INTEGRATIONS() != null) {
             return new IntegrationCommandHandler(catalog, queryExecutor).show(ctx.integrationKind());
         } else if (ctx.VOLUMES() != null) {
@@ -897,6 +904,12 @@ public class ShowCommandHandler implements CommandHandler {
      *   IN SESSION, IN ACCOUNT, IN USER [name]              the session's, the account's, a user's
      *   IN DATABASE | SCHEMA | WAREHOUSE [name]             the named one, or the session's current one
      *   IN TABLE name, IN STREAM | TASK name                a relation's, a stream's, a task's
+     *   IN FUNCTION | PROCEDURE name(types)                 an overload's, named as a DESCRIBE names it
+     *   IN PIPE name                                        a pipe's
+     *   IN FUNCTION, IN PROCEDURE                           Unsupported statement type 'No function name specified'.
+     *   IN FUNCTION f, IN PROCEDURE a.b                     Cannot show parameters of … identifierName=FUNCTION
+     *   IN PIPE                                             This session does not have a current pipe
+     *   IN PIPE p()                                         invalid identifier 'TOK_UDF_TARGET', at the name
      *   IN STREAM, IN TASK                                  This session does not have a current stream | task
      *   IN ACCOUNT abc, IN DATABASE a.b, IN SCHEMA a.b.c    Object does not exist, or operation cannot be performed.
      *   IN abc, IN a.b, IN ROLE [x], IN VIEW [x]            Unsupported statement type 'Cannot show parameters of
@@ -985,9 +998,41 @@ public class ShowCommandHandler implements CommandHandler {
             }
             return showExecutor.showParametersInTable(schemaObject(scope.objectName()), like);
         }
-        // ROLE and VIEW are no scope and neither is a bare name: each is refused naming the word written.
+        if (scope.PIPE() != null) {
+            if (scope.objectName() == null) {
+                throw new RuntimeException(SqlCompilationError.of("This session does not have a current pipe"));
+            }
+            if (scope.LPAREN() != null) {
+                // A pipe takes no argument list: the name is read as a routine's and refused where it stands.
+                final Token name = scope.objectName().getStart();
+                throw new RuntimeException(SqlCompilationError.at(name.getLine(), name.getCharPositionInLine(),
+                    "invalid identifier 'TOK_UDF_TARGET'"));
+            }
+            return showExecutor.showParametersInPipe(schemaObject(scope.objectName()), like);
+        }
+        final boolean routine = scope.FUNCTION() != null || scope.PROCEDURE() != null;
+        if (routine && scope.objectName() == null) {
+            throw new RuntimeException(SqlCompilationError.of(
+                "Unsupported statement type 'No function name specified'."));
+        }
+        if (routine && scope.LPAREN() != null) {
+            RoutineSignatureForm.requireTypesOnly(scope.dataTypeList());
+            final List<DataType> argumentTypes = new ArrayList<>();
+            if (scope.dataTypeList() != null) {
+                for (final FrostlakeParser.DataTypeNameContext type : scope.dataTypeList().dataTypeName()) {
+                    argumentTypes.add(RoutineSignatureForm.writtenType(columnParser, type));
+                }
+            }
+            final SchemaObjectName written = schemaObject(scope.objectName());
+            return scope.FUNCTION() != null ? showExecutor.showParametersInFunction(written, argumentTypes, like)
+                : showExecutor.showParametersInProcedure(written, argumentTypes, like);
+        }
+        // ROLE and VIEW are no scope and neither is a bare name, nor a routine written without its argument list:
+        // each is refused naming the word written, a routine by its keyword.
         final String[] refused = scope.ROLE() != null ? new String[] {"ROLE"}
-            : scope.VIEW() != null ? new String[] {"VIEW"} : named;
+            : scope.VIEW() != null ? new String[] {"VIEW"}
+            : scope.FUNCTION() != null ? new String[] {"FUNCTION"}
+            : scope.PROCEDURE() != null ? new String[] {"PROCEDURE"} : named;
         final StringBuilder qualifiers = new StringBuilder();
         for (int i = refused.length - 2; i >= 0; i--) {
             qualifiers.append(qualifiers.length() > 0 ? ", " : "").append(refused[i]);
@@ -1230,6 +1275,14 @@ public class ShowCommandHandler implements CommandHandler {
                     // A policy of another kind holds the name (live-verified).
                     throw new RuntimeException(SqlCompilationError.of("Invalid object type: '" + modelled.name()
                         + "'"));
+                }
+            }
+            if (unmodelled == UnmodelledDropKind.SHARE && (parts.length == 1
+                    || parts.length == 2 && parts[0].equals(catalog.getAccountLocator()))) {
+                final ResultSet share = new ShareCommandHandler(catalog,
+                    AccountIdentity.of(queryExecutor.getEngineConfig())).describe(parts[parts.length - 1]);
+                if (share != null) {
+                    return share;
                 }
             }
             throw describeUnmodelled(unmodelled, parts);

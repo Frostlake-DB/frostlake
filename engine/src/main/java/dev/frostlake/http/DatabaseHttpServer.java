@@ -127,7 +127,7 @@ public class DatabaseHttpServer {
         this.restResults = new RestResults(config.getRestSyncWaitMs(), config.getRestResultRetentionMs());
         // The Snowflake JDBC driver's own endpoints, so that driver connects here unchanged; one handler serves both
         // listeners, so a query run over one is followed by its ID over the other.
-        this.snowflake = new SnowflakeProtocolHandler(engine);
+        this.snowflake = new SnowflakeProtocolHandler(engine, config.getMaxRequestBytes());
         registerContexts(server, host, config);
         // The engine names this server in the presigned and file URLs it hands out.
         engine.getEngine().getConfig().setProperty(EngineConfig.PROP_HTTP_HOST, host);
@@ -190,7 +190,8 @@ public class DatabaseHttpServer {
 
     /** A handler wrapped to answer its faults and pass the guard (see ErrorAnsweringHandler), and counted. */
     private HttpHandler counted(final HttpHandler handler, final RequestGuard guard, final boolean jsonBody) {
-        return new CountedHandler(new ErrorAnsweringHandler(handler, guard, jsonBody), inFlight);
+        return new CountedHandler(new ErrorAnsweringHandler(handler, guard, jsonBody, config.getMaxRequestBytes()),
+            inFlight);
     }
 
     /** The HTTPS listener's TLS context, from the keystore http.tls.keystore names. */

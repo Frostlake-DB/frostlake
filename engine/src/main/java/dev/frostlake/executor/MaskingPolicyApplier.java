@@ -19,6 +19,7 @@ package dev.frostlake.executor;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.UnsupportedSubqueryException;
 import dev.frostlake.metastore.PolicyReferences;
+import dev.frostlake.metastore.TagMaskingPolicies;
 import dev.frostlake.metastore.model.MaskingPolicy;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.RowAccessPolicy;
@@ -78,7 +79,8 @@ final class MaskingPolicyApplier {
                 return true;
             }
         }
-        return false;
+        // A tag carrying a masking policy may reach any column; maskRows reads which.
+        return executor.getCatalog().isTagMaskingInUse();
     }
 
     /**
@@ -111,10 +113,35 @@ final class MaskingPolicyApplier {
         final List<MaskingPolicy> boundByValue = new ArrayList<>();
         final List<DeferredFault> unreadable = new ArrayList<>();
         final List<String> owners = new ArrayList<>();
+        final List<List<String>> usings = new ArrayList<>();
+        final boolean byTags = executor.getCatalog().isTagMaskingInUse();
         for (int i = 0; i < columns.size(); i++) {
             final TableColumn column = columns.get(i);
-            if (column.hasMaskingPolicy()) {
+            String attached = column.hasMaskingPolicy() ? column.getMaskingPolicyName() : null;
+            List<String> using = column.getMaskingPolicyArguments();
+            RuntimeException tagConflict = null;
+            if (attached == null && byTags) {
+                // A policy attached to the column is its own; else the tags reaching it may give it one of its type.
+                final TableColumn tagged = owner != null && owner != relation && owner.hasColumn(column.getName())
+                    ? owner.getColumn(column.getName()) : column;
+                final List<String> tagPolicies = TagMaskingPolicies.of(executor.getCatalog(), owner, tagged);
+                if (tagPolicies.size() > 1) {
+                    tagConflict = TagMaskingPolicies.conflict(owner, column);
+                } else if (tagPolicies.size() == 1) {
+                    attached = tagPolicies.get(0);
+                    // A conditional policy a tag gives reads its further arguments from the columns named as its
+                    // parameters (documented).
+                    using = new ArrayList<>();
+                    try {
+                        using.addAll(parameterNames(executor.getCatalog().findMaskingPolicyExact(attached)));
+                    } catch (final RuntimeException gone) {
+                        using.clear();
+                    }
+                }
+            }
+            if (attached != null || tagConflict != null) {
                 slots.add(i);
+                usings.add(using);
                 // An attachment whose policy is gone refuses every read of the column, and only of the column: the
                 // cells hold the refusal, which reading one raises (DeferredFault).
                 Expression body = null;
@@ -122,13 +149,16 @@ final class MaskingPolicyApplier {
                 DeferredFault refusal = null;
                 String policyOwner = null;
                 try {
-                    final MaskingPolicy policy = PolicyReferences.maskingPolicy(executor.getCatalog(),
-                        column.getMaskingPolicyName(), owner);
+                    if (tagConflict != null) {
+                        throw tagConflict;
+                    }
+                    final MaskingPolicy policy = PolicyReferences.maskingPolicy(executor.getCatalog(), attached,
+                        owner);
                     policyOwner = policy.getOwner();
                     if (ParameterReferences.readInSubquery(policy.getBody(), parameterNames(policy))) {
                         byValue = policy;
                     } else {
-                        body = ExpressionEvaluator.parse(maskingPolicyBody(column, owner));
+                        body = ExpressionEvaluator.parse(maskingPolicyBody(column, owner, policy, using));
                     }
                 } catch (final RuntimeException gone) {
                     refusal = new DeferredFault(gone);
@@ -138,6 +168,9 @@ final class MaskingPolicyApplier {
                 unreadable.add(refusal);
                 owners.add(policyOwner);
             }
+        }
+        if (slots.isEmpty()) {
+            return rows;
         }
         final ExpressionEvaluator evaluator = new ExpressionEvaluator(relation, executor.getFunctionRegistry(),
             executor.getCatalog(), executor);
@@ -157,7 +190,8 @@ final class MaskingPolicyApplier {
                         try {
                             values.set(slot, unreadable.get(k) != null ? unreadable.get(k)
                                 : boundByValue.get(k) != null
-                                    ? valueBoundMask(evaluator, boundByValue.get(k), columns, slot, row, owner)
+                                    ? valueBoundMask(evaluator, boundByValue.get(k), columns, slot, row, owner,
+                                        usings.get(k))
                                 : maskedValue(evaluator, bodies.get(k), row, columns.get(slot)));
                         } finally {
                             leavePolicyOwner(rights);
@@ -196,9 +230,9 @@ final class MaskingPolicyApplier {
      * table VAL with a column VAL (live-verified). A fault is held in the cell, as {@link #maskedValue} holds one.
      */
     private Object valueBoundMask(final ExpressionEvaluator evaluator, final MaskingPolicy policy,
-                                  final List<TableColumn> laidOut, final int slot, final Row row, final Table table) {
+                                  final List<TableColumn> laidOut, final int slot, final Row row, final Table table,
+                                  final List<String> using) {
         final TableColumn column = laidOut.get(slot);
-        final List<String> using = column.getMaskingPolicyArguments();
         final List<String> bound = new ArrayList<>();
         for (int i = 0; i < policy.getParameters().size(); i++) {
             final String source = i == 0 ? column.getName() : i < using.size() ? using.get(i) : null;
@@ -260,14 +294,12 @@ final class MaskingPolicyApplier {
      * column's attachment names in full, wherever the session is. An attachment whose policy is gone refuses the
      * query rather than returning the column unmasked.
      */
-    private String maskingPolicyBody(final TableColumn column, final Table table) {
-        final MaskingPolicy policy = PolicyReferences.maskingPolicy(executor.getCatalog(),
-            column.getMaskingPolicyName(), table);
+    private String maskingPolicyBody(final TableColumn column, final Table table, final MaskingPolicy policy,
+                                     final List<String> using) {
         // The first parameter is the column itself; a conditional policy's further ones are the columns its USING
         // names, in order. One USING left out binds NULL, which no condition reads as permission, rather than
         // whichever column happens to share the parameter's name.
         final String columnExpr = SqlIdentifiers.spellCanonicalEscaped(column.getName());
-        final List<String> using = column.getMaskingPolicyArguments();
         final List<String> names = new ArrayList<>();
         final List<String> bound = new ArrayList<>();
         for (int i = 0; i < policy.getParameters().size(); i++) {

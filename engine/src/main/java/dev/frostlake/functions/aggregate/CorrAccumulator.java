@@ -23,23 +23,20 @@ public class CorrAccumulator implements AggregateFunction.Accumulator, PairStati
     /** The pairs of a DECFLOAT argument, whose correlation is a DECFLOAT of 38 digits (see DecfloatPairStatistics). */
     private final DecfloatPairStatistics decfloatPairs = new DecfloatPairStatistics();
     private boolean decfloat;
-    public long n = 0;
-    public double sumX = 0;
-    public double sumY = 0;
-    public double sumXX = 0;
-    public double sumYY = 0;
-    public double sumXY = 0;
+    /** The pairs as doubles, whose correlation is NULL when either side does not vary (see PairMoments). */
+    private final PairMoments moments = new PairMoments();
 
     @Override
     public void accumulate(final Object v) {}
 
-    public void accumulate(final double x, final double y) {
-        n++;
-        sumX += x;
-        sumY += y;
-        sumXX += x*x;
-        sumYY += y*y;
-        sumXY += x*y;
+    /**
+     * Accumulate one non-null pair.
+     *
+     * @param y the first argument's value
+     * @param x the second argument's value
+     */
+    public void accumulate(final double y, final double x) {
+        moments.add(y, x);
     }
 
     @Override
@@ -62,28 +59,19 @@ public class CorrAccumulator implements AggregateFunction.Accumulator, PairStati
         if (decfloat) {
             return decfloatPairs.correlation();
         }
-        if (n < 2) return null;
-        final double num = n * sumXY - sumX * sumY;
-        final double den = Math.sqrt((n * sumXX - sumX * sumX) * (n * sumYY - sumY * sumY));
-        return den == 0 ? null : num / den;
+        return moments.correlation();
     }
 
     @Override
     public void reset() {
         decfloatPairs.reset();
-        n = 0;
-        sumX = sumY = sumXX = sumYY = sumXY = 0;
+        moments.reset();
     }
 
     @Override
     public void merge(final AggregateFunction.Accumulator other) {
         final CorrAccumulator o = (CorrAccumulator) other;
         decfloatPairs.merge(o.decfloatPairs);
-        n += o.n;
-        sumX += o.sumX;
-        sumY += o.sumY;
-        sumXX += o.sumXX;
-        sumYY += o.sumYY;
-        sumXY += o.sumXY;
+        moments.merge(o.moments);
     }
 }

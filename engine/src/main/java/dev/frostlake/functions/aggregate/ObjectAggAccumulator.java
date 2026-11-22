@@ -29,7 +29,7 @@ import java.util.Map;
 
 /**
  * Accumulator for {@code OBJECT_AGG(key, value)} — collects key/value pairs into one OBJECT. Pairs with
- * a NULL key or NULL value are omitted (Snowflake). The result is the engine's OBJECT representation:
+ * a NULL key or NULL value are omitted (Snowflake); a key met twice is refused. The result is the engine's OBJECT representation:
  * canonical JSON text (keys sorted, numbers normalized).
  */
 public class ObjectAggAccumulator implements AggregateFunction.Accumulator, DecfloatAwareAccumulator {
@@ -54,7 +54,19 @@ public class ObjectAggAccumulator implements AggregateFunction.Accumulator, Decf
         if (key == null || value == null) {
             return;
         }
-        entries.put(keyText(key), value);
+        put(keyText(key), value);
+    }
+
+    /**
+     * Adds one member. A key met twice is a run-time error, "Duplicate field key 'a'", even when both
+     * values are equal — the rule OBJECT_CONSTRUCT follows (live-verified, aggregate and window form alike).
+     * Only a pair that contributes counts: a pair with a NULL key or a NULL value never reaches here.
+     */
+    private void put(final String key, final Object value) {
+        if (entries.containsKey(key)) {
+            throw new RuntimeException("Duplicate field key '" + key + "'");
+        }
+        entries.put(key, value);
     }
 
     /**
@@ -92,6 +104,8 @@ public class ObjectAggAccumulator implements AggregateFunction.Accumulator, Decf
 
     @Override
     public void merge(final AggregateFunction.Accumulator other) {
-        entries.putAll(((ObjectAggAccumulator) other).entries);
+        for (final Map.Entry<String, Object> entry : ((ObjectAggAccumulator) other).entries.entrySet()) {
+            put(entry.getKey(), entry.getValue());
+        }
     }
 }

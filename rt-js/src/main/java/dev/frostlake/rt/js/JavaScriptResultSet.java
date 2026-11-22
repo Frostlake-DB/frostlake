@@ -16,6 +16,8 @@
 
 package dev.frostlake.rt.js;
 
+import dev.frostlake.executor.GeoOutput;
+import dev.frostlake.executor.SessionOutputFormats;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.Row;
 import dev.frostlake.types.DataType;
@@ -83,8 +85,12 @@ public class JavaScriptResultSet {
             return JavaScriptArgumentJson.ofColumn(JavaScriptColumns.asString(value, type));
         }
         if (value instanceof GeoValue) {
-            // A GEOGRAPHY or a GEOMETRY is its GeoJSON object (see JavaScriptColumns.sqlType).
-            return JavaScriptArgumentJson.ofColumn(VariantValue.ofNode(((GeoValue) value).node()));
+            // A GEOGRAPHY or a GEOMETRY is its GeoJSON object, or its text or bytes in the session's output format for
+            // its kind (see JavaScriptColumns.sqlType).
+            final GeoValue geo = (GeoValue) value;
+            return JavaScriptArgumentJson.ofColumn(
+                SessionOutputFormats.GEOJSON.equals(SessionOutputFormats.geo(geo.isGeography()))
+                    ? VariantValue.ofNode(geo.node()) : GeoOutput.rendered(geo));
         }
         return JavaScriptArgumentJson.ofColumn(value);
     }

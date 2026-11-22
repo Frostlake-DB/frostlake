@@ -200,7 +200,7 @@ public final class StagePrefix {
         }
         // Back as the stage path that named it: a '.' or '..' segment is encoded on disk so it cannot
         // climb, and a listing must show what its writer wrote.
-        return StagePathSegments.written(root.relativize(file).toString().replace('\\', '/'));
+        return StagePathSegments.written(StagePathSegments.relativeText(root, file));
     }
 
     /**

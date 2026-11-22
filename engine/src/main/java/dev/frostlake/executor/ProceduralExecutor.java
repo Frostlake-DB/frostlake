@@ -629,7 +629,7 @@ public class ProceduralExecutor {
         rememberInitialiserType(stmt.getVariableName(), stmt.getInitialiserType());
         final DataType declaredType = stmt.getDeclaredType();
         if (declaredType != null) {
-            variableTypes.put(stmt.getVariableName().toUpperCase(Locale.ROOT), declaredType);
+            variableTypes.put(VariableKey.of(stmt.getVariableName()), declaredType);
         }
         rememberConversionType(stmt.getVariableName(), stmt.getDefaultValue(), declaredType);
         try {
@@ -675,7 +675,7 @@ public class ProceduralExecutor {
         }
         // A value given to a variable converts to its declared type: a LET's own, or the one the variable holds.
         Object value = evaluateExpression(stmt.getExpression(), stmt.isDeclaration() ? stmt.getDeclaredType()
-            : variableTypes.get(stmt.getVariableName().toUpperCase(Locale.ROOT)));
+            : variableTypes.get(VariableKey.of(stmt.getVariableName())));
         if (stmt.isDeclaration()) {
             // A LET DECLARES, so it binds in the scope it stands in: an IF branch, a CASE branch or a
             // loop body that writes one leaves the outer variable of that name untouched, and the name
@@ -692,16 +692,16 @@ public class ProceduralExecutor {
                 declared = typeOfSqlInitialiser(stmt.getSqlInitialiser());
             }
             if (declared != null) {
-                variableTypes.put(stmt.getVariableName().toUpperCase(Locale.ROOT), declared);
+                variableTypes.put(VariableKey.of(stmt.getVariableName()), declared);
             }
         }
         if (!stmt.isDeclaration()) {
-            initialiserTypes.remove(stmt.getVariableName().toUpperCase(Locale.ROOT));
+            initialiserTypes.remove(VariableKey.of(stmt.getVariableName()));
         }
         rememberConversionType(stmt.getVariableName(), value,
-            variableTypes.get(stmt.getVariableName().toUpperCase(Locale.ROOT)));
+            variableTypes.get(VariableKey.of(stmt.getVariableName())));
         try {
-            final DataType assignedTo = variableTypes.get(stmt.getVariableName().toUpperCase(Locale.ROOT));
+            final DataType assignedTo = variableTypes.get(VariableKey.of(stmt.getVariableName()));
             if (!stmt.isHeldAnswer()) {
                 value = variantIntoContainer(writtenIntoArray(stmt.getExpression() == null ? null
                     : stmt.getExpression().getJudgedFrom(), value, assignedTo), assignedTo);
@@ -716,7 +716,7 @@ public class ProceduralExecutor {
             throw failed;
         }
         setVariable(stmt.getVariableName(), value);
-        callAnswers.remove(stmt.getVariableName().toUpperCase(Locale.ROOT));
+        callAnswers.remove(VariableKey.of(stmt.getVariableName()));
     }
 
     /**
@@ -867,7 +867,7 @@ public class ProceduralExecutor {
                 openCursorWithQuery(cursor);
             }
             final String varName = stmt.getVariableName();
-            loopRecords.add(varName.toUpperCase(Locale.ROOT));
+            loopRecords.add(VariableKey.of(varName));
             try {
                 Row row;
                 while ((row = cursor.fetch()) != null) {
@@ -902,7 +902,7 @@ public class ProceduralExecutor {
         final ResultSet rsIterable = resolveToResultSet(iterableValue);
         if (rsIterable != null) {
             final String varName = stmt.getVariableName();
-            loopRecords.add(varName.toUpperCase(Locale.ROOT));
+            loopRecords.add(VariableKey.of(varName));
             try {
                 for (final Row row : rsIterable.getRows()) {
                     setRowVariables(varName, row, rsIterable);
@@ -982,7 +982,7 @@ public class ProceduralExecutor {
         final long to = stmt.isReverse() ? start : end;
         final long step = stmt.isReverse() ? -1 : 1;
         refuseCounterOutOfRange(from, stmt.isReverse() ? stmt.getToExpression() : stmt.getIterable());
-        final String key = varName.toUpperCase(Locale.ROOT);
+        final String key = VariableKey.of(varName);
         final DataType shadowed = counterTypes.put(key, COUNTER_TYPE);
         try {
             for (long v = from; stmt.isReverse() ? v >= to : v <= to; v += step) {
@@ -1149,12 +1149,12 @@ public class ProceduralExecutor {
             final DataType fieldType = rs.getColumns().get(i).getStaticType() != null
                 ? rs.getColumns().get(i).getStaticType() : countGrid ? rs.getColumns().get(i).getDataType() : null;
             if (fieldType != null) {
-                recordFieldTypes.put((varName + "." + colName).toUpperCase(Locale.ROOT), fieldType);
+                recordFieldTypes.put(VariableKey.of(varName + "." + colName), fieldType);
             }
             // A field of a semi-structured column holds its value as a variable of that type does.
             final Object val = jsonHeld(i < row.getValues().size() ? row.getValue(i) : null,
                 fieldType != null ? fieldType : rs.getColumns().get(i).getDataType());
-            scope.variables().put((varName + "." + colName).toUpperCase(Locale.ROOT), val);
+            scope.variables().put(VariableKey.of(varName + "." + colName), val);
             scope.variables().put((varName + "." + colName), val);
         }
     }
@@ -1163,8 +1163,8 @@ public class ProceduralExecutor {
     private void clearRowVariables(final String varName, final ResultSet rs) {
         if (rs == null) return;
         for (final ResultSetColumn col : rs.getColumns()) {
-            recordFieldTypes.remove((varName + "." + col.getName()).toUpperCase(Locale.ROOT));
-            scope.variables().remove((varName + "." + col.getName()).toUpperCase(Locale.ROOT));
+            recordFieldTypes.remove(VariableKey.of(varName + "." + col.getName()));
+            scope.variables().remove(VariableKey.of(varName + "." + col.getName()));
             scope.variables().remove((varName + "." + col.getName()));
         }
     }
@@ -1225,7 +1225,7 @@ public class ProceduralExecutor {
             if (variable.getName() == null) {
                 return null;
             }
-            if (!variable.isBindForm() && emptySelectTargets.contains(variable.getName().toUpperCase(Locale.ROOT))) {
+            if (!variable.isBindForm() && emptySelectTargets.contains(VariableKey.of(variable.getName()))) {
                 // What a SELECT … INTO of no rows left in its target is a NULL of no type, whatever the
                 // target declares: DECLARE r INT … SELECT id INTO :r FROM t WHERE FALSE; RETURN r declares
                 // VARCHAR(134217728), until the name is assigned again; bound as :r it is its declared type
@@ -1240,12 +1240,12 @@ public class ProceduralExecutor {
             // A bare name an untyped declaration made reports its initialiser's own type; bound as :x, the
             // name is its declared type.
             final DataType initialised = variable.isBindForm() ? null
-                : initialiserTypes.get(variable.getName().toUpperCase(Locale.ROOT));
+                : initialiserTypes.get(VariableKey.of(variable.getName()));
             if (initialised != null) {
                 return initialised;
             }
             // A cursor record's field is its query column's type.
-            final DataType field = recordFieldTypes.get(variable.getName().toUpperCase(Locale.ROOT));
+            final DataType field = recordFieldTypes.get(VariableKey.of(variable.getName()));
             if (field != null) {
                 return field;
             }
@@ -1253,7 +1253,7 @@ public class ProceduralExecutor {
             // declaration's (see ConvertedValueType). Bound as :x the name is its declared type, as it
             // is everywhere else.
             final DataType converted = variable.isBindForm() ? null
-                : conversionTypes.get(variable.getName().toUpperCase(Locale.ROOT));
+                : conversionTypes.get(VariableKey.of(variable.getName()));
             return converted != null ? converted : getDeclaredVariableType(variable.getName());
         }
         return typeOfReturnedExpression(stmt.getSqlExpression());
@@ -1263,7 +1263,7 @@ public class ProceduralExecutor {
     private boolean returnsInitialiserType(final BaseExpression expression) {
         return expression instanceof VariableExpression && !((VariableExpression) expression).isBindForm()
             && ((VariableExpression) expression).getName() != null
-            && initialiserTypes.containsKey(((VariableExpression) expression).getName().toUpperCase(Locale.ROOT));
+            && initialiserTypes.containsKey(VariableKey.of(((VariableExpression) expression).getName()));
     }
 
     /**
@@ -1290,7 +1290,7 @@ public class ProceduralExecutor {
      */
     private void rememberConversionType(final String name, final Object sourceValue,
                                         final DataType declaredType) {
-        final String key = name.toUpperCase(Locale.ROOT);
+        final String key = VariableKey.of(name);
         if (declaredType == null) {
             conversionTypes.remove(key);
             return;
@@ -1340,9 +1340,9 @@ public class ProceduralExecutor {
             return;
         }
         if (initialised == null) {
-            initialiserTypes.remove(name.toUpperCase(Locale.ROOT));
+            initialiserTypes.remove(VariableKey.of(name));
         } else {
-            initialiserTypes.put(name.toUpperCase(Locale.ROOT), initialised);
+            initialiserTypes.put(VariableKey.of(name), initialised);
         }
     }
 
@@ -1486,7 +1486,7 @@ public class ProceduralExecutor {
         if (!(argument instanceof VariableExpression)) {
             return null;
         }
-        final DataType declared = variableTypes.get(((VariableExpression) argument).getName().toUpperCase(Locale.ROOT));
+        final DataType declared = variableTypes.get(VariableKey.of(((VariableExpression) argument).getName()));
         return declared instanceof DateTimeType ? "NULL::" + SqlTypeNames.canonical(declared) : null;
     }
 
@@ -1508,7 +1508,7 @@ public class ProceduralExecutor {
         if (!(argument instanceof VariableExpression) || value == null) {
             return null;
         }
-        final DataType declared = variableTypes.get(((VariableExpression) argument).getName().toUpperCase(Locale.ROOT));
+        final DataType declared = variableTypes.get(VariableKey.of(((VariableExpression) argument).getName()));
         if (!(declared instanceof NumericType) && !(declared instanceof BooleanType)) {
             return null;
         }
@@ -1525,7 +1525,7 @@ public class ProceduralExecutor {
         if (!(argument instanceof VariableExpression)) {
             return null;
         }
-        final DataType declared = variableTypes.get(((VariableExpression) argument).getName().toUpperCase(Locale.ROOT));
+        final DataType declared = variableTypes.get(VariableKey.of(((VariableExpression) argument).getName()));
         return declared instanceof DateTimeType || declared instanceof BooleanType
             || declared instanceof StringType && !(declared instanceof UuidType)
             ? "NULL::" + SqlTypeNames.canonical(declared) : null;
@@ -1582,7 +1582,7 @@ public class ProceduralExecutor {
         }
         if (expression instanceof VariableExpression) {
             final String name = ((VariableExpression) expression).getName();
-            return name != null && variableTypes.containsKey(name.toUpperCase(Locale.ROOT));
+            return name != null && variableTypes.containsKey(VariableKey.of(name));
         }
         return expression instanceof SqlScalarExpression
             && ((SqlScalarExpression) expression).getExpression() instanceof CastExpression;
@@ -1850,7 +1850,7 @@ public class ProceduralExecutor {
         if (name == null) {
             return false;
         }
-        final String canonical = name.toUpperCase(Locale.ROOT);
+        final String canonical = VariableKey.of(name);
         if (variable.isBindForm() && counterTypes.containsKey(canonical)) {
             // Bound as :i, a FOR counter carries its NUMBER(9,0): only the bare name is text.
             return false;
@@ -2204,7 +2204,7 @@ public class ProceduralExecutor {
             final Object value = evaluateExpression(argument);
             final String bound = boundConversion(argument, value);
             if (bound == null && value instanceof String && variableTypes.get(
-                    ((VariableExpression) argument).getName().toUpperCase(Locale.ROOT)) instanceof StringType) {
+                    VariableKey.of(((VariableExpression) argument).getName())) instanceof StringType) {
                 return SqlStringLiterals.encode((String) value);
             }
             return bound == null ? null : "(" + bound + ")";
@@ -2267,7 +2267,7 @@ public class ProceduralExecutor {
      * @param name the target's name
      */
     public void markEmptySelectTarget(final String name) {
-        emptySelectTargets.add(name.toUpperCase(Locale.ROOT));
+        emptySelectTargets.add(VariableKey.of(name));
     }
 
     /** Mark {@code e} as the exception now being handled (so a bare RAISE; inside the handler can re-raise it). */
@@ -2948,7 +2948,7 @@ public class ProceduralExecutor {
     /** Whether an argument is a VARIANT by declaration: a variable's, a nested call's function's, or SQL's typing. */
     private boolean declaresVariant(final BaseExpression argument) {
         if (argument instanceof VariableExpression) {
-            final String name = ((VariableExpression) argument).getName().toUpperCase(Locale.ROOT);
+            final String name = VariableKey.of(((VariableExpression) argument).getName());
             return variableTypes.get(name) instanceof VariantType;
         }
         if (argument instanceof FunctionCallExpression) {
@@ -3341,23 +3341,26 @@ public class ProceduralExecutor {
         if (name == null) {
             return null;
         }
-        final DataType declared = variableTypes.get(name.toUpperCase(Locale.ROOT));
+        final String key = VariableKey.of(name);
+        final String asWritten = VariableKey.ofWritten(key);
+        final DataType declared = variableTypes.containsKey(key) || scope.variables().containsKey(key)
+            ? variableTypes.get(key) : variableTypes.get(asWritten);
         if (declared != null) {
             return declared;
         }
-        final DataType counter = counterTypes.get(name.toUpperCase(Locale.ROOT));
+        final DataType counter = counterTypes.containsKey(key) ? counterTypes.get(key) : counterTypes.get(asWritten);
         // SQLROWCOUNT is declared a text: :SQLROWCOUNT + 1 is NUMBER(19,5), and a LET from it a VARCHAR.
         return counter != null || !"SQLROWCOUNT".equalsIgnoreCase(name) ? counter : StringType.VARCHAR;
     }
 
     public void declareVariableType(final String name, final DataType type) {
         if (name != null && type != null) {
-            variableTypes.put(name.toUpperCase(Locale.ROOT), type);
+            variableTypes.put(VariableKey.of(name), type);
         }
     }
 
     public void setVariable(final String name, final Object value) {
-        emptySelectTargets.remove(name.toUpperCase(Locale.ROOT));
+        emptySelectTargets.remove(VariableKey.of(name));
         // A handler that assigns a name reads it from then on (see HandlerLets).
         handlerLets.written(name);
         scope.setVariable(name, value);
@@ -3391,7 +3394,7 @@ public class ProceduralExecutor {
      * @param answer the CALL's answer
      */
     public void assignCallAnswer(final String name, final Object answer) {
-        final String key = name.toUpperCase(Locale.ROOT);
+        final String key = VariableKey.of(name);
         final DataType declared = variableTypes.get(key);
         final Object current = getVariable(name);
         final boolean heldText = answer instanceof String && !StructuredTypes.isStructured(declared);
@@ -3426,7 +3429,7 @@ public class ProceduralExecutor {
 
     /** Whether a variable holds the very answer {@link #assignCallAnswer} gave it, still unconverted. */
     private boolean holdsCallAnswer(final String name, final Object value) {
-        return value != null && callAnswers.get(name.toUpperCase(Locale.ROOT)) == value;
+        return value != null && callAnswers.get(VariableKey.of(name)) == value;
     }
 
     /**
@@ -3446,7 +3449,7 @@ public class ProceduralExecutor {
         if (!holdsCallAnswer(name, value)) {
             return value;
         }
-        final DataType declared = variableTypes.get(name.toUpperCase(Locale.ROOT));
+        final DataType declared = variableTypes.get(VariableKey.of(name));
         if (VariantJsonText.isSemiStructured(declared) && value instanceof String) {
             final Object parsed = new ParseJson().evaluate(Collections.<Object>singletonList(value));
             if (!(declared instanceof VariantType) && isJsonNull(parsed)) {
@@ -3471,7 +3474,7 @@ public class ProceduralExecutor {
         if (!statement || !holdsCallAnswer(name, value)) {
             return readHeld(name, value);
         }
-        final DataType declared = variableTypes.get(name.toUpperCase(Locale.ROOT));
+        final DataType declared = variableTypes.get(VariableKey.of(name));
         try {
             return readHeld(name, value);
         } catch (final RuntimeException unconverted) {
@@ -3581,7 +3584,7 @@ public class ProceduralExecutor {
 
     /** True when a procedural variable with this name exists in the current scope (even null-valued). */
     public boolean hasVariable(final String name) {
-        return scope.variables().containsKey(name.toUpperCase(Locale.ROOT));
+        return scope.holds(name);
     }
 
     /**
@@ -4021,7 +4024,7 @@ public class ProceduralExecutor {
      * @return true for a loop's record
      */
     public boolean isLoopRecord(final String variableName) {
-        return loopRecords.contains(variableName.toUpperCase(Locale.ROOT));
+        return loopRecords.contains(VariableKey.of(variableName));
     }
 
     /**
@@ -4265,11 +4268,11 @@ public class ProceduralExecutor {
             // Assign row values to target variables, coerced to each target's declared type
             final List<String> targetVars = stmt.getTargetVariables();
             for (final String target : targetVars) {
-                initialiserTypes.remove(target.toUpperCase(Locale.ROOT));
+                initialiserTypes.remove(VariableKey.of(target));
             }
             for (int i = 0; i < Math.min(targetVars.size(), row.getValues().size()); i++) {
                 setVariable(targetVars.get(i),
-                    heldUnder(row.getValue(i), variableTypes.get(targetVars.get(i).toUpperCase(Locale.ROOT))));
+                    heldUnder(row.getValue(i), variableTypes.get(VariableKey.of(targetVars.get(i)))));
             }
         } else {
             // End of cursor - set all variables to null

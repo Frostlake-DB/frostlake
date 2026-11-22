@@ -24,7 +24,6 @@ import dev.frostlake.metastore.model.TaskExecution;
 import dev.frostlake.metastore.model.TaskExecutionState;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -158,12 +157,6 @@ public final class TaskGraphs {
         return scheduled == null ? null : Long.valueOf(scheduled.toEpochMilli());
     }
 
-    /** The RUN_ID of a graph run scheduled at that time: its epoch milliseconds, or null. */
-    public static Long runId(final LocalDateTime scheduledTime) {
-        return scheduledTime == null ? null
-            : Long.valueOf(scheduledTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli());
-    }
-
     /** The GRAPH_RUN_GROUP_ID of a root task's graph run, derived from the root and the run. */
     public static String graphRunGroupId(final Task root, final Long runId) {
         return GraphRunGroup.id(root.getId(), runId);
@@ -207,11 +200,11 @@ public final class TaskGraphs {
      * @param attempt the attempt the run has to belong to, or 0 for any
      * @return the run, or null when the task did not run in it
      */
-    public static TaskExecution lastRunWithin(final Task task, final LocalDateTime start, final LocalDateTime until,
+    public static TaskExecution lastRunWithin(final Task task, final Instant start, final Instant until,
                                               final int attempt) {
         TaskExecution last = null;
         for (final TaskExecution run : task.getExecutionHistory()) {
-            final LocalDateTime began = run.getStartTime();
+            final Instant began = run.getStartInstant();
             if (began == null || start == null || began.isBefore(start)) {
                 continue;
             }
@@ -231,15 +224,14 @@ public final class TaskGraphs {
      * @param until  when the next graph run began, or null for the latest one
      * @return the attempt, 1 for a graph run never retried
      */
-    public static int lastAttempt(final Schema schema, final Task root, final LocalDateTime start,
-                                  final LocalDateTime until) {
+    public static int lastAttempt(final Schema schema, final Task root, final Instant start, final Instant until) {
         final List<Task> tasks = new ArrayList<>();
         tasks.add(root);
         tasks.addAll(descendants(schema, root, true));
         int attempt = 1;
         for (final Task task : tasks) {
             for (final TaskExecution run : task.getExecutionHistory()) {
-                final LocalDateTime began = run.getStartTime();
+                final Instant began = run.getStartInstant();
                 if (began != null && start != null && !began.isBefore(start)
                         && (until == null || began.isBefore(until))) {
                     attempt = Math.max(attempt, run.getAttempt());

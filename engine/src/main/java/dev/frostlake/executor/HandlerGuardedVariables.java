@@ -19,7 +19,8 @@ package dev.frostlake.executor;
 import java.util.TreeMap;
 
 /**
- * The block's variables as one of its SQL expressions reads them, by name in any letter case: a name the running
+ * The block's variables as one of its SQL expressions reads them, by name — a name held as asked first, and else the
+ * one name held that differs from it only by letter case: a name the running
  * handlers may not read is refused where the expression looks it up (see {@link HandlerLets}), and a value is handed
  * over as the block's reads convert it (see {@link VariableReadConversion}).
  */
@@ -42,7 +43,7 @@ public final class HandlerGuardedVariables extends TreeMap<String, Object> {
      * @param reads       converts a value as the expression reads it, or null to hand each value over as held
      */
     public HandlerGuardedVariables(final HandlerLets handlerLets, final VariableReadConversion reads) {
-        super(String.CASE_INSENSITIVE_ORDER);
+        super();
         this.handlerLets = handlerLets;
         this.reads = reads;
     }
@@ -54,7 +55,7 @@ public final class HandlerGuardedVariables extends TreeMap<String, Object> {
         if (key instanceof String) {
             handlerLets.requireReadable((String) key, 0, 0);
         }
-        return super.containsKey(key);
+        return super.containsKey(key) || foldedKey(key) != null;
     }
 
     @Override
@@ -63,7 +64,25 @@ public final class HandlerGuardedVariables extends TreeMap<String, Object> {
             return super.get(key);
         }
         handlerLets.requireReadable((String) key, 0, 0);
-        final Object value = super.get(key);
-        return reads == null ? value : reads.read((String) key, value);
+        final String held = super.containsKey(key) ? (String) key : foldedKey(key);
+        final Object value = held == null ? null : super.get(held);
+        return reads == null ? value : reads.read(held == null ? (String) key : held, value);
+    }
+
+    /** The one name held that differs from a name asked only by case, where the name itself is not held. */
+    private String foldedKey(final Object key) {
+        if (!(key instanceof String)) {
+            return null;
+        }
+        String found = null;
+        for (final String name : keySet()) {
+            if (name.equalsIgnoreCase((String) key)) {
+                if (found != null) {
+                    return null;
+                }
+                found = name;
+            }
+        }
+        return found;
     }
 }

@@ -39,36 +39,40 @@ public final class RegexpHelper {
     }
 
     /**
-     * Map Snowflake {@code regex_parameters} to {@code java.util.regex} flags: {@code i} → CASE_INSENSITIVE,
-     * {@code m} → MULTILINE, {@code s} → DOTALL. {@code c} (case-sensitive, the default) undoes an earlier
-     * {@code i}, and {@code e} (handled by the caller) contributes no flag; {@link #compile} refuses any other
-     * letter.
+     * Map Snowflake {@code regex_parameters} to {@code java.util.regex} flags. The account's matcher breaks lines
+     * at {@code \n} alone, so every pattern compiles with UNIX_LINES, and {@code s} lets the dot take a newline
+     * (DOTALL). {@code i} and {@code c} (case folding, the later one winning) and {@code m} (multi-line anchors) are
+     * written into the pattern itself by {@link Re2PatternReader}, and {@code e} (handled by the caller)
+     * contributes no flag; {@link #compile} refuses any other letter.
      */
-    public static int toJavaFlags(final String parameters) {
-        int flags = 0;
-        if (parameters == null) {
-            return flags;
-        }
-        for (int i = 0; i < parameters.length(); i++) {
-            switch (parameters.charAt(i)) {
-                case 'i':
-                    flags |= Pattern.CASE_INSENSITIVE;
-                    break;
-                case 'c':
-                    // The later of c and i wins: 'ic' matches case, 'ci' ignores it (live-verified).
-                    flags &= ~Pattern.CASE_INSENSITIVE;
-                    break;
-                case 'm':
-                    flags |= Pattern.MULTILINE;
-                    break;
-                case 's':
-                    flags |= Pattern.DOTALL;
-                    break;
-                default:
-                    break;
-            }
+    static int toJavaFlags(final String parameters) {
+        int flags = Pattern.UNIX_LINES;
+        if (parameters != null && parameters.indexOf('s') >= 0) {
+            flags |= Pattern.DOTALL;
         }
         return flags;
+    }
+
+    /** Whether the parameters fold case: the later of {@code c} and {@code i} wins, 'ic' matching case and 'ci'
+     *  ignoring it (live-verified). */
+    static boolean caseless(final String parameters) {
+        boolean caseless = false;
+        if (parameters == null) {
+            return caseless;
+        }
+        for (int i = 0; i < parameters.length(); i++) {
+            if (parameters.charAt(i) == 'i') {
+                caseless = true;
+            } else if (parameters.charAt(i) == 'c') {
+                caseless = false;
+            }
+        }
+        return caseless;
+    }
+
+    /** Whether the parameters make {@code ^} and {@code $} match at every line's start and end. */
+    static boolean multiLine(final String parameters) {
+        return parameters != null && parameters.indexOf('m') >= 0;
     }
 
     /** Whether the {@code e} (extract submatch) flag is present in the parameters string. */
@@ -92,7 +96,7 @@ public final class RegexpHelper {
             return existing;
         }
         requireKnownParameters(parameters);
-        final Re2PatternReader read = new Re2PatternReader(pattern);
+        final Re2PatternReader read = new Re2PatternReader(pattern, multiLine(parameters), caseless(parameters));
         if (read.refusal() != null) {
             throw new RuntimeException(read.refusal());
         }

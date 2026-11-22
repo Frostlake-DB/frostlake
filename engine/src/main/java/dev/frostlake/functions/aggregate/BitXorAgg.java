@@ -48,4 +48,13 @@ public class BitXorAgg extends AggregateFunction {
         return SemiStructuredRejection.ARGUMENT_TYPES;
     }
 
+    /**
+     * Nor is a BINARY, though the bitwise scalars take one byte-wise: the aggregates have no such form, and refuse it
+     * by its type - "(BINARY(2))" - however many rows reach the call (live-verified).
+     */
+    @Override
+    public SemiStructuredRejection binaryRejection(final int position) {
+        return SemiStructuredRejection.ARGUMENT_TYPES;
+    }
+
 }

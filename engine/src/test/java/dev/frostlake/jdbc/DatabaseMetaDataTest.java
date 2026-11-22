@@ -879,6 +879,32 @@ public class DatabaseMetaDataTest extends BaseJdbcTest {
     }
 
     @Test
+    public void testGetColumnsTellsADefaultAsTheMetadataViewsDo() throws SQLException {
+        // Frostlake's driver reads COLUMN_DEF from INFORMATION_SCHEMA.COLUMNS, so it is the default as DESCRIBE tells
+        // it: a string keeps its quotes even when it spells a keyword, a boolean is in capitals, and an explicit
+        // DEFAULT NULL is no default. Snowflake's driver takes the quotes off a string default (both live-verified).
+        statement.execute("""
+            CREATE TABLE coldef_text (
+                b VARCHAR DEFAULT 'it''s', c BOOLEAN DEFAULT TRUE, d VARCHAR DEFAULT '',
+                e VARCHAR DEFAULT 'NULL', f VARCHAR DEFAULT 'current_date', k VARCHAR DEFAULT NULL)
+            """);
+        final Map<String, String> told = new TreeMap<>();
+        try (ResultSet rs = connection.getMetaData().getColumns("TEST_DB", "PUBLIC", "COLDEF_TEXT", "%")) {
+            while (rs.next()) {
+                told.put(rs.getString("COLUMN_NAME").toUpperCase(Locale.ROOT), rs.getString("COLUMN_DEF"));
+            }
+        }
+        final boolean unquoted = isSnowflakeDriver();
+        assertEquals(unquoted ? "it's" : "'it''s'", told.get("B"));
+        assertEquals("TRUE", told.get("C"));
+        assertEquals(unquoted ? "" : "''", told.get("D"));
+        assertEquals(unquoted ? "NULL" : "'NULL'", told.get("E"));
+        assertEquals(unquoted ? "current_date" : "'current_date'", told.get("F"));
+        assertTrue(told.containsKey("K"));
+        assertNull(told.get("K"), "an explicit DEFAULT NULL is no default");
+    }
+
+    @Test
     public void testGetColumnsTypesAViewOverASchemaQualifiedTable() throws SQLException {
         // A table reached through a schema-qualified FROM used to look like a DERIVED relation to the
         // static-type channel, because the check asked the catalog to re-resolve its BARE name — which

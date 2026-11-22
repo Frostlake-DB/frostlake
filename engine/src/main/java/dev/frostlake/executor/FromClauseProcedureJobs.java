@@ -216,7 +216,7 @@ final class FromClauseProcedureJobs {
             return lastPart(dml.deleteStatement().objectName(), executor);
         }
         if (dml.mergeStatement() != null) {
-            return lastPart(dml.mergeStatement().qualifiedName(), executor);
+            return lastPart(dml.mergeStatement().objectName(), executor);
         }
         return null;
     }

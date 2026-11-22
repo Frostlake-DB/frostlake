@@ -16,6 +16,7 @@
 
 package dev.frostlake.rt.scala;
 
+import com.snowflake.snowpark.FrostlakeSnowparkBridge;
 import com.snowflake.snowpark_java.Session;
 import dev.frostlake.DatabaseEngine;
 import dev.frostlake.executor.udf.HandlerArguments;
@@ -99,12 +100,17 @@ public final class ScalaProcedureExecutor {
         }
 
         final Method target = findMethod(clazz, methodName, args.length);
+        // A handler written against the Scala API takes that API's session, over the same one.
+        if (target.getParameterTypes()[0] == com.snowflake.snowpark.Session.class) {
+            args[0] = FrostlakeSnowparkBridge.session(session);
+        }
         // Each argument as the class the handler declares for it, as a Java handler's are.
         final Object[] adapted = HandlerArguments.adapt(target.getParameterTypes(), args, procedure.getParameters(),
             procedure.getName(), procedure.getHandler());
         UdfConsoleCapture.enter();
         try {
-            return target.invoke(instance, adapted);
+            // A Scala DataFrame a table procedure hands back is read as the Java API's under it.
+            return FrostlakeSnowparkBridge.javaResult(target.invoke(instance, adapted));
         } catch (final InvocationTargetException e) {
             // What the handler raised reaches SQL as its report, as a function's handler's does (live-verified),
             // a statement it ran through its session that failed included.

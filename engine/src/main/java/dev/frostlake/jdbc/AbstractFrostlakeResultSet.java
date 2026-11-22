@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.net.URL;
 import java.sql.Array;
 import java.sql.Blob;
@@ -430,9 +431,11 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
         return cell == null ? null : decimal(columnIndex, cell);
     }
 
+    /** The value at the scale asked for, rounded half up, as the account's driver reads it (live-verified). */
     @Override
     public BigDecimal getBigDecimal(final int columnIndex, final int scale) throws SQLException {
-        return getBigDecimal(columnIndex);
+        final BigDecimal value = getBigDecimal(columnIndex);
+        return value == null ? null : value.setScale(scale, RoundingMode.HALF_UP);
     }
 
     @Override
@@ -448,6 +451,14 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
 
     @Override
     public Date getDate(final int columnIndex) throws SQLException {
+        try {
+            return dateAt(columnIndex);
+        } catch (final ArithmeticException beyond) {
+            throw beyondReach(columnIndex, "java.sql.Date");
+        }
+    }
+
+    private Date dateAt(final int columnIndex) throws SQLException {
         final IntervalKind interval = intervalKind(columnIndex, read(columnIndex));
         if (interval != null) {
             return IntervalColumnReads.getDate(interval);
@@ -472,6 +483,14 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
 
     @Override
     public Timestamp getTimestamp(final int columnIndex) throws SQLException {
+        try {
+            return timestampAt(columnIndex);
+        } catch (final ArithmeticException beyond) {
+            throw beyondReach(columnIndex, "java.sql.Timestamp");
+        }
+    }
+
+    private Timestamp timestampAt(final int columnIndex) throws SQLException {
         final IntervalKind interval = intervalKind(columnIndex, read(columnIndex));
         if (interval != null) {
             return IntervalColumnReads.getTimestamp(interval);
@@ -489,8 +508,12 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
         }
         final Object cell = temporalCell(columnIndex, "date");
         final TemporalColumnKind kind = temporalKind(columnIndex);
-        return cell == null || kind == null ? JdbcMarshaling.toDate(cell, cal)
-            : TemporalCellReads.date(cell, kind, sessionZone(), cal);
+        try {
+            return cell == null || kind == null ? JdbcMarshaling.toDate(cell, cal)
+                : TemporalCellReads.date(cell, kind, sessionZone(), cal);
+        } catch (final ArithmeticException beyond) {
+            throw beyondReach(columnIndex, "java.sql.Date");
+        }
     }
 
     @Override
@@ -506,12 +529,16 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
         }
         final Object cell = temporalCell(columnIndex, "timestamp");
         final TemporalColumnKind kind = temporalKind(columnIndex);
-        if (cell == null || kind == null) {
-            // A TIME is read without the Calendar, and any other cell in the Calendar's zone.
-            return jdbcType(columnIndex) == Types.TIME ? JdbcMarshaling.toTimestamp(cell, Types.TIME)
-                : JdbcMarshaling.toTimestamp(cell, cal);
+        try {
+            if (cell == null || kind == null) {
+                // A TIME is read without the Calendar, and any other cell in the Calendar's zone.
+                return jdbcType(columnIndex) == Types.TIME ? JdbcMarshaling.toTimestamp(cell, Types.TIME)
+                    : JdbcMarshaling.toTimestamp(cell, cal);
+            }
+            return TemporalCellReads.timestamp(cell, kind, sessionZone(), cal);
+        } catch (final ArithmeticException beyond) {
+            throw beyondReach(columnIndex, "java.sql.Timestamp");
         }
-        return TemporalCellReads.timestamp(cell, kind, sessionZone(), cal);
     }
 
     @Override
@@ -530,8 +557,24 @@ public abstract class AbstractFrostlakeResultSet implements ResultSet {
             // VARIANT of 0.0000001 is the String 0.0000001, the VARIANT of TRUE the String true).
             return text(columnIndex, cell);
         }
-        final Object temporal = TemporalCellReads.object(cell, temporalKind(columnIndex), sessionZone());
+        final Object temporal;
+        try {
+            temporal = TemporalCellReads.object(cell, temporalKind(columnIndex), sessionZone());
+        } catch (final ArithmeticException beyond) {
+            throw beyondReach(columnIndex, temporalKind(columnIndex) == TemporalColumnKind.DATE ? "java.sql.Date"
+                : "java.sql.Timestamp");
+        }
         return temporal != null ? temporal : object(columnIndex, cell);
+    }
+
+    /**
+     * The refusal of a date or a timestamp past what a java.sql value's long of milliseconds reaches (about year
+     * 292 million either side): a Calendar would wrap it to another moment without a word. Only this engine keeps
+     * such a value - the account wraps it before any client reads it - so the sentence is the driver's own.
+     */
+    private SQLException beyondReach(final int columnIndex, final String javaType) throws SQLException {
+        return new SQLException("The value " + getString(columnIndex) + " is beyond the reach of a " + javaType
+            + "; read it with getString.", "22008");
     }
 
     /** Whether a column holds semi-structured values, by the type its metadata names: a VARIANT, OBJECT or ARRAY. */

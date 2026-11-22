@@ -30,6 +30,7 @@ import dev.frostlake.types.StringType;
 import dev.frostlake.types.VariantType;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.Decfloats;
+import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantValue;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -144,7 +145,9 @@ final class CsvUnloadWriter {
             return (String) value;
         }
         if (value instanceof VariantValue) {
-            return ((VariantValue) value).text();
+            // A DOUBLE is written as TO_JSON spells it, 1.000000000000000e+20 (see VariantJsonText).
+            final String converted = VariantJsonText.convertedTextOf(value);
+            return converted != null ? converted : ((VariantValue) value).text();
         }
         String format = null;
         if (type instanceof BinaryType || value instanceof BinaryValue) {

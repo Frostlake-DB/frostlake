@@ -30,7 +30,7 @@ public class ToGeometry extends BuiltInFunction {
     public Object evaluate(final List<Object> args) {
         if (args.get(0) == null) return null;
         if (args.get(0) instanceof GeoValue) return args.get(0);
-        final GeoValue parsed = GeoShapes.parse(args.get(0).toString(), false);
+        final GeoValue parsed = GeoShapes.parse(args.get(0), false);
         if (parsed == null) {
             return null;
         }

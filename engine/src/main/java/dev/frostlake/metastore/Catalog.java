@@ -29,6 +29,7 @@ import dev.frostlake.metastore.model.Contact;
 import dev.frostlake.metastore.model.CortexSearchService;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DatabaseRole;
+import dev.frostlake.metastore.model.FailoverGroup;
 import dev.frostlake.metastore.model.FileFormat;
 import dev.frostlake.metastore.model.JoinPolicy;
 import dev.frostlake.metastore.model.MaskingPolicy;
@@ -39,10 +40,12 @@ import dev.frostlake.metastore.model.PrivacyPolicy;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.ProjectionPolicy;
 import dev.frostlake.metastore.model.RelationKind;
+import dev.frostlake.metastore.model.ResourceMonitor;
 import dev.frostlake.metastore.model.Role;
 import dev.frostlake.metastore.model.RowAccessPolicy;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObjectStore;
+import dev.frostlake.metastore.model.Share;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.StageType;
 import dev.frostlake.metastore.model.StorageLifecyclePolicy;
@@ -76,6 +79,8 @@ public class Catalog {
     // The account locator a fully qualified name may lead with; null until the engine sets it.
     private String accountLocator;
     private final Map<String, Database> databases;
+    /** Whether a tag has carried a masking policy, so that a query reads the tags reaching what it reads. */
+    private volatile boolean tagMasking;
     private final Map<String, Warehouse> warehouses;
     private final Map<String, ComputePool> computePools = new ConcurrentHashMap<>();
     private final IntegrationRegistry integrations = new IntegrationRegistry();
@@ -93,6 +98,9 @@ public class Catalog {
      */
     private final Map<String, Set<String>> copyLoadedFiles = new ConcurrentHashMap<>();
     private final ExternalVolumeRegistry externalVolumes = new ExternalVolumeRegistry();
+    private final AccountObjectRegistry<ResourceMonitor> resourceMonitors = new AccountObjectRegistry<>();
+    private final AccountObjectRegistry<Share> shares = new AccountObjectRegistry<>();
+    private final AccountObjectRegistry<FailoverGroup> failoverGroups = new AccountObjectRegistry<>();
     private final Map<String, User> users;
     private final Map<String, Role> roles;
     private final AccountDirectory accountDirectory = new AccountDirectory();
@@ -162,10 +170,10 @@ public class Catalog {
     // oldest first. UNDROP restores the newest, and the next UNDROP of the name the one dropped before it.
     private final Map<String, List<DroppedObject>> droppedObjects = new ConcurrentHashMap<>();
     /**
-     * The latest table or schema version of each name purged with a retention of 0, kept only to be listed (see
-     * {@link #listedOnlyVersions}); guarded by the dropped versions' lock.
+     * The table, schema and database versions purged with a retention of 0, kept only to be listed (see
+     * {@link #listedOnlyVersions}), each name's oldest first; guarded by the dropped versions' lock.
      */
-    private final Map<String, DroppedObject> listedOnly = new HashMap<>();
+    private final Map<String, List<DroppedObject>> listedOnly = new HashMap<>();
 
     /** Told of every dropped version {@link #purgeExpiredDropped} forgets for good; null for none. */
     private volatile DroppedVersionPurge droppedVersionPurge;
@@ -433,7 +441,27 @@ public class Catalog {
      *
      * @param home       the policy's schema
      * @param policyName the policy's own name */
+    /**
+     * Notes that a tag carries a masking policy, after which a query reads the tags reaching the columns it reads.
+     */
+    public void noteTagMasking() {
+        tagMasking = true;
+    }
+
+    /**
+     * Whether a tag has carried a masking policy since the catalog was made or restored.
+     *
+     * @return whether the tags reaching a column are to be read for its masking
+     */
+    public boolean isTagMaskingInUse() {
+        return tagMasking;
+    }
+
     public boolean isPolicyInUse(final Schema home, final String policyName, final boolean masking) {
+        if (masking && tagMasking && TagMaskingPolicies.carried(this, home, policyName)) {
+            // A tag carrying the policy holds it as a column does (live-verified).
+            return true;
+        }
         for (final Database database : getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
                 for (final Table table : schema.getTables()) {
@@ -1272,6 +1300,21 @@ public class Catalog {
         return copyLoadedFiles;
     }
 
+    /** The account's resource monitors. */
+    public AccountObjectRegistry<ResourceMonitor> getResourceMonitors() {
+        return resourceMonitors;
+    }
+
+    /** The account's outbound shares. */
+    public AccountObjectRegistry<Share> getShares() {
+        return shares;
+    }
+
+    /** The account's failover groups. */
+    public AccountObjectRegistry<FailoverGroup> getFailoverGroups() {
+        return failoverGroups;
+    }
+
     /** The account's external volumes. */
     public ExternalVolumeRegistry getExternalVolumes() {
         return externalVolumes;
@@ -1472,7 +1515,6 @@ public class Catalog {
         synchronized (droppedObjects) {
             // The versions whose retention ran out go first, so a long run of drops holds no rows nothing can restore.
             purgeExpiredDropped();
-            listedOnly.remove(key);
             List<DroppedObject> versions = droppedObjects.get(key);
             if (versions == null) {
                 versions = new ArrayList<>();
@@ -1520,16 +1562,21 @@ public class Catalog {
     }
 
     /**
-     * The table and schema versions purged with a retention of 0 that SHOW TABLES HISTORY and SHOW SCHEMAS HISTORY
-     * still list, by "TABLE:fqName" and "SCHEMA:fqName": the latest of each name until the name is dropped again,
-     * which UNDROP no longer finds (live-verified).
+     * The table, schema and database versions purged with a retention of 0 that SHOW TABLES, SCHEMAS and DATABASES
+     * HISTORY still list, by "TABLE:fqName", "SCHEMA:fqName" and "DATABASE:name", which UNDROP no longer finds: every
+     * version of the name, a replaced one and a dropped one alike, however often the name is dropped again
+     * (live-verified).
      *
-     * @return a copy of the listings
+     * @return a copy of the listings, each name's oldest first
      */
-    public Map<String, DroppedObject> listedOnlyVersions() {
+    public Map<String, List<DroppedObject>> listedOnlyVersions() {
         synchronized (droppedObjects) {
             purgeExpiredDropped();
-            return new TreeMap<>(listedOnly);
+            final Map<String, List<DroppedObject>> copy = new TreeMap<>();
+            for (final Map.Entry<String, List<DroppedObject>> entry : listedOnly.entrySet()) {
+                copy.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+            }
+            return copy;
         }
     }
 
@@ -1558,11 +1605,16 @@ public class Catalog {
                 if (!version.isPurgedAt(now)) {
                     kept.add(version);
                 } else {
-                    // A table or a schema kept for no day is still listed, its data gone, until its name is dropped
-                    // again.
-                    if (version.getRetentionDays() <= 0
-                            && (version.getObject() instanceof Table || version.getObject() instanceof Schema)) {
-                        listedOnly.put(entry.getKey(), version.listedOnly());
+                    // A table, a schema or a database kept for no day is still listed, its data gone, every version of
+                    // its name alike (live-verified).
+                    if (version.getRetentionDays() <= 0 && (version.getObject() instanceof Table
+                            || version.getObject() instanceof Schema || version.getObject() instanceof Database)) {
+                        List<DroppedObject> listed = listedOnly.get(entry.getKey());
+                        if (listed == null) {
+                            listed = new ArrayList<>();
+                            listedOnly.put(entry.getKey(), listed);
+                        }
+                        listed.add(version.listedOnly());
                     }
                     if (purge != null) {
                         purge.purged(entry.getKey(), version);

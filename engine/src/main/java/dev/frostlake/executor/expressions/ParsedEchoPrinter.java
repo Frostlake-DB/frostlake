@@ -93,6 +93,18 @@ public final class ParsedEchoPrinter extends AstPrinterVisitor {
     }
 
     /**
+     * A printer for a query's own expressions, every operator a call, that spells the calls {@code spelled} knows
+     * its way.
+     *
+     * @param queries prints the queries the expressions hold
+     * @param spelled how the calls it knows are printed
+     * @return the printer
+     */
+    static ParsedEchoPrinter inQuery(final ParsedQueryEcho queries, final CallEcho spelled) {
+        return new ParsedEchoPrinter(true, true, queries, false, spelled, null);
+    }
+
+    /**
      * A printer for a query's own expressions where the query is printed resolved: the operators as written, and a
      * bare name its relation's.
      *

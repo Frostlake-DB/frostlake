@@ -84,4 +84,37 @@ public class JoinKeyPlacementTest extends BaseDatabaseTest {
         assertEquals("3", count("SELECT COUNT(*) FROM ua FULL JOIN ub USING (k) JOIN uc ON k = uc.ck",
             "INNER JOIN[joined x UC ON k = uc.ck]"));
     }
+    @Test
+    public void aNullSafeEqualityKeysTheJoin() {
+        engine.execute("CREATE TABLE na (k INT)");
+        engine.execute("INSERT INTO na SELECT IFF(SEQ4() % 4 = 0, NULL, SEQ4()) FROM TABLE(GENERATOR(ROWCOUNT => 400))");
+        engine.execute("CREATE TABLE nb (bk INT)");
+        engine.execute("INSERT INTO nb SELECT IFF(SEQ4() % 4 = 0, NULL, SEQ4()) FROM TABLE(GENERATOR(ROWCOUNT => 400))");
+        assertEquals("10300", count("SELECT COUNT(*) FROM na JOIN nb ON EQUAL_NULL(na.k, nb.bk)", "| HASH K=BK]"));
+        assertEquals("10300", count("SELECT COUNT(*) FROM na JOIN nb ON na.k IS NOT DISTINCT FROM nb.bk",
+            "| HASH K=BK]"));
+        assertEquals("10300", count("SELECT COUNT(*) FROM na, nb WHERE nb.bk IS NOT DISTINCT FROM na.k",
+            "CROSS JOIN[NA x NB | HASH K=BK]"));
+        assertEquals("10299", count("SELECT COUNT(*) FROM na JOIN nb ON EQUAL_NULL(na.k, nb.bk) AND na.k IS DISTINCT"
+            + " FROM 1", "| HASH K=BK]"));
+    }
+
+    @Test
+    public void anExpressionOfEachSideKeysTheJoin() {
+        assertEquals("20", count("SELECT COUNT(*) FROM a JOIN b ON COALESCE(a.k, -1) = COALESCE(b.bk, -1)",
+            "| HASH COALESCE("));
+        assertEquals("20", count("SELECT COUNT(*) FROM a JOIN b ON a.k::VARCHAR = b.bk::VARCHAR",
+            "| HASH CAST("));
+        assertEquals("19", count("SELECT COUNT(*) FROM a JOIN b ON a.k + 1 = b.bk", "| HASH "));
+        assertEquals("20", count("SELECT COUNT(*) FROM a, b WHERE TO_VARCHAR(a.k) = TO_VARCHAR(b.bk)",
+            "CROSS JOIN[A x B | HASH "));
+    }
+
+    @Test
+    public void anExpressionReadingBothSidesOrAVolatileCallKeysNothing() {
+        assertEquals("20", count("SELECT COUNT(*) FROM a JOIN b ON a.k + b.j = b.bk + b.j",
+            "INNER JOIN[A x B ON a.k + b.j = b.bk + b.j]"));
+        assertEquals("0", count("SELECT COUNT(*) FROM a JOIN b ON a.k + RANDOM() = b.bk + 0.5",
+            "INNER JOIN[A x B ON a.k + RANDOM() = b.bk + 0.5]"));
+    }
 }

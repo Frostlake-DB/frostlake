@@ -136,7 +136,9 @@ public class QueryPointLog {
         Files.deleteIfExists(tmp);
         try {
             writeFresh(tmp, points);
+            DurableFiles.syncFile(tmp);
             Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            DurableFiles.syncDirectory(path.toAbsolutePath().getParent());
         } finally {
             open();
         }
@@ -165,15 +167,17 @@ public class QueryPointLog {
         final int from = (int) Math.max(HEADER_BYTES, Math.min(mark, all.length));
         out.close();
         final Path tmp = path.resolveSibling(path.getFileName() + ".compact");
-        try (FileOutputStream tmpOut = new FileOutputStream(tmp.toFile(), false);
-             DataOutputStream header = new DataOutputStream(tmpOut)) {
-            header.writeInt(MAGIC);
-            header.writeByte(VERSION);
-            header.write(all, from, all.length - from);
-            header.flush();
-        }
         try {
+            try (FileOutputStream tmpOut = new FileOutputStream(tmp.toFile(), false);
+                 DataOutputStream header = new DataOutputStream(tmpOut)) {
+                header.writeInt(MAGIC);
+                header.writeByte(VERSION);
+                header.write(all, from, all.length - from);
+                header.flush();
+                tmpOut.getFD().sync();
+            }
             Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            DurableFiles.syncDirectory(path.toAbsolutePath().getParent());
         } finally {
             open();
         }

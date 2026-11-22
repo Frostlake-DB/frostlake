@@ -234,5 +234,14 @@
                 </plugins>
             </build>
         </profile>
+        <!-- The Snowflake JDBC transport (sf-transport, activate with -Psf-transport): built only on request,
+             against a Snowflake JDBC driver build that offers the HttpTransport SPI, which no released driver does
+             yet (see sf-transport/pom.xml). Not published: it keeps the parent's maven.deploy.skip. -->
+        <profile>
+            <id>sf-transport</id>
+            <modules>
+                <module>sf-transport</module>
+            </modules>
+        </profile>
     </profiles>
 </project>

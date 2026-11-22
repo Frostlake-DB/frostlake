@@ -16,7 +16,6 @@
 
 package dev.frostlake.task;
 
-import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.executor.StatementClock;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
@@ -41,20 +40,21 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -67,6 +67,9 @@ public class TaskScheduler {
     private final Catalog catalog;
     private ScheduledExecutorService scheduler;
     private final Map<String, ScheduledFuture<?>> scheduledTasks;
+    // The task each armed task timer runs, by scheduler key: the very object, so a timer of a task since dropped
+    // or replaced under the same name is told apart from the task the catalog holds now.
+    private final Map<String, ArmedTask> armedTasks = new ConcurrentHashMap<>();
     private final TaskExecutor taskExecutor;
     private volatile boolean running;
 
@@ -165,7 +168,12 @@ public class TaskScheduler {
         dynamicTableSweep = scheduler.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
-                refreshDueDynamicTables(Instant.now());
+                taskExecutor.runScheduled(new Runnable() {
+                    @Override
+                    public void run() {
+                        refreshDueDynamicTables(Instant.now());
+                    }
+                });
             }
         }, DYNAMIC_TABLE_SWEEP_SECONDS, DYNAMIC_TABLE_SWEEP_SECONDS, TimeUnit.SECONDS);
         logger.info("Task scheduler started");
@@ -271,17 +279,51 @@ public class TaskScheduler {
 
     /** Arm every STARTED task in the catalog that is not already scheduled. */
     private void armStartedTasks() {
+        for (final Map.Entry<Task, String> held : heldTasks().entrySet()) {
+            if (held.getKey().getState() == TaskState.STARTED) {
+                // An armed task keeps its timer: scheduleTask stacks no second one.
+                scheduleTask(held.getValue(), held.getKey());
+            }
+        }
+    }
+
+    /** Every task the catalog holds, by identity, with its scheduler key. */
+    private Map<Task, String> heldTasks() {
+        final Map<Task, String> held = new IdentityHashMap<>();
         for (final Database database : catalog.getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
-                for (final Task task : schema.getTasks()) {
-                    if (task.getState() != TaskState.STARTED) {
-                        continue;
+                for (final Task task : new ArrayList<>(schema.getTasks())) {
+                    held.put(task, schedulerKey(database.getName(), schema.getName(), task.getName()));
+                }
+            }
+        }
+        return held;
+    }
+
+    /**
+     * Brings the task timers in line with the catalog after a statement that may have dropped, replaced, moved or
+     * restored tasks: a timer whose task the catalog no longer holds where it was armed, or that is no longer started
+     * on that schedule, is cancelled, and while the scheduler runs every started task the catalog holds is armed,
+     * one an UNDROP brought back started among them. A task that keeps its place and its schedule keeps its timer.
+     */
+    public void reconcile() {
+        if (!running && armedTasks.isEmpty()) {
+            return;
+        }
+        final Map<Task, String> held = heldTasks();
+        synchronized (armLock) {
+            for (final Map.Entry<String, ArmedTask> armed : new ArrayList<>(armedTasks.entrySet())) {
+                final Task task = armed.getValue().getTask();
+                if (!armed.getKey().equals(held.get(task)) || task.getState() != TaskState.STARTED
+                        || !armed.getValue().arms(task)) {
+                    unscheduleTask(armed.getKey());
+                }
+            }
+            if (running) {
+                for (final Map.Entry<Task, String> task : held.entrySet()) {
+                    if (task.getKey().getState() == TaskState.STARTED) {
+                        scheduleTask(task.getValue(), task.getKey());
                     }
-                    final String key = schedulerKey(database.getName(), schema.getName(), task.getName());
-                    if (scheduledTasks.containsKey(key)) {
-                        continue; // already armed — do not stack a second timer on the same task
-                    }
-                    scheduleTask(key, task);
                 }
             }
         }
@@ -302,6 +344,7 @@ public class TaskScheduler {
             future.cancel(false);
         }
         scheduledTasks.clear();
+        armedTasks.clear();
         cronGenerations.clear();
 
         scheduler.shutdown();
@@ -334,39 +377,67 @@ public class TaskScheduler {
             return;
         }
 
-        // A CRON schedule names calendar instants, not an interval: see armCron.
-        if (task.getScheduleType() == ScheduleType.CRON) {
-            armCron(qualifiedTaskName, task);
-            return;
-        }
+        synchronized (armLock) {
+            final ArmedTask armed = armedTasks.get(qualifiedTaskName);
+            if (armed != null && armed.arms(task) && scheduledTasks.containsKey(qualifiedTaskName)) {
+                // RESUME of a task already started: its timer runs on as it was, and no second one is armed.
+                return;
+            }
+            // A timer of another task under this key - one dropped or replaced - or of this task under the key it
+            // had before it moved, goes before this one is armed.
+            unscheduleTask(qualifiedTaskName);
+            disarmTimersOf(task);
 
-        // Parse schedule
-        final long delaySeconds = parseSchedule(task.getSchedule(), task.getScheduleType());
-
-        // Schedule the task. The first run happens at the NEXT schedule tick (Snowflake semantics),
-        // not immediately on RESUME.
-        final ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(
-            new Runnable() {
-                @Override
-                public void run() {
-                    executeTask(qualifiedTaskName, task);
+            // A CRON schedule names calendar instants, not an interval: see armCron.
+            if (task.getScheduleType() == ScheduleType.CRON) {
+                armCron(qualifiedTaskName, task);
+                if (scheduledTasks.containsKey(qualifiedTaskName)) {
+                    armedTasks.put(qualifiedTaskName, new ArmedTask(task, task.getSchedule()));
                 }
-            },
-            delaySeconds,
-            delaySeconds,
-            TimeUnit.SECONDS
-        );
+                return;
+            }
 
-        scheduledTasks.put(qualifiedTaskName, future);
-        task.setNextRunTime(Instant.now().plusSeconds(delaySeconds));
+            // Parse schedule
+            final long delaySeconds = parseSchedule(task.getSchedule(), task.getScheduleType());
 
-        logger.info("Scheduled task: {} with interval: {} seconds", qualifiedTaskName, delaySeconds);
+            // Schedule the task. The first run happens at the NEXT schedule tick (Snowflake semantics),
+            // not immediately on RESUME.
+            final ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        fireScheduled(qualifiedTaskName, task);
+                    }
+                },
+                delaySeconds,
+                delaySeconds,
+                TimeUnit.SECONDS
+            );
+
+            scheduledTasks.put(qualifiedTaskName, future);
+            armedTasks.put(qualifiedTaskName, new ArmedTask(task, task.getSchedule()));
+            task.setNextRunTime(Instant.now().plusSeconds(delaySeconds));
+
+            logger.info("Scheduled task: {} with interval: {} seconds", qualifiedTaskName, delaySeconds);
+        }
+    }
+
+    /** Cancels every timer armed for this very task, under whichever key it was armed. */
+    private void disarmTimersOf(final Task task) {
+        synchronized (armLock) {
+            for (final Map.Entry<String, ArmedTask> armed : new ArrayList<>(armedTasks.entrySet())) {
+                if (armed.getValue().getTask() == task) {
+                    unscheduleTask(armed.getKey());
+                }
+            }
+        }
     }
 
     public void unscheduleTask(final String qualifiedTaskName) {
         final ScheduledFuture<?> future;
         synchronized (armLock) {
             cronGenerations.remove(qualifiedTaskName);
+            armedTasks.remove(qualifiedTaskName);
             future = scheduledTasks.remove(qualifiedTaskName);
         }
         if (future != null) {
@@ -408,7 +479,7 @@ public class TaskScheduler {
                 @Override
                 public void run() {
                     try {
-                        executeTask(qualifiedTaskName, task);
+                        fireScheduled(qualifiedTaskName, task);
                     } finally {
                         rearmCron(qualifiedTaskName, task, generation);
                     }
@@ -499,7 +570,12 @@ public class TaskScheduler {
                     return;
                 }
                 try {
-                    new AlertRunner(catalog, taskExecutor).run(databaseName, schemaName, alert, "SCHEDULE");
+                    taskExecutor.runScheduled(new Runnable() {
+                        @Override
+                        public void run() {
+                            new AlertRunner(catalog, taskExecutor).run(databaseName, schemaName, alert, "SCHEDULE");
+                        }
+                    });
                 } catch (final RuntimeException failure) {
                     logger.error("Alert {} evaluation failed: {}", key, failure.getMessage());
                 } finally {
@@ -571,6 +647,32 @@ public class TaskScheduler {
     public void suspendTask(final String qualifiedTaskName, final Task task) {
         task.setState(TaskState.SUSPENDED);
         unscheduleTask(qualifiedTaskName);
+        disarmTimersOf(task);
+    }
+
+    /**
+     * A task's timer fired: the task runs, where the catalog holds it now, while it is the started task the catalog
+     * holds. A timer of a task since dropped or replaced - the task itself, or the schema or the database it was
+     * in - or suspended runs nothing, and is cancelled.
+     *
+     * @param qualifiedTaskName the key the timer was armed under
+     * @param task              the task the timer was armed for
+     */
+    void fireScheduled(final String qualifiedTaskName, final Task task) {
+        taskExecutor.runScheduled(new Runnable() {
+            @Override
+            public void run() {
+                // Judged holding the engine, so no statement drops the task between the look and the run.
+                final String home = heldTasks().get(task);
+                if (home == null || task.getState() != TaskState.STARTED) {
+                    logger.info("Task {} is no longer a started task of the catalog — its timer is cancelled",
+                        qualifiedTaskName);
+                    disarmTimersOf(task);
+                    return;
+                }
+                executeTask(home, task);
+            }
+        });
     }
 
     private void executeTask(final String qualifiedTaskName, final Task task) {
@@ -612,7 +714,8 @@ public class TaskScheduler {
                     && graphRunFailed(schema, root, began); retry++) {
                 retryGraphRun(rootKey, root, schema, began, null, TaskTrigger.AUTOMATIC_RETRY, config);
             }
-            final int attempt = schema == null ? 1 : TaskGraphs.lastAttempt(schema, root, began.getStartTime(), null);
+            final int attempt = schema == null ? 1
+                : TaskGraphs.lastAttempt(schema, root, began.getStartInstant(), null);
             if (attempt > 1) {
                 CURRENT_ATTEMPT.set(Integer.valueOf(attempt));
             }
@@ -643,7 +746,7 @@ public class TaskScheduler {
         tasks.add(root);
         tasks.addAll(TaskGraphs.descendants(schema, root, true));
         for (final Task task : tasks) {
-            final TaskExecution last = TaskGraphs.lastRunWithin(task, began.getStartTime(), null, 0);
+            final TaskExecution last = TaskGraphs.lastRunWithin(task, began.getStartInstant(), null, 0);
             if (last != null && TaskExecutionState.FAILED.name().equals(last.getState())) {
                 return true;
             }
@@ -749,12 +852,9 @@ public class TaskScheduler {
         }
     }
 
-    /**
-     * A run's stamp: an instant at the account's millisecond resolution, kept on the host-local wall clock the run
-     * models hold and read back by {@link ShowResultHelpers#createdOn(LocalDateTime)}.
-     */
-    private static LocalDateTime stamp(final Instant instant) {
-        return LocalDateTime.ofInstant(instant.truncatedTo(ChronoUnit.MILLIS), ZoneId.systemDefault());
+    /** A run's stamp: an instant at the account's millisecond resolution. */
+    private static Instant stamp(final Instant instant) {
+        return instant.truncatedTo(ChronoUnit.MILLIS);
     }
 
     /**
@@ -775,7 +875,7 @@ public class TaskScheduler {
      * (documented); its error is the condition's, 0040003 "Conditional expression for task evaluated to false.". It
      * counts neither as a success nor as a failure.
      */
-    private TaskExecution skipped(final LocalDateTime scheduledTime, final TaskTrigger trigger) {
+    private TaskExecution skipped(final Instant scheduledTime, final TaskTrigger trigger) {
         final Integer retried = CURRENT_ATTEMPT.get();
         return new TaskExecution(scheduledTime, scheduledTime, stamp(Instant.now()), TaskExecutionState.SKIPPED,
             "Conditional expression for task evaluated to false.", 0, trigger,
@@ -785,7 +885,7 @@ public class TaskScheduler {
     private void runTaskOnceInScope(final String qualifiedTaskName, final Task task, final GraphRun run,
                                     final TaskTrigger trigger) {
         // Read the way SQL reads the time, so what the run does next reads a later instant.
-        final LocalDateTime scheduledTime = stamp(StatementClock.observed());
+        final Instant scheduledTime = stamp(StatementClock.observed());
         logger.info("Executing task: {}", qualifiedTaskName);
         // (Predecessor gating is implemented by the cascade itself: a child runs only via
         // runDependentTasks once every predecessor has succeeded in this graph run (see GraphRun).
@@ -827,7 +927,7 @@ public class TaskScheduler {
             // body's CURRENT_TIMESTAMP is the start recorded here. On the scheduler's thread the body pins a later
             // instant than this reading.
             StatementClock.advance();
-            final LocalDateTime startTime = stamp(StatementClock.observed());
+            final Instant startTime = stamp(StatementClock.observed());
             // Until it ends the run is listed EXECUTING, while it waits for a held table too (live-verified).
             final TaskExecution running = new TaskExecution(scheduledTime, startTime, null,
                 TaskExecutionState.EXECUTING, null, 0, trigger, graphAttempt).ranAs(null, null, SCHEDULED_BY.get());
@@ -909,7 +1009,12 @@ public class TaskScheduler {
      * Execute a task immediately (for testing)
      */
     public void executeTaskNow(final String qualifiedTaskName, final Task task) {
-        executeTask(qualifiedTaskName, task);
+        taskExecutor.runScheduled(new Runnable() {
+            @Override
+            public void run() {
+                executeTask(qualifiedTaskName, task);
+            }
+        });
     }
 
     /**
@@ -995,8 +1100,8 @@ public class TaskScheduler {
         final List<TaskExecution> graphRuns = TaskGraphs.graphRuns(root);
         for (int i = graphRuns.size() - 1; i >= 0; i--) {
             final TaskExecution run = graphRuns.get(i);
-            if (group.equals(TaskGraphs.graphRunGroupId(root, TaskGraphs.runId(run.getScheduledTime())))) {
-                final LocalDateTime until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartTime() : null;
+            if (group.equals(TaskGraphs.graphRunGroupId(root, TaskGraphs.runId(run.getScheduledInstant())))) {
+                final Instant until = i + 1 < graphRuns.size() ? graphRuns.get(i + 1).getStartInstant() : null;
                 retryGraphRun(rootKey, root, schema, run, until, TaskTrigger.MANUAL_RETRY, root.getConfig());
                 return;
             }
@@ -1030,9 +1135,9 @@ public class TaskScheduler {
      * @param config   the configuration the retry's runs read
      */
     private void retryGraphRun(final String rootKey, final Task root, final Schema schema,
-                               final TaskExecution graphRun, final LocalDateTime until, final TaskTrigger trigger,
+                               final TaskExecution graphRun, final Instant until, final TaskTrigger trigger,
                                final String config) {
-        final LocalDateTime graphStart = graphRun.getStartTime();
+        final Instant graphStart = graphRun.getStartInstant();
         final int lastAttempt = TaskGraphs.lastAttempt(schema, root, graphStart, until);
         final String prior = CURRENT_GRAPH_CONFIG.get();
         CURRENT_GRAPH_CONFIG.set(config);
@@ -1084,14 +1189,30 @@ public class TaskScheduler {
      * graph functions do.
      */
     private static String noFailures(final Task root, final TaskExecution graphRun, final int lastAttempt) {
-        final Long runId = graphRun.getScheduledTime() == null ? null
-            : Long.valueOf(ShowResultHelpers.createdOn(graphRun.getScheduledTime()).toInstant().toEpochMilli());
+        final Long runId = TaskGraphs.runId(graphRun.getScheduledInstant());
         return "Cannot perform retry: run (GRAPH_RUN_GROUP_ID = " + GraphRunGroup.id(root.getId(), runId)
             + ", attempt = " + lastAttempt + ") of graph with root task " + root.getName() + " had no failures.";
     }
 
     public boolean isRunning() {
         return running;
+    }
+
+    /**
+     * How many timers of this scheduler's pool are pending: every armed schedule of a task or an alert, and the
+     * dynamic-table sweep while the scheduler runs. A cancelled timer no longer counts.
+     */
+    public int pendingTimerCount() {
+        if (!(scheduler instanceof ThreadPoolExecutor)) {
+            return 0;
+        }
+        int pending = 0;
+        for (final Runnable queued : ((ThreadPoolExecutor) scheduler).getQueue().toArray(new Runnable[0])) {
+            if (!(queued instanceof Future) || !((Future<?>) queued).isDone()) {
+                pending++;
+            }
+        }
+        return pending;
     }
 
     /**

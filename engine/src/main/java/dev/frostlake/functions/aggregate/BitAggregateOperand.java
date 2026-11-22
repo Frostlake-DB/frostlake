@@ -17,7 +17,10 @@
 
 package dev.frostlake.functions.aggregate;
 
+import dev.frostlake.executor.NumericConversionException;
+import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.DecimalText;
+import dev.frostlake.values.BinaryValue;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -38,6 +41,14 @@ final class BitAggregateOperand {
      * @return the whole number
      */
     static BigInteger of(final Object value) {
+        // A BINARY, a date or a time is refused by its type as the statement compiles, so one met here is a VARIANT's
+        // member, which converts to no number: "Failed to cast variant value "FF" to FIXED" (live-verified).
+        if (value instanceof BinaryValue) {
+            throw heldRefusal(((BinaryValue) value).toHex());
+        }
+        if (SharedFunctionHelpers.isNativeTemporal(value)) {
+            throw heldRefusal(SharedFunctionHelpers.variantTemporalText(SharedFunctionHelpers.inSessionZone(value)));
+        }
         final BigDecimal number;
         try {
             number = value instanceof BigDecimal ? (BigDecimal) value : DecimalText.parse(value.toString().trim());
@@ -46,5 +57,10 @@ final class BitAggregateOperand {
         }
         // All 128 bits the aggregates compute in, so 2^64 and past it keep their bits (live-verified).
         return number.setScale(0, RoundingMode.HALF_UP).toBigInteger();
+    }
+
+    /** The refusal of a VARIANT's member that spells its text in quotes and converts to no number. */
+    private static NumericConversionException heldRefusal(final String text) {
+        return new NumericConversionException("Failed to cast variant value \"" + text + "\" to FIXED");
     }
 }

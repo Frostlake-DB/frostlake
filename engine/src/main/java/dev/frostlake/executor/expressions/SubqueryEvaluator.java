@@ -1640,7 +1640,7 @@ final class SubqueryEvaluator {
         if (parsed != null && scalar && opensWithOuterAggregate(queryExecutor, parsed)) {
             throw unsupported(true, place);
         }
-        if (parsed != null && !outerHoldsOneRowAtMost(queryExecutor)) {
+        if (parsed != null && !(scalar && visitor.isCorrelationsPlanned()) && !outerHoldsOneRowAtMost(queryExecutor)) {
             final Set<String> outerNames = new HashSet<>();
             for (final String name : buildLateralContext().keySet()) {
                 outerNames.add(name.toUpperCase(Locale.ROOT));

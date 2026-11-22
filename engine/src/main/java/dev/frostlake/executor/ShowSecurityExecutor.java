@@ -382,17 +382,23 @@ final class ShowSecurityExecutor {
                     }
                     final boolean ownership = priv == Privilege.OWNERSHIP;
                     ownershipGranted = ownershipGranted || ownership;
-                    rows.add(new Row(Arrays.asList(
-                        grantedOn(role, objectType, spelling, priv),
-                        priv.displayName(),
-                        grantedOn, reportedName,
-                        databaseRole ? AccessControlListings.DATABASE_ROLE : "ROLE",
-                        // A database role as GRANTEE is named bare, whichever listing shows it.
-                        role.getName(),
-                        ownership || role.hasGrantOption(grantedOn, spelling, priv) ? "true" : "false",
-                        ownership ? role.getName() : role.getPrivilegeGrantor(grantedOn, spelling, priv),
-                        ShowResultHelpers.OWNER_ROLE_TYPE
-                    )));
+                    // A row for each grantor's instance of the privilege (live-verified).
+                    for (final String grantor : role.privilegeGrantors(grantedOn, spelling, priv)) {
+                        rows.add(new Row(Arrays.asList(
+                            grantedOn(role, grantedOn, spelling, priv, grantor),
+                            priv.displayName(),
+                            grantedOn, reportedName,
+                            databaseRole ? AccessControlListings.DATABASE_ROLE : "ROLE",
+                            // A database role as GRANTEE is named bare, whichever listing shows it.
+                            role.getName(),
+                            ownership || role.hasGrantOption(grantedOn, spelling, priv, grantor) ? "true" : "false",
+                            ownership ? role.getName() : grantor,
+                            ShowResultHelpers.OWNER_ROLE_TYPE
+                        )));
+                        if (ownership) {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -454,8 +460,8 @@ final class ShowSecurityExecutor {
     }
 
     private static Object grantedOn(final Role role, final String objectType, final String objectName,
-                                    final Privilege privilege) {
-        final Instant granted = role.getPrivilegeGrantTime(objectType, objectName, privilege);
+                                    final Privilege privilege, final String grantor) {
+        final Instant granted = role.getPrivilegeGrantTime(objectType, objectName, privilege, grantor);
         return granted != null ? ShowResultHelpers.createdOn(granted) : ShowResultHelpers.createdOn(role.getCreatedTime());
     }
 
@@ -617,12 +623,15 @@ final class ShowSecurityExecutor {
                 final String objectType = entry.getKey().substring(0, split);
                 final String objectName = entry.getKey().substring(split + 1);
                 for (final Privilege privilege : entry.getValue()) {
-                    rows.add(new Row(Arrays.<Object>asList(
-                        roleGrantedOn(user.getPrivilegeGrantTime(objectType, objectName, privilege),
-                            user.getCreatedTime()),
-                        privilege.displayName(), objectType, objectName, null,
-                        "USER", user.getName(), String.valueOf(user.hasGrantOption(objectType, objectName, privilege)),
-                        user.getPrivilegeGrantor(objectType, objectName, privilege))));
+                    for (final String grantor : user.privilegeGrantors(objectType, objectName, privilege)) {
+                        rows.add(new Row(Arrays.<Object>asList(
+                            roleGrantedOn(user.getPrivilegeGrantTime(objectType, objectName, privilege, grantor),
+                                user.getCreatedTime()),
+                            privilege.displayName(), objectType, objectName, null,
+                            "USER", user.getName(),
+                            String.valueOf(user.hasGrantOption(objectType, objectName, privilege, grantor)),
+                            grantor)));
+                    }
                 }
             }
         } else if ("ROLE".equals(targetType)) {

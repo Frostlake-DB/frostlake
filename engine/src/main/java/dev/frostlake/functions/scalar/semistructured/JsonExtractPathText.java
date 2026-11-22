@@ -18,10 +18,12 @@ package dev.frostlake.functions.scalar.semistructured;
 
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.SemiStructuredRejection;
+import dev.frostlake.functions.scalar.ExtractionPath;
 import dev.frostlake.functions.scalar.JsonTypeHelper;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.StringType;
 import dev.frostlake.values.VariantText;
+import dev.frostlake.values.VariantValue;
 import java.util.List;
 import tools.jackson.databind.JsonNode;
 
@@ -29,12 +31,18 @@ import tools.jackson.databind.JsonNode;
  * JSON_EXTRACT_PATH_TEXT(json, path) — parses the JSON text and returns the path's value as unquoted
  * text.
  *
+ * <p>It is {@code TO_VARCHAR(GET_PATH(PARSE_JSON(json), path))}: the path is GET_PATH's — quoted and bracketed
+ * names, bracketed positions — judged by the same rules and refused in the same words, a literal one before
+ * the statement runs, and a malformed document is refused as PARSE_JSON refuses it (live-verified).
+ *
  * <p>The first argument is JSON TEXT or a VARIANT; a statically OBJECT- or ARRAY-typed value is an
  * argument-type error, not a document — live refuses
  * {@code JSON_EXTRACT_PATH_TEXT(OBJECT_CONSTRUCT('a', 1), 'a')} at compile time while the same call
  * over a VARIANT, over a string, and even over a number returns a value.
  */
 public class JsonExtractPathText extends BuiltInFunction {
+    private static final ParseJson PARSE_JSON = new ParseJson();
+
     public JsonExtractPathText() { super("JSON_EXTRACT_PATH_TEXT", StringType.VARCHAR); }
 
     @Override
@@ -44,27 +52,16 @@ public class JsonExtractPathText extends BuiltInFunction {
 
     @Override
     public Object evaluate(final List<Object> args) {
-        if (args.get(0) == null || args.get(1) == null) return null;
-        JsonNode node = JsonTypeHelper.parse(args.get(0));
-        if (node == null) return null;
-        for (final String rawStep : args.get(1).toString().split("\\.")) {
-            if (node == null) return null;
-            String step = rawStep;
-            while (step.contains("[")) {
-                final int open = step.indexOf('[');
-                final String head = step.substring(0, open);
-                if (!head.isEmpty()) {
-                    node = node.get(head);
-                    if (node == null) return null;
-                }
-                final int close = step.indexOf(']', open);
-                node = node.get(Integer.parseInt(step.substring(open + 1, close)));
-                step = step.substring(close + 1);
-            }
-            if (!step.isEmpty()) {
-                node = node == null ? null : node.get(step);
-            }
+        if (args.get(1) == null) return null;
+        final String text = args.get(1).toString();
+        final ExtractionPath path = ExtractionPath.read(text);
+        if (path == null) {
+            // The path is GET_PATH's, refused in its words over a NULL document too (live-verified).
+            throw new RuntimeException(ExtractionPath.malformed(text, "GET_PATH"));
         }
+        final JsonNode root = args.get(0) == null ? null : document(args.get(0));
+        if (root == null) return null;
+        final JsonNode node = path.in(root);
         if (node == null || node.isNull()) return null;
         if (node.isDouble() || node.isFloat()) {
             // The DOUBLE family renders in the FLOAT display text — ten significant digits growing
@@ -74,6 +71,18 @@ public class JsonExtractPathText extends BuiltInFunction {
             return SharedFunctionHelpers.floatText(node.asDouble());
         }
         return node.isTextual() ? node.asText() : VariantText.standard(node);
+    }
+
+    /**
+     * The document a path is read in: a text is read as PARSE_JSON reads it, a malformed one refused in its words
+     * and an empty one naming nothing; any other value is read as it stands.
+     */
+    private static JsonNode document(final Object value) {
+        if (value instanceof VariantValue || value instanceof JsonNode) {
+            return JsonTypeHelper.parse(value);
+        }
+        final Object parsed = PARSE_JSON.evaluate(List.of(value));
+        return parsed instanceof VariantValue ? ((VariantValue) parsed).node() : null;
     }
 
     @Override

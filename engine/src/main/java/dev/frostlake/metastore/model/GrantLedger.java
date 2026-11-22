@@ -20,9 +20,11 @@ import dev.frostlake.executor.StatementClock;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +37,11 @@ import java.util.Set;
  * (live-verified); the callers hand in canonical names — and what is recorded about one privilege under
  * {@code KIND:NAME:PRIVILEGE}. A grant dates from when it was first made; granting it again keeps that. A revoke
  * takes back everything recorded about the grant, so a later grant starts afresh.
+ *
+ * <p>A privilege can be granted to one grantee several times by different grantors, and each instance is listed and
+ * revoked on its own (documented, live-verified): the first instance is recorded as above, and each other grantor's
+ * instance beside it, with its own moment and grant option. When the first instance is revoked the earliest of the
+ * others takes its place. The grantee holds the grant option while any instance carries it.
  */
 final class GrantLedger {
 
@@ -46,6 +53,8 @@ final class GrantLedger {
     private final Map<String, String> privilegeGrantors = new HashMap<>();
     private final Map<String, Instant> privilegeGrantTimes = new HashMap<>();
     private final Set<String> grantOptions = new HashSet<>();
+    /** The instances of a privilege granted by grantors other than the first, by grantor, in the order made. */
+    private final Map<String, Map<String, GrantInstance>> otherGrants = new HashMap<>();
     private final Set<String> grantedRoles = new HashSet<>();
     private final Map<String, String> roleGrantors = new HashMap<>();
     private final Map<String, Instant> roleGrantTimes = new HashMap<>();
@@ -76,14 +85,29 @@ final class GrantLedger {
 
     void grantPrivilege(final String objectType, final String objectName, final Privilege privilege,
                         final String grantor) {
-        grantPrivilege(objectType, objectName, privilege);
         final String key = key(objectType, objectName, privilege);
+        final String first = privilegeGrantors.get(key);
+        if (first != null && grantor != null && !first.equals(grantor)
+                && hasPrivilege(objectType, objectName, privilege)) {
+            // Another grantor's grant of a privilege already held is an instance of its own.
+            Map<String, GrantInstance> others = otherGrants.get(key);
+            if (others == null) {
+                others = new LinkedHashMap<>();
+                otherGrants.put(key, others);
+            }
+            if (!others.containsKey(grantor)) {
+                others.put(grantor, new GrantInstance(StatementClock.instant()));
+            }
+            return;
+        }
+        grantPrivilege(objectType, objectName, privilege);
         privilegeGrantors.put(key, grantor);
         privilegeGrantTimes.putIfAbsent(key, StatementClock.instant());
     }
 
     void revokePrivilege(final String objectType, final String objectName, final Privilege privilege) {
         final String recorded = key(objectType, objectName, privilege);
+        otherGrants.remove(recorded);
         grantOptions.remove(recorded);
         privilegeGrantTimes.remove(recorded);
         privilegeGrantors.remove(recorded);
@@ -95,6 +119,143 @@ final class GrantLedger {
                 objectPrivileges.remove(key);
             }
         }
+    }
+
+    /**
+     * Takes back the instance of a privilege one grantor made, leaving the instances other grantors made: the
+     * earliest of those takes the first one's place when the first is taken.
+     *
+     * @return whether the grantor had made an instance
+     */
+    boolean revokePrivilegeGrantedBy(final String objectType, final String objectName, final Privilege privilege,
+                                     final String grantor) {
+        if (!hasPrivilege(objectType, objectName, privilege)) {
+            return false;
+        }
+        final String key = key(objectType, objectName, privilege);
+        final Map<String, GrantInstance> others = otherGrants.get(key);
+        if (isFirst(objectType, objectName, privilege, grantor)) {
+            if (others == null || others.isEmpty()) {
+                revokePrivilege(objectType, objectName, privilege);
+                return true;
+            }
+            String earliest = null;
+            for (final Map.Entry<String, GrantInstance> other : others.entrySet()) {
+                if (earliest == null || other.getValue().getGranted().isBefore(others.get(earliest).getGranted())) {
+                    earliest = other.getKey();
+                }
+            }
+            final GrantInstance promoted = others.remove(earliest);
+            if (others.isEmpty()) {
+                otherGrants.remove(key);
+            }
+            privilegeGrantors.put(key, earliest);
+            privilegeGrantTimes.put(key, promoted.getGranted());
+            if (promoted.hasOption()) {
+                grantOptions.add(key);
+            } else {
+                grantOptions.remove(key);
+            }
+            return true;
+        }
+        if (others == null || others.remove(grantor) == null) {
+            return false;
+        }
+        if (others.isEmpty()) {
+            otherGrants.remove(key);
+        }
+        return true;
+    }
+
+    /**
+     * Records a privilege held as one grant in a grantor's name, whoever made its instances: how a grant copied
+     * with an object's ownership is kept (COPY CURRENT GRANTS). It keeps the first instance's moment, and the grant
+     * option when any instance carried it.
+     */
+    void regrantAs(final String objectType, final String objectName, final Privilege privilege, final String grantor) {
+        if (!hasPrivilege(objectType, objectName, privilege)) {
+            return;
+        }
+        final String key = key(objectType, objectName, privilege);
+        if (hasGrantOption(objectType, objectName, privilege)) {
+            grantOptions.add(key);
+        }
+        otherGrants.remove(key);
+        privilegeGrantors.put(key, grantor);
+        privilegeGrantTimes.putIfAbsent(key, StatementClock.instant());
+    }
+
+    /**
+     * The grantors of the instances of a privilege the grantee holds, in name order; none when it holds none.
+     */
+    List<String> privilegeGrantors(final String objectType, final String objectName, final Privilege privilege) {
+        final List<String> grantors = new ArrayList<>();
+        if (!hasPrivilege(objectType, objectName, privilege)) {
+            return grantors;
+        }
+        grantors.add(getPrivilegeGrantor(objectType, objectName, privilege));
+        final Map<String, GrantInstance> others = otherGrants.get(key(objectType, objectName, privilege));
+        if (others != null) {
+            grantors.addAll(others.keySet());
+        }
+        Collections.sort(grantors);
+        return grantors;
+    }
+
+    /** When one grantor's instance of a privilege was made; null when it made none or no moment is recorded. */
+    Instant getPrivilegeGrantTime(final String objectType, final String objectName, final Privilege privilege,
+                                  final String grantor) {
+        final GrantInstance other = otherInstance(objectType, objectName, privilege, grantor);
+        return other != null ? other.getGranted() : getPrivilegeGrantTime(objectType, objectName, privilege);
+    }
+
+    /** Puts back the moment one grantor's instance of a privilege was made, as a snapshot recorded it. */
+    void setPrivilegeGrantTime(final String objectType, final String objectName, final Privilege privilege,
+                               final String grantor, final Instant granted) {
+        final GrantInstance other = otherInstance(objectType, objectName, privilege, grantor);
+        if (other != null) {
+            other.setGranted(granted);
+        } else {
+            setPrivilegeGrantTime(objectType, objectName, privilege, granted);
+        }
+    }
+
+    /** Whether one grantor's instance of a privilege carries the grant option. */
+    boolean hasGrantOption(final String objectType, final String objectName, final Privilege privilege,
+                           final String grantor) {
+        final GrantInstance other = otherInstance(objectType, objectName, privilege, grantor);
+        return other != null ? other.hasOption()
+            : isFirst(objectType, objectName, privilege, grantor)
+                && grantOptions.contains(key(objectType, objectName, privilege));
+    }
+
+    /** Gives or takes the grant option of one grantor's instance of a privilege. */
+    void setGrantOption(final String objectType, final String objectName, final Privilege privilege,
+                        final String grantor, final boolean holds) {
+        final GrantInstance other = otherInstance(objectType, objectName, privilege, grantor);
+        if (other != null) {
+            other.setOption(holds);
+        } else if (isFirst(objectType, objectName, privilege, grantor)) {
+            final String key = key(objectType, objectName, privilege);
+            if (holds) {
+                grantOptions.add(key);
+            } else {
+                grantOptions.remove(key);
+            }
+        }
+    }
+
+    /** Whether a grantor names the first instance of a privilege: null names it too, as a grant with none recorded. */
+    private boolean isFirst(final String objectType, final String objectName, final Privilege privilege,
+                            final String grantor) {
+        return grantor == null || grantor.equals(getPrivilegeGrantor(objectType, objectName, privilege));
+    }
+
+    /** The instance of a privilege a grantor other than the first made; null when there is none. */
+    private GrantInstance otherInstance(final String objectType, final String objectName, final Privilege privilege,
+                                        final String grantor) {
+        final Map<String, GrantInstance> others = otherGrants.get(key(objectType, objectName, privilege));
+        return others == null ? null : others.get(grantor);
     }
 
     boolean hasPrivilege(final String objectType, final String objectName, final Privilege privilege) {
@@ -127,18 +288,38 @@ final class GrantLedger {
         return privilegeGrantors.get(key(objectType, objectName, privilege));
     }
 
+    /** Gives the first instance of a privilege the grant option, or takes it from every instance. */
     void setGrantOption(final String objectType, final String objectName, final Privilege privilege,
                         final boolean holds) {
         final String key = key(objectType, objectName, privilege);
         if (holds) {
             grantOptions.add(key);
-        } else {
-            grantOptions.remove(key);
+            return;
+        }
+        grantOptions.remove(key);
+        final Map<String, GrantInstance> others = otherGrants.get(key);
+        if (others != null) {
+            for (final GrantInstance other : others.values()) {
+                other.setOption(false);
+            }
         }
     }
 
+    /** Whether the grantee holds the grant option of a privilege: any instance of it carries the option. */
     boolean hasGrantOption(final String objectType, final String objectName, final Privilege privilege) {
-        return grantOptions.contains(key(objectType, objectName, privilege));
+        final String key = key(objectType, objectName, privilege);
+        if (grantOptions.contains(key)) {
+            return true;
+        }
+        final Map<String, GrantInstance> others = otherGrants.get(key);
+        if (others != null) {
+            for (final GrantInstance other : others.values()) {
+                if (other.hasOption()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ── privileges on columns ──
@@ -220,7 +401,7 @@ final class GrantLedger {
     /** Applies a change of recorded names to the privileges held on objects (see {@link GrantRemap}). */
     void remapGrants(final GrantRemap remap) {
         GrantKeys.remap(objectPrivileges, columnPrivileges, privilegeGrantors, privilegeGrantTimes, grantOptions,
-            remap);
+            otherGrants, remap);
     }
 
     /**
@@ -232,7 +413,7 @@ final class GrantLedger {
      */
     void purgeGrants(final String objectType, final String objectName, final boolean ownershipOnly) {
         GrantKeys.purge(objectPrivileges, columnPrivileges, privilegeGrantors, privilegeGrantTimes, grantOptions,
-            key(objectType, objectName), ownershipOnly);
+            otherGrants, key(objectType, objectName), ownershipOnly);
     }
 
     // ── roles granted ──
@@ -311,24 +492,23 @@ final class GrantLedger {
     // ── a grantor's drop ──
 
     /**
-     * Takes back what one role granted, as that role's drop does (documented): the privileges recorded in its name
-     * but OWNERSHIP, which stays with its holder, and the database roles it granted.
+     * Takes back what one role granted, as that role's drop does (documented): the instances of privileges
+     * recorded in its name but OWNERSHIP, which stays with its holder, and the database roles it granted.
      *
      * @param grantor the role's canonical name, as grants record it
      */
     void revokeGrantedBy(final String grantor) {
         for (final Map.Entry<String, Set<Privilege>> held : new ArrayList<>(objectPrivileges.entrySet())) {
+            final String objectKey = held.getKey();
+            final int split = objectKey.indexOf(':');
             for (final Privilege privilege : new ArrayList<>(held.getValue())) {
-                final String recorded = held.getKey() + ":" + privilege.name();
-                if (privilege != Privilege.OWNERSHIP && grantor.equals(privilegeGrantors.get(recorded))) {
-                    grantOptions.remove(recorded);
-                    privilegeGrantTimes.remove(recorded);
-                    privilegeGrantors.remove(recorded);
-                    held.getValue().remove(privilege);
+                final String recorded = objectKey + ":" + privilege.name();
+                final Map<String, GrantInstance> others = otherGrants.get(recorded);
+                if (privilege != Privilege.OWNERSHIP && (grantor.equals(privilegeGrantors.get(recorded))
+                        || others != null && others.containsKey(grantor))) {
+                    revokePrivilegeGrantedBy(objectKey.substring(0, split), objectKey.substring(split + 1),
+                        privilege, grantor);
                 }
-            }
-            if (held.getValue().isEmpty()) {
-                objectPrivileges.remove(held.getKey());
             }
         }
         for (final Map.Entry<String, String> granted : new ArrayList<>(databaseRoleGrantors.entrySet())) {
@@ -365,6 +545,13 @@ final class GrantLedger {
         privilegeGrantors.putAll(source.privilegeGrantors);
         privilegeGrantTimes.putAll(source.privilegeGrantTimes);
         grantOptions.addAll(source.grantOptions);
+        for (final Map.Entry<String, Map<String, GrantInstance>> held : source.otherGrants.entrySet()) {
+            final Map<String, GrantInstance> others = new LinkedHashMap<>();
+            for (final Map.Entry<String, GrantInstance> other : held.getValue().entrySet()) {
+                others.put(other.getKey(), other.getValue().copy());
+            }
+            otherGrants.put(held.getKey(), others);
+        }
         grantedRoles.addAll(source.grantedRoles);
         roleGrantors.putAll(source.roleGrantors);
         roleGrantTimes.putAll(source.roleGrantTimes);

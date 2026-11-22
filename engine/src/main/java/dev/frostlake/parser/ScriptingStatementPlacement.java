@@ -62,6 +62,10 @@ public final class ScriptingStatementPlacement {
             // the block (BEGIN LET q r; RETURN q; END is 'R', BEGIN ABS(1); RETURN 1 END is 'END', live-verified).
             return;
         }
+        if (listener.hasErrors() && DeclaredCursorTopBindLines.lines(BlockReadOn.spoken(tokens)) != null) {
+            // A DECLARE section's cursor over TOP ? is refused for its '?' alone: the declarations after it stand.
+            return;
+        }
         Token word = firstScriptingStatement(script);
         if (word == null && listener.hasErrors()) {
             word = strayOpeningKeyword(tokens);
@@ -226,7 +230,7 @@ public final class ScriptingStatementPlacement {
                 || type == FrostlakeLexer.FOR || type == FrostlakeLexer.OPEN || type == FrostlakeLexer.FETCH
                 || type == FrostlakeLexer.CLOSE || type == FrostlakeLexer.AWAIT || type == FrostlakeLexer.ASYNC
                 || type == FrostlakeLexer.BREAK || type == FrostlakeLexer.CONTINUE || type == FrostlakeLexer.RETURN
-                || type == FrostlakeLexer.RAISE;
+                || type == FrostlakeLexer.RAISE || type == FrostlakeLexer.ITERATE;
             return scripting ? token : null;
         }
         return null;

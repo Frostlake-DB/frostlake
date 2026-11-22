@@ -72,6 +72,9 @@ final class SessionInfoHandler implements HttpHandler {
             } else {
                 HttpResponses.methodNotAllowed(exchange);
             }
+        } catch (final RequestTooLargeException tooLarge) {
+            // Answered 413 where the handler is wrapped (see ErrorAnsweringHandler).
+            throw tooLarge;
         } catch (final Exception | Error e) {
             logger.error("Error handling session request", e);
             HttpResponses.send(exchange, 500, "{\"error\":\"Internal server error\"}");

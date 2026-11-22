@@ -96,6 +96,16 @@ public class NumericType extends DataType {
     }
 
     /**
+     * Whether a type is an exact NUMBER: numeric, neither FLOAT nor DECFLOAT.
+     *
+     * @param type the type, or null
+     * @return true for NUMBER and its integer and decimal aliases
+     */
+    public static boolean isExactNumber(final DataType type) {
+        return type instanceof NumericType && !isApproximate(type) && !isDecfloat(type);
+    }
+
+    /**
      * Whether a type NAME is one of the approximate spellings — for a caller that has the name and not
      * the type, such as a driver reading column metadata off the wire.
      *

@@ -38,6 +38,7 @@ import dev.frostlake.metastore.model.SecurityObjectStore;
 import dev.frostlake.metastore.model.SecurityPropertySpec;
 import dev.frostlake.metastore.model.SecurityPropertySpecs;
 import dev.frostlake.metastore.model.SecurityPropertyType;
+import dev.frostlake.metastore.model.User;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.PropertyListKeys;
@@ -92,6 +93,17 @@ public final class SecurityObjectCommandHandler {
 
     private static final String PASSWORD_POLICY_PREFIX = "PASSWORD_POLICY|";
     private static final String NETWORK_POLICY_PREFIX = "NETWORK_POLICY|";
+    /** The scopes an account's authentication or session policy is set for besides the whole account. */
+    private static final String PERSON_USERS = "PERSON_USERS";
+    private static final String SERVICE_USERS = "SERVICE_USERS";
+    private static final String AUTHENTICATION_POLICY_PREFIX = "AUTHENTICATION_POLICY|";
+    private static final String SESSION_POLICY_PREFIX = "SESSION_POLICY|";
+    /** The prefixes of every kind of policy the account or a user holds. */
+    private static final String[] HOLDER_POLICY_PREFIXES = {NETWORK_POLICY_PREFIX, PASSWORD_POLICY_PREFIX,
+        AUTHENTICATION_POLICY_PREFIX, SESSION_POLICY_PREFIX};
+    private static final String NETWORK_RULE_LIST = "_NETWORK_RULE_LIST";
+    /** What a policy's description shows in a cell that holds nothing. */
+    private static final String NO_VALUE = "null";
 
     /**
      * The key a user's network policy is attached under.
@@ -111,8 +123,9 @@ public final class SecurityObjectCommandHandler {
      * @param userName the user's name, as the account holds it
      */
     static void forgetUser(final Catalog catalog, final String userName) {
-        catalog.getSecurityObjects().detach(NETWORK_POLICY_PREFIX + "USER|" + userName);
-        catalog.getSecurityObjects().detach(PASSWORD_POLICY_PREFIX + "USER|" + userName);
+        for (final String prefix : HOLDER_POLICY_PREFIXES) {
+            catalog.getSecurityObjects().detach(prefix + "USER|" + userName);
+        }
     }
 
     /**
@@ -132,7 +145,7 @@ public final class SecurityObjectCommandHandler {
             return null;
         }
         try {
-            final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(attached));
+            final QualifiedName name = QualifiedName.parse(attached);
             return catalog.databaseExact(name.part(0)).schemaExact(name.part(1)).getSecurityObjects()
                 .get(SecurityObjectKind.PASSWORD_POLICY, name.last());
         } catch (final RuntimeException gone) {
@@ -150,7 +163,7 @@ public final class SecurityObjectCommandHandler {
      */
     static void renameUser(final Catalog catalog, final String oldName, final String newName) {
         final SecurityObjectStore account = catalog.getSecurityObjects();
-        for (final String prefix : new String[] {NETWORK_POLICY_PREFIX, PASSWORD_POLICY_PREFIX}) {
+        for (final String prefix : HOLDER_POLICY_PREFIXES) {
             final String attached = account.attachment(prefix + "USER|" + oldName);
             if (attached != null) {
                 account.detach(prefix + "USER|" + oldName);
@@ -314,9 +327,13 @@ public final class SecurityObjectCommandHandler {
             // Replacing an object needs OWNERSHIP of it.
             queryExecutor.requireOwnership(kind.name(), nameParts(ctx, kind, name), null);
         }
-        if (existing != null && ctx.or_replace() != null && kind == SecurityObjectKind.PASSWORD_POLICY
-                && isAttached(PASSWORD_POLICY_PREFIX, display(kind, schema, name))) {
+        // A password, an authentication or a session policy set on the account or on a user is not replaced.
+        if (existing != null && ctx.or_replace() != null && kind.isSchemaObject() && holderPrefix(kind) != null
+                && isAttached(holderPrefix(kind), display(kind, schema, name))) {
             throw policyInUse(name);
+        }
+        if (existing != null && ctx.or_replace() != null && kind == SecurityObjectKind.NETWORK_RULE) {
+            NetworkRuleAssociations.requireFree(catalog, schema, name);
         }
         if (otherPolicy != null && ctx.or_replace() != null) {
             throw new RuntimeException(SqlCompilationError.PREFIX + " Object found is of type '" + otherPolicy
@@ -338,6 +355,9 @@ public final class SecurityObjectCommandHandler {
             // The integration is looked up before the secret's type refuses the property (live-verified).
             new IntegrationReferences(catalog).requireAuthenticationIntegration(
                 properties.get("API_AUTHENTICATION").toString());
+        }
+        if (kind == SecurityObjectKind.NETWORK_POLICY) {
+            readAddresses(properties);
         }
         requireCreatable(kind, properties);
         if (kind == SecurityObjectKind.SECRET && properties.get("API_AUTHENTICATION") != null) {
@@ -448,7 +468,8 @@ public final class SecurityObjectCommandHandler {
 
     /**
      * CREATE OR ALTER over an existing network rule or network policy: the statement tells the whole object, so a
-     * rule's value list and comment it leaves out are emptied, and so are a policy's four lists and its comment.
+     * rule's value list and comment it leaves out are emptied, and so are a policy's two IP lists and its comment,
+     * while a rule list of the policy it leaves out is kept.
      * A network rule's TYPE and MODE cannot change; a MODE left out changes nothing (live-verified).
      */
     private static void recreateInPlace(final SecurityObject existing, final Map<String, Object> properties) {
@@ -472,8 +493,9 @@ public final class SecurityObjectCommandHandler {
             }
         }
         if (existing.getKind() == SecurityObjectKind.NETWORK_POLICY) {
-            for (final String told : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST", "ALLOWED_NETWORK_RULE_LIST",
-                "BLOCKED_NETWORK_RULE_LIST", "COMMENT"}) {
+            readAddresses(changes);
+            // A rule list the statement leaves out stays as it was, where an IP list and the comment are emptied.
+            for (final String told : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST", "COMMENT"}) {
                 if (!changes.containsKey(told)) {
                     changes.put(told, null);
                 }
@@ -565,7 +587,7 @@ public final class SecurityObjectCommandHandler {
                 continue;
             }
             Object value = value(kind, spec, property.securityPropertyValue());
-            if (key.endsWith("_NETWORK_RULE_LIST")) {
+            if (key.endsWith(NETWORK_RULE_LIST)) {
                 value = ruleReferences(asStrings(value));
             }
             if (key.endsWith("_SECONDARY_ROLES")) {
@@ -743,15 +765,15 @@ public final class SecurityObjectCommandHandler {
                 }
                 return SqlStringLiterals.decode(text.getText());
             case TEXT_LIST:
+                if (v.LPAREN() == null && v.identifier() != null && key.endsWith(NETWORK_RULE_LIST)) {
+                    // A rule written bare is no value of a rule list, where a string is no list (live-verified).
+                    throw new RuntimeException(SqlCompilationError.invalidValueForParameter(written, key));
+                }
                 if (v.LPAREN() == null) {
                     throw new RuntimeException(SqlCompilationError.of("invalid type of property '" + written + "' for '"
                         + key + "'"));
                 }
-                final List<String> items = new ArrayList<>();
-                for (final TerminalNode item : v.STRING_LITERAL()) {
-                    items.add(SqlStringLiterals.decode(item.getText()));
-                }
-                return items;
+                return SecurityListItems.of(v);
             case BOOLEAN:
                 if ("TRUE".equals(word) || "FALSE".equals(word)) {
                     return Boolean.valueOf("TRUE".equals(word));
@@ -819,8 +841,8 @@ public final class SecurityObjectCommandHandler {
                 + spec.getName() + "'"));
         }
         final List<String> words = new ArrayList<>();
-        for (final TerminalNode item : v.STRING_LITERAL()) {
-            final String word = SqlStringLiterals.decode(item.getText()).toUpperCase(Locale.ROOT);
+        for (final String item : SecurityListItems.of(v)) {
+            final String word = item.toUpperCase(Locale.ROOT);
             if (!Arrays.asList(spec.getChoices()).contains(word)) {
                 throw new RuntimeException(COMPILATION_ERROR + " " + word + " invalid for "
                     + choiceListNoun(spec.getName()) + ". ");
@@ -872,7 +894,10 @@ public final class SecurityObjectCommandHandler {
             + " cannot be dropped/replaced as it is associated with one or more entities.");
     }
 
-    /** Whether a password or network policy, named as attachments record it, is attached to anything. */
+    /**
+     * Whether a password, an authentication, a session or a network policy, named as attachments record it, is
+     * attached to anything.
+     */
     private boolean isAttached(final String prefix, final String attached) {
         for (final Map.Entry<String, String> attachment : catalog.getSecurityObjects().attachments().entrySet()) {
             if (attachment.getKey().startsWith(prefix) && attachment.getValue().equals(attached)) {
@@ -883,6 +908,18 @@ public final class SecurityObjectCommandHandler {
     }
 
     /** A network policy takes no egress rule: such a rule has no effect there. */
+    /**
+     * A network policy's IP lists as the policy keeps them, the allowed list judged before the blocked one: a list
+     * holding an address of another shape is refused (see NetworkPolicyAddresses).
+     */
+    private static void readAddresses(final Map<String, Object> properties) {
+        for (final String list : new String[] {"ALLOWED_IP_LIST", "BLOCKED_IP_LIST"}) {
+            if (properties.get(list) != null) {
+                properties.put(list, NetworkPolicyAddresses.read(asStrings(properties.get(list))));
+            }
+        }
+    }
+
     private void requireIngressRules(final Map<String, Object> properties, final String policy) {
         for (final String list : new String[] {"ALLOWED_NETWORK_RULE_LIST", "BLOCKED_NETWORK_RULE_LIST"}) {
             if (properties.get(list) != null) {
@@ -924,7 +961,13 @@ public final class SecurityObjectCommandHandler {
     }
 
     private String ruleReference(final String reference) {
-        final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(reference));
+        final String[] parts = SqlIdentifiers.canonicalTextParts(reference);
+        if (parts.length > 3) {
+            // A name of more parts than a schema object's names nothing (live-verified).
+            throw new RuntimeException(SqlCompilationError.of(
+                "Object does not exist, or operation cannot be performed."));
+        }
+        final QualifiedName name = QualifiedName.of(parts);
         final Schema schema = catalog.requireOwningSchema(name);
         if (schema.getSecurityObjects().get(SecurityObjectKind.NETWORK_RULE, name.last()) == null) {
             throw missing(SecurityObjectKind.NETWORK_RULE, schema, name.last());
@@ -955,6 +998,9 @@ public final class SecurityObjectCommandHandler {
         if (kind == SecurityObjectKind.PASSWORD_POLICY
                 && isAttached(PASSWORD_POLICY_PREFIX, display(kind, schema, name))) {
             throw policyInUse(name);
+        }
+        if (kind == SecurityObjectKind.NETWORK_RULE) {
+            NetworkRuleAssociations.requireFree(catalog, schema, name);
         }
         if (kind == SecurityObjectKind.NETWORK_POLICY) {
             for (final Map.Entry<String, String> attachment : catalog.getSecurityObjects().attachments().entrySet()) {
@@ -992,14 +1038,32 @@ public final class SecurityObjectCommandHandler {
             throw DropPurge.refusal(parts);
         }
         queryExecutor.requireOwnership(kind.name(), parts, null);
+        // An authentication or a session policy set on the account or on a user cannot be dropped either.
+        final String prefix = holderPrefix(kind);
+        if (prefix != null && isAttached(prefix, schema.qualifiedName(name))) {
+            throw policyInUse(name);
+        }
         schema.getSecurityObjects().remove(kind, name);
         return true;
     }
 
+    /** The prefix the attachments of a kind the account or a user holds are recorded under, or null. */
+    private static String holderPrefix(final SecurityObjectKind kind) {
+        if (kind == SecurityObjectKind.PASSWORD_POLICY) {
+            return PASSWORD_POLICY_PREFIX;
+        }
+        if (kind == SecurityObjectKind.NETWORK_POLICY) {
+            return NETWORK_POLICY_PREFIX;
+        }
+        if (kind == SecurityObjectKind.AUTHENTICATION_POLICY) {
+            return AUTHENTICATION_POLICY_PREFIX;
+        }
+        return kind == SecurityObjectKind.SESSION_POLICY ? SESSION_POLICY_PREFIX : null;
+    }
+
     /** Moves (or, when {@code renamed} is null, removes) every attachment of a policy that is renamed or dropped. */
     private void forgetAttachments(final SecurityObjectKind kind, final String attached, final String renamed) {
-        final String prefix = kind == SecurityObjectKind.PASSWORD_POLICY ? PASSWORD_POLICY_PREFIX
-            : kind == SecurityObjectKind.NETWORK_POLICY ? NETWORK_POLICY_PREFIX : null;
+        final String prefix = holderPrefix(kind);
         if (prefix == null) {
             return;
         }
@@ -1113,6 +1177,7 @@ public final class SecurityObjectCommandHandler {
             }
             if (kind == SecurityObjectKind.NETWORK_POLICY) {
                 requireIngressRules(properties, target.getName());
+                readAddresses(properties);
             }
             if (kind == SecurityObjectKind.NETWORK_RULE && properties.get("VALUE_LIST") != null) {
                 NetworkRuleChecks.requireValues(target.text("TYPE"), asStrings(properties.get("VALUE_LIST")));
@@ -1189,20 +1254,33 @@ public final class SecurityObjectCommandHandler {
         GrantNames.renamed(catalog, kind.name(), grantedBefore, into.qualifiedName(renamed));
     }
 
-    /** ALTER NETWORK POLICY … ADD | REMOVE {ALLOWED | BLOCKED}_NETWORK_RULE_LIST = 'rule'. */
+    /**
+     * ALTER NETWORK POLICY … ADD | REMOVE {ALLOWED | BLOCKED}_NETWORK_RULE_LIST = (rule, …): each rule a name or a
+     * string, looked up whether it is added or removed; removing a rule the list does not hold changes nothing.
+     */
     private void addOrRemoveRule(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObject target) {
         final String key = ctx.optionKey().getText().toUpperCase(Locale.ROOT);
         if (!"ALLOWED_NETWORK_RULE_LIST".equals(key) && !"BLOCKED_NETWORK_RULE_LIST".equals(key)) {
-            throw new RuntimeException(SqlCompilationError.invalidPropertyFor(key, target.getKind().name()));
+            // A property of the policy that is no rule list is refused as one of a network rule (live-verified).
+            throw new RuntimeException(SqlCompilationError.invalidPropertyFor(key,
+                SecurityPropertySpecs.find(target.getKind(), key) != null ? SecurityObjectKind.NETWORK_RULE.name()
+                    : target.getKind().name()));
         }
         final FrostlakeParser.SecurityPropertyValueContext value = ctx.securityPropertyValue();
+        if (value.LPAREN() == null && value.identifier() != null) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.getText(), key));
+        }
         if (value.LPAREN() == null) {
             throw new RuntimeException(SqlCompilationError.of("invalid type of property '" + value.getText() + "' for '"
                 + key + "'"));
         }
+        if (!value.securityListNumber().isEmpty()) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                value.securityListNumber(0).getText(), key));
+        }
         final List<String> rules = new ArrayList<>(target.list(key));
-        for (final TerminalNode item : value.STRING_LITERAL()) {
-            final String rule = ruleReference(SqlStringLiterals.decode(item.getText()));
+        for (final String item : SecurityListItems.of(value)) {
+            final String rule = ruleReference(item);
             if (ctx.ADD() != null) {
                 requireIngressRule(rule, target.getName());
                 if (!rules.contains(rule)) {
@@ -1216,9 +1294,10 @@ public final class SecurityObjectCommandHandler {
     }
 
     /**
-     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD POLICY} and {@code … NETWORK_POLICY}: the attachment is
-     * recorded, where {@code SHOW PASSWORD POLICIES ON} reads it back. A password policy judges the passwords ALTER
-     * USER sets (see {@link PasswordPolicyCheck}); a network policy is never enforced.
+     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD | AUTHENTICATION | SESSION POLICY} and {@code …
+     * NETWORK_POLICY}: the attachment is recorded, where {@code SHOW PASSWORD POLICIES ON} and POLICY_REFERENCES read
+     * it back. A password policy judges the passwords ALTER USER sets (see {@link PasswordPolicyCheck}); the other
+     * kinds are never enforced.
      */
     private Object attach(final FrostlakeParser.SecurityObjectStatementContext ctx) {
         if (ctx.NETWORK_POLICY() != null && ctx.INTEGER_LITERAL() != null) {
@@ -1248,23 +1327,9 @@ public final class SecurityObjectCommandHandler {
             target = ACCOUNT;
         }
         final SecurityObjectStore account = catalog.getSecurityObjects();
-        if (ctx.PASSWORD() != null) {
-            if (ctx.UNSET() != null) {
-                account.detach(PASSWORD_POLICY_PREFIX + target);
-                return null;
-            }
-            final Schema schema = owningSchema(ctx.qualifiedName(0));
-            final String policy = lastPart(ctx.qualifiedName(0));
-            if (schema.getSecurityObjects().get(SecurityObjectKind.PASSWORD_POLICY, policy) == null) {
-                throw missing(SecurityObjectKind.PASSWORD_POLICY, schema, policy);
-            }
-            if (ctx.USER() != null && ctx.FORCE() == null
-                    && account.attachment(PASSWORD_POLICY_PREFIX + target) != null) {
-                throw new RuntimeException("Object " + target.substring("USER|".length())
-                    + " already has a PASSWORD_POLICY. Only one PASSWORD_POLICY is allowed at a time.");
-            }
-            account.attach(PASSWORD_POLICY_PREFIX + target, schema.qualifiedName(policy));
-            return null;
+        if (ctx.POLICY() != null) {
+            return attachPolicy(ctx, ctx.accountUserType() == null ? target
+                : target + "|" + userType(ctx.accountUserType()));
         }
         if (ctx.UNSET() != null) {
             account.detach(NETWORK_POLICY_PREFIX + target);
@@ -1286,6 +1351,45 @@ public final class SecurityObjectCommandHandler {
         return null;
     }
 
+    /**
+     * {@code ALTER ACCOUNT | USER … SET | UNSET PASSWORD | AUTHENTICATION | SESSION POLICY}: the policy must be there,
+     * and a user — or, for an authentication or a session policy, the account and each type of its users — holds one
+     * policy of a kind at a time unless FORCE replaces it. UNSET takes the kind's policy off, set or not.
+     *
+     * @param ctx the statement
+     * @param target what the policy is set on: {@code ACCOUNT}, {@code ACCOUNT|PERSON_USERS}, {@code
+     *               ACCOUNT|SERVICE_USERS} or
+     *               {@code USER|<name>}
+     * @return null: the statement answers with its status sentence
+     */
+    private Object attachPolicy(final FrostlakeParser.SecurityObjectStatementContext ctx, final String target) {
+        final SecurityObjectKind kind = kindOf(ctx);
+        final String prefix = holderPrefix(kind);
+        final SecurityObjectStore account = catalog.getSecurityObjects();
+        if (ctx.UNSET() != null) {
+            account.detach(prefix + target);
+            return null;
+        }
+        final Schema schema = owningSchema(ctx.qualifiedName(0));
+        final String policy = lastPart(ctx.qualifiedName(0));
+        if (schema.getSecurityObjects().get(kind, policy) == null) {
+            throw missing(kind, schema, policy);
+        }
+        final boolean held = ctx.USER() != null || kind != SecurityObjectKind.PASSWORD_POLICY;
+        if (held && ctx.FORCE() == null && account.attachment(prefix + target) != null) {
+            final String holder = ctx.USER() != null ? target.substring("USER|".length()) : catalog.getAccountLocator();
+            throw new RuntimeException("Object " + holder + " already has a " + kind.name() + ". Only one "
+                + kind.name() + " is allowed at a time.");
+        }
+        account.attach(prefix + target, schema.qualifiedName(policy));
+        return null;
+    }
+
+    /** The scope of an account's policy set for one type of user: {@code PERSON_USERS} or {@code SERVICE_USERS}. */
+    private static String userType(final FrostlakeParser.AccountUserTypeContext clause) {
+        return clause.userType.getStart().getType() == FrostlakeParser.SERVICE ? SERVICE_USERS : PERSON_USERS;
+    }
+
     // ---- SHOW / DESCRIBE ---------------------------------------------------------------------------------------
 
     /**
@@ -1298,7 +1402,12 @@ public final class SecurityObjectCommandHandler {
         final SecurityObjectKind kind = ctx.RULE() != null || ctx.RULES() != null ? SecurityObjectKind.NETWORK_RULE
             : ctx.NETWORK() != null ? SecurityObjectKind.NETWORK_POLICY
             : ctx.SECRET() != null || ctx.SECRETS() != null ? SecurityObjectKind.SECRET
+            : ctx.AUTHENTICATION() != null ? SecurityObjectKind.AUTHENTICATION_POLICY
+            : ctx.SESSION() != null ? SecurityObjectKind.SESSION_POLICY
             : SecurityObjectKind.PASSWORD_POLICY;
+        if (kind == SecurityObjectKind.AUTHENTICATION_POLICY || kind == SecurityObjectKind.SESSION_POLICY) {
+            return showHeldPolicyOn(ctx, kind);
+        }
         if (ctx.DESCRIBE() != null || ctx.DESC() != null) {
             return describe(ctx, kind);
         }
@@ -1573,6 +1682,11 @@ public final class SecurityObjectCommandHandler {
 
     private static Row showRow(final SecurityObjectKind kind, final Schema schema, final SecurityObject object,
                                final String setOn) {
+        return showRow(kind, schema, object, setOn, "");
+    }
+
+    private static Row showRow(final SecurityObjectKind kind, final Schema schema, final SecurityObject object,
+                               final String setOn, final String options) {
         final List<Object> cells = new ArrayList<>();
         cells.add(ShowResultHelpers.createdOn(object.getCreatedTime()));
         cells.add(object.getName());
@@ -1598,7 +1712,7 @@ public final class SecurityObjectCommandHandler {
         }
         cells.add(ShowResultHelpers.ownerRoleType(object.getOwner()));
         if (sharesPolicyNames(kind)) {
-            cells.add("");
+            cells.add(options);
             if (setOn != null) {
                 cells.add(setOn);
             }
@@ -1762,7 +1876,7 @@ public final class SecurityObjectCommandHandler {
         final List<Row> rows = new ArrayList<>();
         final String attached = catalog.getSecurityObjects().attachment(PASSWORD_POLICY_PREFIX + target);
         if (attached != null) {
-            final QualifiedName name = QualifiedName.of(SqlIdentifiers.canonicalTextParts(attached));
+            final QualifiedName name = QualifiedName.parse(attached);
             final Schema schema = catalog.databaseExact(name.part(0)).schemaExact(name.part(1));
             final SecurityObject policy = schema.getSecurityObjects().get(SecurityObjectKind.PASSWORD_POLICY,
                 name.last());
@@ -1776,6 +1890,83 @@ public final class SecurityObjectCommandHandler {
                 "SYSTEM")));
         }
         return new ResultSet(showColumns(SecurityObjectKind.PASSWORD_POLICY, true), rows);
+    }
+
+    /**
+     * SHOW AUTHENTICATION | SESSION POLICIES ON ACCOUNT | USER: the policies in effect there. The account lists each
+     * policy set on it, its options naming the scopes it is set for — {@code {"target_scopes":["ACCOUNT"]}}, with
+     * {@code PERSON_USERS} and {@code SERVICE_USERS} for the policies set for one type of user. A user lists its own
+     * policy, else the account's for the user's type, else the account's for every user. With none in effect the
+     * listing is empty.
+     */
+    private ResultSet showHeldPolicyOn(final FrostlakeParser.SecurityObjectListingContext ctx,
+                                       final SecurityObjectKind kind) {
+        final String prefix = holderPrefix(kind);
+        final SecurityObjectStore account = catalog.getSecurityObjects();
+        final List<Row> rows = new ArrayList<>();
+        if (ctx.USER() != null) {
+            final User user = catalog.getUserExact(SqlIdentifiers.canonical(ctx.identifier()));
+            final String own = account.attachment(prefix + "USER|" + user.getName());
+            if (own != null) {
+                addHeldPolicyRow(rows, kind, own, "USER", "");
+            } else {
+                final boolean service = user.getUserType() != null && user.getUserType().endsWith("SERVICE");
+                final String scope = service ? SERVICE_USERS : PERSON_USERS;
+                final String typed = account.attachment(prefix + ACCOUNT + "|" + scope);
+                if (typed != null) {
+                    addHeldPolicyRow(rows, kind, typed, ACCOUNT, targetScopes(scope));
+                } else if (account.attachment(prefix + ACCOUNT) != null) {
+                    addHeldPolicyRow(rows, kind, account.attachment(prefix + ACCOUNT), ACCOUNT,
+                        targetScopes(ACCOUNT));
+                }
+            }
+        } else {
+            // One row per policy, naming every scope the account holds it for.
+            final Map<String, List<String>> scopes = new LinkedHashMap<>();
+            for (final String scope : new String[] {ACCOUNT, PERSON_USERS, SERVICE_USERS}) {
+                final String attached = account.attachment(prefix + ACCOUNT
+                    + (ACCOUNT.equals(scope) ? "" : "|" + scope));
+                if (attached != null) {
+                    if (!scopes.containsKey(attached)) {
+                        scopes.put(attached, new ArrayList<String>());
+                    }
+                    scopes.get(attached).add(scope);
+                }
+            }
+            for (final Map.Entry<String, List<String>> held : scopes.entrySet()) {
+                addHeldPolicyRow(rows, kind, held.getKey(), ACCOUNT,
+                    targetScopes(held.getValue().toArray(new String[0])));
+            }
+        }
+        final ResultSet listing = new ResultSet(showColumns(kind, true), rows);
+        final FrostlakeParser.StringTextContext like = ctx.LIKE() != null ? ctx.stringText(0) : null;
+        return paged(ctx, kind, filter(listing, like == null ? null : ParseTreeText.stringValue(like)));
+    }
+
+    /** Adds the listing row of a held policy, named as attachments record it, when the policy is still there. */
+    private void addHeldPolicyRow(final List<Row> rows, final SecurityObjectKind kind, final String attached,
+                                  final String setOn, final String options) {
+        final QualifiedName name = QualifiedName.parse(attached);
+        final Schema schema;
+        try {
+            schema = catalog.databaseExact(name.part(0)).schemaExact(name.part(1));
+        } catch (final RuntimeException gone) {
+            // The policy's database or schema is no longer there: it is in effect nowhere.
+            return;
+        }
+        final SecurityObject policy = schema.getSecurityObjects().get(kind, name.last());
+        if (policy != null) {
+            rows.add(showRow(kind, schema, policy, setOn, options));
+        }
+    }
+
+    /** The options cell of a policy the account holds: the scopes it is set for, as JSON. */
+    private static String targetScopes(final String... scopes) {
+        final StringBuilder json = new StringBuilder("{\"target_scopes\":[");
+        for (int i = 0; i < scopes.length; i++) {
+            json.append(i == 0 ? "" : ",").append('"').append(scopes[i]).append('"');
+        }
+        return json.append("]}").toString();
     }
 
     /**
@@ -1915,9 +2106,14 @@ public final class SecurityObjectCommandHandler {
         return shown.append(']').toString();
     }
 
+    /**
+     * A row of a policy's description. No cell of it is NULL: a property that holds nothing, as a comment never
+     * set, and a property with no default, as a name, show the text {@code null} (live-verified).
+     */
     private static Row describedRow(final String property, final Object value, final String defaultValue,
                                     final String description) {
-        return new Row(Arrays.<Object>asList(property, value, defaultValue, description));
+        return new Row(Arrays.<Object>asList(property, value == null ? NO_VALUE : value,
+            defaultValue == null ? NO_VALUE : defaultValue, description));
     }
 
     private ResultSet describe(final FrostlakeParser.SecurityObjectListingContext ctx, final SecurityObjectKind kind) {
@@ -1937,7 +2133,7 @@ public final class SecurityObjectCommandHandler {
                 if ("COMMENT".equals(spec.getName()) || items.isEmpty()) {
                     continue;
                 }
-                if (spec.getName().endsWith("_NETWORK_RULE_LIST")) {
+                if (spec.getName().endsWith(NETWORK_RULE_LIST)) {
                     // A rule list is described as JSON, each rule by its fully qualified name.
                     final StringBuilder json = new StringBuilder("[");
                     for (final String rule : items) {
@@ -1970,12 +2166,12 @@ public final class SecurityObjectCommandHandler {
         final String comment = object.getComment();
         if (kind == SecurityObjectKind.PASSWORD_POLICY) {
             final List<Row> rows = new ArrayList<>();
-            rows.add(new Row(Arrays.<Object>asList("NAME", object.getName(), null, "Name of password policy.")));
-            rows.add(new Row(Arrays.<Object>asList("OWNER", object.getOwner(), null, "Owner of password policy.")));
+            rows.add(describedRow("NAME", object.getName(), null, "Name of password policy."));
+            rows.add(describedRow("OWNER", object.getOwner(), null, "Owner of password policy."));
             for (final SecurityPropertySpec spec : SecurityPropertySpecs.of(kind)) {
                 final String value = object.text(spec.getName());
-                rows.add(new Row(Arrays.<Object>asList(spec.getName(),
-                    value != null ? value : spec.getDefaultValue(), spec.getDefaultValue(), spec.getDescription())));
+                rows.add(describedRow(spec.getName(), value != null ? value : spec.getDefaultValue(),
+                    spec.getDefaultValue(), spec.getDescription()));
             }
             // COMMENT is listed third, after the name and the owner.
             rows.add(2, rows.remove(rows.size() - 1));

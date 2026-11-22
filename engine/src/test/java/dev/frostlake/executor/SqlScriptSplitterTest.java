@@ -81,4 +81,24 @@ public class SqlScriptSplitterTest {
         assertEquals(2, parts.size());
         assertTrue(parts.get(0).contains("'a;b'"), "literal must stay whole: " + parts.get(0));
     }
+
+    @Test
+    public void unparseableScriptKeepsAnUnquotedBlockWhole() {
+        // Another statement does not parse, so the split falls back to the lexer's tokens - which still leaves a
+        // procedure's body or an anonymous block written without $$ in one piece, its statements never run alone.
+        final String script = """
+            CREATE TABLE t (c INT);
+            SELECT FROM WHERE;
+            CREATE PROCEDURE p() RETURNS INT LANGUAGE SQL AS
+            BEGIN INSERT INTO t VALUES (1); DELETE FROM t; RETURN 1; END;
+            DECLARE n INT DEFAULT 2; BEGIN IF (n > 1) THEN n := 3; END IF; RETURN n; END;
+            BEGIN TRANSACTION;
+            SELECT 9
+            """;
+        final List<String> parts = SqlScriptSplitter.split(script);
+        assertEquals(List.of("CREATE TABLE t (c INT)", "SELECT FROM WHERE",
+            "CREATE PROCEDURE p() RETURNS INT LANGUAGE SQL AS\nBEGIN INSERT INTO t VALUES (1); DELETE FROM t; RETURN 1; END",
+            "DECLARE n INT DEFAULT 2; BEGIN IF (n > 1) THEN n := 3; END IF; RETURN n; END",
+            "BEGIN TRANSACTION", "SELECT 9"), parts);
+    }
 }

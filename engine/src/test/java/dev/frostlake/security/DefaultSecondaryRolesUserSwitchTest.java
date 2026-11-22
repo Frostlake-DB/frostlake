@@ -87,7 +87,8 @@ public class DefaultSecondaryRolesUserSwitchTest {
     private void holdsOnlyItsOwnRoles(final String user) {
         as(user, "R1");
         assertEquals("[\"PUBLIC\",\"R1\"]", answer("SELECT CURRENT_AVAILABLE_ROLES()").replaceAll("\\s", ""));
-        assertTrue(refusal("SELECT * FROM t").contains("must have SELECT granted on TABLE P.PUBLIC.T"),
+        // R1 holds nothing on the database: it is refused as one that is not there.
+        assertTrue(refusal("SELECT * FROM t").contains("Database 'P' does not exist or not authorized."),
             refusal("SELECT * FROM t"));
         assertTrue(refusal("GRANT ROLE SYSADMIN TO ROLE r1").contains("SYSADMIN"));
         asSystem();

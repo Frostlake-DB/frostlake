@@ -18,6 +18,8 @@ package dev.frostlake.transaction;
 
 import dev.frostlake.metastore.model.Stream;
 
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -26,6 +28,11 @@ import java.util.concurrent.TimeUnit;
  * raised before the statement writes anything. The statement's dispatch waits for the holder and runs the statement
  * again; when waiting is not allowed or lasts past the session's LOCK_TIMEOUT the statement is refused in the
  * account's words (live-verified), and a transaction it runs in stays open.
+ *
+ * <p>A wait that closes a cycle - the holder waits, directly or through other transactions, for the waiter - is a
+ * deadlock. Its most recent waiting statement is refused once it has waited the engine's deadlock detection time, the
+ * other waits going on, and its transaction stays open (live-verified: about five minutes; a LOCK_TIMEOUT shorter than
+ * that refuses every waiter of the cycle first).
  */
 public final class TableLockWait extends RuntimeException {
 
@@ -76,10 +83,11 @@ public final class TableLockWait extends RuntimeException {
      * @param timeoutSeconds the session's LOCK_TIMEOUT
      * @param waitingSince   when this wait began ({@link System#nanoTime()}): each lock a statement meets is waited for
      *                       LOCK_TIMEOUT seconds on its own, as the parameter's description says
+     * @param deadlockSeconds how long a wait that closes a deadlock lasts before the statement is refused
      * @param stop           what ends the statement before the holder does
      */
     public void await(final TransactionManager transactions, final long timeoutSeconds, final long waitingSince,
-                      final LockWaitStop stop) {
+                      final long deadlockSeconds, final LockWaitStop stop) {
         // The refusal names the waiting statement by the ID it runs under.
         final String running = stop.waitingQueryId();
         final String waitingQueryId = running != null ? running : UUID.randomUUID().toString();
@@ -89,15 +97,21 @@ public final class TableLockWait extends RuntimeException {
         final long deadline = waitingSince + TimeUnit.SECONDS.toNanos(timeoutSeconds);
         // The waiting statement's lock shows as WAITING in SHOW LOCKS for as long as it waits.
         final Transaction waiter = transactions.getCurrentTransaction();
+        final long began = System.nanoTime();
         if (waiter != null) {
             waiter.beginWaiting(fullyQualifiedName, waitingQueryId, stream != null);
+            waiter.waitOn(holder, began);
         }
+        final long deadlockAfter = began + TimeUnit.SECONDS.toNanos(Math.max(0L, deadlockSeconds));
         final EngineLockRelease release = TableLockGate.release();
         release.release();
         boolean interrupted = false;
         try {
             while (stillHeld(transactions) && System.nanoTime() < deadline) {
                 stop.check();
+                if (waiter != null && System.nanoTime() >= deadlockAfter && isDeadlockVictim(waiter)) {
+                    throw deadlock(waitingQueryId);
+                }
                 release.pause(Math.max(1L, Math.min(POLL_MILLIS,
                     TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
             }
@@ -122,6 +136,34 @@ public final class TableLockWait extends RuntimeException {
         if (stillHeld(transactions)) {
             throw refusal("is limited to " + timeoutSeconds + " seconds.", waitingQueryId);
         }
+    }
+
+    /**
+     * Whether the waiter's wait closes a cycle of waits - the holder waits, directly or through other transactions,
+     * for the waiter - in which no transaction began waiting after it: the most recent waiting statement of a deadlock
+     * is the one refused.
+     */
+    private boolean isDeadlockVictim(final Transaction waiter) {
+        final long since = waiter.getWaitingOnSince();
+        final Map<Transaction, Boolean> seen = new IdentityHashMap<>();
+        Transaction next = holder;
+        while (next != null && next != waiter && seen.put(next, Boolean.TRUE) == null) {
+            final Transaction waitsOn = next.getWaitingOn();
+            if (waitsOn == null || next.getWaitingOnSince() - since > 0L) {
+                return false;
+            }
+            next = waitsOn;
+        }
+        return next == waiter;
+    }
+
+    private RuntimeException deadlock(final String waitingQueryId) {
+        final String holding = stream != null ? holder.streamLockQueryId(stream)
+            : holder.lockQueryId(fullyQualifiedName);
+        return new RuntimeException("Statement '" + holding + "' has locked " + (stream != null ? "stream" : "table")
+            + " '" + tableName + "' in transaction " + holder.getPublicId()
+            + " and this lock has not yet been released.\n"
+            + "Your statement '" + waitingQueryId + "' was aborted because a deadlock with this lock was detected.");
     }
 
     /** Whether the holder is still open; what it has written is its own thread's to read while it runs. */

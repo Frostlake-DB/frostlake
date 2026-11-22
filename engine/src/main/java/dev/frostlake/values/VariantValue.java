@@ -81,6 +81,24 @@ public final class VariantValue implements Comparable<VariantValue>, Serializabl
     }
 
     /**
+     * A STRING member read out of a semi-structured value: its plain text, except that text a bare string
+     * could be mistaken for something else — a JSON null ({@code null}) or JSON structure (text starting
+     * with {@code [} or <code>{</code>) — stays a VARIANT string, so it is never re-read as a JSON null or
+     * parsed as an array/object downstream, and still coerces to its own text as a VARCHAR.
+     *
+     * @param node a textual node
+     * @return the member's runtime value
+     */
+    public static Object ofStringMember(final JsonNode node) {
+        final String text = node.asText();
+        final String trimmed = text.trim();
+        if ("null".equals(text) || trimmed.startsWith("[") || trimmed.startsWith("{")) {
+            return ofNode(node);
+        }
+        return text;
+    }
+
+    /**
      * Wraps a parsed tree whose text is rendered only when it is asked for: an array too long to render at once, the
      * thousand million holes ARRAY_INSERT pads, still answers its size and its elements.
      *

@@ -17,6 +17,7 @@
 package dev.frostlake.persistence;
 
 import java.io.Serializable;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -75,6 +76,9 @@ public class TaskSnapshot implements Serializable {
 
     // The runs TASK_HISTORY reports, oldest first. Null in a snapshot written before they were kept.
     public ArrayList<TaskExecutionSnapshot> history;
-    // When the object was created. Null on snapshots written before it was saved, which restore it as new.
+    // When the object was created, on the host's wall clock. Null on snapshots written before it was saved, which
+    // restore it as new; read where createdOn is null.
     public LocalDateTime createdAt;
+    // The instant the object was created. Null on snapshots written before it was kept.
+    public Instant createdOn;
 }

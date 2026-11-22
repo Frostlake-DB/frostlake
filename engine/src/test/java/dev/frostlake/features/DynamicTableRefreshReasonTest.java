@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Why a dynamic table created with REFRESH_MODE = AUTO refreshes in FULL: the CREATE's status and SHOW DYNAMIC
  * TABLES' refresh_mode and refresh_mode_reason, for a subquery, a view's row generator, a window without
- * PARTITION BY, a non-deterministic function and a LIMIT, and INCREMENTAL for every other query (all
+ * PARTITION BY, a non-deterministic function and a LIMIT, and ADAPTIVE for every other query (all
  * live-verified).
  */
 public class DynamicTableRefreshReasonTest extends MeasuredCellsTestSupport {
@@ -64,19 +64,19 @@ public class DynamicTableRefreshReasonTest extends MeasuredCellsTestSupport {
         assertAnswer("Dynamic table KD2047_5 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_5 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT a FROM "
                 + "kt");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_5' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_5 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_5");
         assertAnswer("Dynamic table KD2047_6 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_6 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT a, "
                 + "COUNT(*) AS c FROM kt GROUP BY a");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_6' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_6 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_6");
         assertAnswer("Dynamic table KD2047_7 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_7 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT k1.a "
                 + "FROM kt k1 JOIN kt k2 ON k1.a = k2.a");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_7' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_7 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_7");
         assertAnswer("REFUSED SQL compilation error: Dynamic Tables must have at least one base table.",
@@ -88,7 +88,7 @@ public class DynamicTableRefreshReasonTest extends MeasuredCellsTestSupport {
         assertAnswer("Dynamic table KD2047_9 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_9 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT a FROM "
                 + "kt UNION SELECT a FROM kt");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_9' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_9 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_9");
         assertAnswer("Dynamic table KD2047_10 successfully created. FULL refresh mode was selected because: Change "
@@ -127,7 +127,7 @@ public class DynamicTableRefreshReasonTest extends MeasuredCellsTestSupport {
         assertAnswer("Dynamic table KD2047_13 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_13 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT "
                 + "f.value AS v FROM kt, LATERAL FLATTEN(INPUT => ARRAY_CONSTRUCT(a)) f");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_13' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_13 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_13");
         assertAnswer("Dynamic table KD2047_14 successfully created. FULL refresh mode was selected because: Query "
@@ -146,7 +146,7 @@ public class DynamicTableRefreshReasonTest extends MeasuredCellsTestSupport {
         assertAnswer("Dynamic table KD2047_15 successfully created.",
             "CREATE OR REPLACE DYNAMIC TABLE kd2047_15 TARGET_LAG = '1 hour' WAREHOUSE = compute_wh AS SELECT a FROM "
                 + "kt UNION ALL SELECT a FROM kt");
-        assertAnswer("INCREMENTAL|null",
+        assertAnswer("ADAPTIVE|null",
             "SHOW DYNAMIC TABLES LIKE 'KD2047_15' ->> SELECT \"refresh_mode\", \"refresh_mode_reason\" FROM $1");
         assertAnswer("KD2047_15 successfully dropped.", "DROP DYNAMIC TABLE IF EXISTS kd2047_15");
     }

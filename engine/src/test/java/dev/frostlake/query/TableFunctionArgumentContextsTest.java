@@ -24,9 +24,14 @@ import org.junit.jupiter.api.Test;
  * CTE, an EXISTS - and alike under INSERT ... SELECT, CTAS, a view, a later named argument and a call that is no
  * GENERATOR. In a select item, as an operand of it, the query is refused at its SELECT and then after the first name
  * of its list; as the item's whole value with a list that opens with no name, at its SELECT and then as the
- * statement's own FROM reads it (live-verified).
+ * statement's own FROM reads it. A query opening with WITH is refused at its WITH and the AS after its first name
+ * (live-verified).
  */
 public class TableFunctionArgumentContextsTest extends MeasuredCellsTestSupport {
+
+    /** A query opening with WITH as a select item's value: refused at the WITH and the AS after its first name. */
+    private static final String WITH_AS_AT_8 = "REFUSED SQL compilation error: | syntax error line 1 at position 8 "
+        + "unexpected 'WITH'. | syntax error line 1 at position 15 unexpected 'AS'.";
 
     @Test
     public void bracketedQueryArgumentsInMoreContexts() {
@@ -67,6 +72,13 @@ public class TableFunctionArgumentContextsTest extends MeasuredCellsTestSupport 
             {"SELECT (SELECT 1 FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(n) FROM g2) + 1)))",
                 "REFUSED SQL compilation error: | syntax error line 1 at position 8 unexpected 'SELECT'. | syntax "
                 + "error line 1 at position 74 unexpected '+'. | syntax error line 1 at position 78 unexpected ')'."},
+            {"SELECT (WITH q AS (SELECT 1) SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(n) FROM g2) "
+                + "+ 1)))", WITH_AS_AT_8},
+            {"SELECT (WITH q AS (SELECT 1) SELECT MAX(n) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(n) FROM g2) + "
+                + "1)))", WITH_AS_AT_8},
+            {"SELECT 1 + (WITH q AS (SELECT 1) SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(n) FROM "
+                + "g2) + 1)))", "REFUSED SQL compilation error: | syntax error line 1 at position 12 unexpected "
+                + "'WITH'. | syntax error line 1 at position 19 unexpected 'AS'."},
         });
     }
 }

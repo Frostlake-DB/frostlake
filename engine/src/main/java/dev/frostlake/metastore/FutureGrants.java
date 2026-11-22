@@ -205,7 +205,7 @@ public final class FutureGrants {
             }
             holders.get(i).grantPrivilege(objectKind, qualified, privilege, owner);
             if (grant.hasGrantOption() && privilege != Privilege.OWNERSHIP) {
-                holders.get(i).setGrantOption(objectKind, qualified, privilege, true);
+                holders.get(i).setGrantOption(objectKind, qualified, privilege, owner, true);
             }
         }
     }

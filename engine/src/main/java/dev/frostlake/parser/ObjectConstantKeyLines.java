@@ -30,6 +30,7 @@ import org.antlr.v4.runtime.Token;
  *   SELECT {'a': 1, 2: 'b'}        '2' at 16, then ''b'' at 19
  *   SELECT {1: 'a', 'b': 2}        '1' at 8, ''a'' at 11, then '2' at 21
  *   SELECT {TRUE: 1}               ':' at 12, then '1' at 14
+ *   SELECT {-1: 'a'}               '-' at 8, then ''a'' at 12
  * </pre>
  */
 final class ObjectConstantKeyLines {
@@ -51,7 +52,9 @@ final class ObjectConstantKeyLines {
             }
         }
         final int key = fault > 0 && spoken.get(fault).getType() == FrostlakeLexer.COLON ? fault - 1 : fault;
-        if (key < 1 || key + 1 >= spoken.size() || spoken.get(key + 1).getType() != FrostlakeLexer.COLON
+        // A signed number is a key of two tokens, refused at its sign.
+        final int last = key >= 0 && spoken.get(key).getType() == FrostlakeLexer.MINUS ? key + 1 : key;
+        if (key < 1 || last + 1 >= spoken.size() || spoken.get(last + 1).getType() != FrostlakeLexer.COLON
                 || spoken.get(key - 1).getType() != FrostlakeLexer.LBRACE
                     && spoken.get(key - 1).getType() != FrostlakeLexer.COMMA
                 || !insideBraces(spoken, key)) {
@@ -60,7 +63,7 @@ final class ObjectConstantKeyLines {
         final List<String> lines = new ArrayList<>();
         lines.add(SyntaxErrorListener.sentence(spoken.get(fault)));
         int depth = 0;
-        for (int i = key + 1; i + 1 < spoken.size(); i++) {
+        for (int i = last + 1; i + 1 < spoken.size(); i++) {
             final int type = spoken.get(i).getType();
             if (type == FrostlakeLexer.LPAREN || type == FrostlakeLexer.LBRACKET || type == FrostlakeLexer.LBRACE) {
                 depth++;

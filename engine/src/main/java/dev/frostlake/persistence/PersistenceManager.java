@@ -32,6 +32,7 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -41,6 +42,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PersistenceManager {
 
     private static final Logger logger = LoggerFactory.getLogger(PersistenceManager.class);
+    /** The name of the thread the autosaves run on. */
+    public static final String AUTOSAVE_THREAD = "frostlake-autosave";
 
     private final EngineConfig config;
     private final Path dataDirectory;
@@ -64,7 +67,15 @@ public class PersistenceManager {
         this.dataDirectory = Paths.get(config.getPersistenceDirectory());
         this.catalogFile = dataDirectory.resolve("catalog.dat");
         this.tablesDirectory = dataDirectory.resolve("tables");
-        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+        // A daemon: an engine that is never shut down must not keep the JVM alive.
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(final Runnable runnable) {
+                final Thread thread = new Thread(runnable, AUTOSAVE_THREAD);
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
         this.running = false;
     }
 
@@ -84,9 +95,10 @@ public class PersistenceManager {
     }
 
     /**
-     * Start auto-save scheduler if enabled
+     * Start auto-save scheduler if enabled. Each save runs through the guard, which holds the engine while the
+     * snapshot is written.
      */
-    public void startAutoSave(final Catalog catalog, final StorageEngine storageEngine) {
+    public void startAutoSave(final Catalog catalog, final StorageEngine storageEngine, final AutoSaveGuard guard) {
         if (!config.isPersistenceEnabled() || !config.isAutoSaveEnabled()) {
             return;
         }
@@ -103,13 +115,21 @@ public class PersistenceManager {
                 if (!running || !dirtySinceAutoSave.getAndSet(false)) {
                     return;
                 }
-                try {
-                    saveCatalog(catalog, storageEngine);
-                    logger.debug("Auto-save completed");
-                } catch (final Exception e) {
-                    dirtySinceAutoSave.set(true);
-                    logger.error("Auto-save failed", e);
-                }
+                guard.runAlone(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!running) {
+                            return;
+                        }
+                        try {
+                            saveCatalog(catalog, storageEngine);
+                            logger.debug("Auto-save completed");
+                        } catch (final Exception e) {
+                            dirtySinceAutoSave.set(true);
+                            logger.error("Auto-save failed", e);
+                        }
+                    }
+                });
             }
         }, interval, interval, TimeUnit.SECONDS);
 
@@ -142,6 +162,8 @@ public class PersistenceManager {
         final Path tablesDir = dir.resolve("tables");
         Files.createDirectories(tablesDir);
         CatalogSnapshotWriter.writeCatalogTo(dir.resolve("catalog.dat"), tablesDir, catalog, storageEngine);
+        // The snapshot's own directory is a new name in its parent, durable once the parent is.
+        DurableFiles.syncDirectory(dir.toAbsolutePath().getParent());
     }
 
     /**

@@ -72,4 +72,6 @@ public class FunctionSnapshot implements Serializable {
     public Instant createdAt;
     /** INFORMATION_SCHEMA's LAST_DDL. Null on snapshots written before it was saved, which report the CREATE. */
     public Instant lastDdlAt;
+    /** The parameters set on the object itself. Null in a snapshot written before they were kept: none set. */
+    public Map<String, String> ownParameters;
 }

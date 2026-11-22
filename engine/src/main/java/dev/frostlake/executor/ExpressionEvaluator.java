@@ -65,6 +65,7 @@ public class ExpressionEvaluator {
     private QueryExecutor queryExecutor;
     private Map<String, Object> outerLateralContext;
     private boolean scopeOpaqueToSubqueries;
+    private boolean correlationsPlanned;
     private Map<String, Table> multiTableAliasToTable;
     private List<Table> multiTableAllTables;
     private Table declaredTypeBase;
@@ -139,6 +140,16 @@ public class ExpressionEvaluator {
      */
     public void setScopeOpaqueToSubqueries(final boolean opaque) {
         this.scopeOpaqueToSubqueries = opaque;
+    }
+
+    /**
+     * Declares that the statement's compilation has judged every correlated scalar subquery this evaluator meets, as a
+     * MERGE's does over its target and source, so a row reaching one runs it.
+     *
+     * @param planned whether the subqueries are judged
+     */
+    public void setCorrelationsPlanned(final boolean planned) {
+        this.correlationsPlanned = planned;
     }
 
     /**
@@ -221,6 +232,7 @@ public class ExpressionEvaluator {
         visitor.setDeclaredTypeBase(declaredTypeBase, declaredTypeAliasToTable, declaredTypeAllTables);
         visitor.setLateralContext(outerLateralContext);
         visitor.setScopeOpaqueToSubqueries(scopeOpaqueToSubqueries);
+        visitor.setCorrelationsPlanned(correlationsPlanned);
         if (multiTableAllTables != null) {
             visitor.setMultiTableContext(multiTableAliasToTable, multiTableAllTables);
         }
@@ -524,6 +536,7 @@ public class ExpressionEvaluator {
         reusableVisitor.setQueryExecutor(queryExecutor);
         reusableVisitor.setDeclaredTypeBase(declaredTypeBase, declaredTypeAliasToTable, declaredTypeAllTables);
         reusableVisitor.setScopeOpaqueToSubqueries(scopeOpaqueToSubqueries);
+        reusableVisitor.setCorrelationsPlanned(correlationsPlanned);
         reusableVisitor.setScopeExemptNames(scopeExemptNames);
         reusableVisitor.setWhereAliasRefusals(whereAggregateAliases, whereWindowAliases);
         reusableVisitor.setOutputScopeNames(outputScopeNames);
@@ -786,7 +799,7 @@ public class ExpressionEvaluator {
             return false;
         }
         final ProceduralExecutor procedural = queryExecutor.getProceduralExecutor();
-        final String name = ((BindVariableExpression) expression).getVarName();
+        final String name = ((BindVariableExpression) expression).getVariableKey();
         return procedural != null && procedural.hasVariable(name) && procedural.getVariable(name) == null;
     }
 

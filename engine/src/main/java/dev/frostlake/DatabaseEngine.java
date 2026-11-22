@@ -47,6 +47,7 @@ import dev.frostlake.metastore.model.Sequence;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.User;
 import dev.frostlake.parser.SqlSyntaxException;
+import dev.frostlake.persistence.AutoSaveGuard;
 import dev.frostlake.persistence.CatalogSnapshot;
 import dev.frostlake.persistence.CheckpointDebt;
 import dev.frostlake.persistence.CounterMark;
@@ -73,7 +74,9 @@ import dev.frostlake.system.SystemViews;
 import dev.frostlake.task.TaskExecutor;
 import dev.frostlake.task.TaskScheduler;
 import dev.frostlake.transaction.TableLockGate;
+import dev.frostlake.transaction.Transaction;
 import dev.frostlake.transaction.TransactionManager;
+import dev.frostlake.transaction.TransactionState;
 import dev.frostlake.transaction.WalSink;
 import dev.frostlake.transaction.WalStatementContext;
 import dev.frostlake.transaction.WriteSetSavepoint;
@@ -90,11 +93,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -115,6 +121,8 @@ public class DatabaseEngine {
     private final ProceduralExecutor proceduralExecutor;
     private final StreamManager streamManager;
     private final TaskScheduler taskScheduler;
+    /** The lock a wrapper serves this engine's requests under, or null (see {@link #setExclusiveLock}). */
+    private volatile ExclusiveEngineLock exclusiveLock;
     private final SessionContext sessionContext;
     private final SecurityManager securityManager;
     private final PersistenceManager persistenceManager;
@@ -194,8 +202,14 @@ public class DatabaseEngine {
                 if (TableLockGate.mayWait()) {
                     return runTaskStatement(sql);
                 }
-                synchronized (DatabaseEngine.this) {
-                    return runTaskStatement(sql);
+                // The wrapper's lock before the monitor, as every thread of the engine takes the two.
+                final ExclusiveEngineLock held = enterExclusive();
+                try {
+                    synchronized (DatabaseEngine.this) {
+                        return runTaskStatement(sql);
+                    }
+                } finally {
+                    leaveExclusive(held);
                 }
             }
 
@@ -225,16 +239,41 @@ public class DatabaseEngine {
 
             @Override
             public List<ResultSet> evaluateCondition(final String sql) {
-                synchronized (DatabaseEngine.this) {
-                    final EngineConfig displaced = RunningEngine.enter(config);
-                    try {
-                        final List<ResultSet> results = queryExecutor.executeUnrecorded(sql);
-                        transactionManager.autocommitStatementEnd();
-                        return results;
-                    } finally {
-                        RunningEngine.leave(displaced);
-                        scheduledStatementEnded();
+                final ExclusiveEngineLock held = enterExclusive();
+                try {
+                    synchronized (DatabaseEngine.this) {
+                        final EngineConfig displaced = RunningEngine.enter(config);
+                        try {
+                            final List<ResultSet> results = queryExecutor.executeUnrecorded(sql);
+                            transactionManager.autocommitStatementEnd();
+                            return results;
+                        } finally {
+                            RunningEngine.leave(displaced);
+                            scheduledStatementEnded();
+                        }
                     }
+                } finally {
+                    leaveExclusive(held);
+                }
+            }
+
+            @Override
+            public void runScheduled(final Runnable work) {
+                // A run inside a request - EXECUTE TASK - runs under what the request holds, and gives that up while
+                // it waits for a table lock: the monitor would keep every other request out meanwhile.
+                if (TableLockGate.mayWait()) {
+                    work.run();
+                    return;
+                }
+                // The whole run alone, as a request that writes runs: its statements, its history rows and the
+                // checkpoint after it, none of them beside a session's statement.
+                final ExclusiveEngineLock held = enterExclusive();
+                try {
+                    synchronized (DatabaseEngine.this) {
+                        work.run();
+                    }
+                } finally {
+                    leaveExclusive(held);
                 }
             }
 
@@ -346,6 +385,11 @@ public class DatabaseEngine {
                                           final List<WalStatementContext> contexts) {
                 appendTransactionToWal(statements, instants, contexts);
             }
+
+            @Override
+            public void appendedNotApplied() {
+                checkpointOwed.set(true);
+            }
         });
     }
 
@@ -396,6 +440,11 @@ public class DatabaseEngine {
         final String[] scopeBefore = catalog.currentSessionScope();
         try {
             final List<WalRecord> records = wal.readAll();
+            // A record the log could not read before its end ends the replay there: what was committed after it is
+            // not part of the state this engine starts with.
+            for (final String setAside : wal.takeSetAside()) {
+                walReplayFailures.add(new WalReplayFailure(-1, null, setAside));
+            }
             int lastCheckpoint = -1;
             for (int i = 0; i < records.size(); i++) {
                 if (records.get(i).getType() == WalRecordType.CHECKPOINT) {
@@ -739,13 +788,25 @@ public class DatabaseEngine {
         }
     }
 
+    /**
+     * Restores the snapshot a checkpoint marker names. A snapshot that cannot be read is a recovery failure, which
+     * {@link #getWalReplayFailures()} lists and {@code durability.walReplayStrict} refuses to start over, and it is kept
+     * on disk whatever later checkpoints are written: the log no longer holds what it folded in, so it is the only
+     * copy there is.
+     */
     private void restoreCheckpoint(final String checkpointRef) {
         try {
             final Path dir = checkpointDir().resolve(checkpointRef);
+            if (!Files.isRegularFile(dir.resolve("catalog.dat"))) {
+                throw new IOException("its catalog file " + dir.resolve("catalog.dat") + " is missing");
+            }
             persistenceManager.restoreFrom(dir, catalog, storageEngine);
             logger.info("Restored WAL checkpoint snapshot {}", checkpointRef);
         } catch (final Exception e) {
             logger.error("Failed to restore WAL checkpoint {}", checkpointRef, e);
+            unreadableCheckpoints.add(checkpointRef);
+            walReplayFailures.add(new WalReplayFailure(-1, null, "The checkpoint snapshot " + checkpointRef
+                + " could not be restored: " + e.getMessage()));
         }
     }
 
@@ -781,6 +842,24 @@ public class DatabaseEngine {
     private final ThreadLocal<Boolean> runCheckpointDue = new ThreadLocal<Boolean>();
 
     /**
+     * Whether a checkpoint is owed that no statement still running waits for: owed by a statement or a run that has
+     * ended, or by a transaction whose record the log holds although it did not apply. It stays owed until a
+     * checkpoint is written, whichever session's statement end writes it: one skipped while a transaction is open is
+     * written once none is.
+     */
+    private final AtomicBoolean checkpointOwed = new AtomicBoolean();
+
+    /**
+     * The transactions a statement that owes a checkpoint ran in, which the checkpoint waits for: their own writes are
+     * not the checkpoint's until they end. A transaction moves between threads with its session, so the debt goes
+     * with it rather than with the thread the statement ran on.
+     */
+    private final List<Transaction> owingTransactions = new ArrayList<Transaction>();
+
+    /** The checkpoints whose snapshot recovery could not read, which no later checkpoint deletes. */
+    private final Set<String> unreadableCheckpoints = ConcurrentHashMap.newKeySet();
+
+    /**
      * Whether a statement the calling thread's outermost statement ran committed work in a session of its own that the
      * write-ahead log keeps in a record of its own (see {@link #logRunApart}).
      */
@@ -812,7 +891,8 @@ public class DatabaseEngine {
             runCheckpointDue.set(Boolean.TRUE);
             return;
         }
-        checkpoint();
+        checkpointOwed.set(true);
+        payOwedCheckpoint();
     }
 
     /**
@@ -921,19 +1001,51 @@ public class DatabaseEngine {
     }
 
     /**
-     * The checkpoint a statement owes for a run it started. While its session holds a transaction open the debt waits
-     * for the statement that ends the transaction: the transaction's own writes are not the checkpoint's yet, and a
-     * checkpoint skipped would leave the run's statement in the log for a restart to run again.
+     * The checkpoint a statement owes for a run it started, or for what it read that a replay cannot read again. While
+     * its session holds a transaction open the debt waits for that transaction to end, on whichever thread its session
+     * ends it: the transaction's own writes are not the checkpoint's yet. Then any owed checkpoint is written, unless
+     * the calling thread's session holds a transaction open; one skipped because another session's transaction holds
+     * logged statements stays owed (see {@link #checkpointOwed}).
      */
     private void checkpointAfterRun() {
-        if (!Boolean.TRUE.equals(runCheckpointDue.get())) {
+        if (Boolean.TRUE.equals(runCheckpointDue.get())) {
+            runCheckpointDue.remove();
+            if (wal != null && !replaying) {
+                final Transaction open = transactionManager.isLastingTransaction()
+                    ? transactionManager.getCurrentTransaction() : null;
+                if (open != null) {
+                    synchronized (owingTransactions) {
+                        if (!owingTransactions.contains(open)) {
+                            owingTransactions.add(open);
+                        }
+                    }
+                } else {
+                    checkpointOwed.set(true);
+                }
+            }
+        }
+        payOwedCheckpoint();
+    }
+
+    /**
+     * Writes the checkpoint owed, when one is and the calling thread's session holds no transaction open: a debt a
+     * transaction kept falls due once the transaction has ended, committed or rolled back alike, since the run that owed
+     * it committed its work in a session of its own.
+     */
+    private void payOwedCheckpoint() {
+        if (wal == null || replaying) {
             return;
         }
-        if (wal != null && !replaying && transactionManager.isLastingTransaction()) {
-            return;
+        synchronized (owingTransactions) {
+            final Iterator<Transaction> waiting = owingTransactions.iterator();
+            while (waiting.hasNext()) {
+                if (waiting.next().getState() != TransactionState.ACTIVE) {
+                    waiting.remove();
+                    checkpointOwed.set(true);
+                }
+            }
         }
-        runCheckpointDue.remove();
-        if (wal != null && !replaying) {
+        if (checkpointOwed.get() && !transactionManager.isLastingTransaction()) {
             checkpoint();
         }
     }
@@ -1075,16 +1187,57 @@ public class DatabaseEngine {
      * explicit one or the implicit one AUTOCOMMIT off keeps (its statements aren't committed yet). Safe to call
      * explicitly; also driven by {@code durability.checkpointInterval}.
      */
-    public synchronized void checkpoint() {
+    public void checkpoint() {
         if (wal == null) {
             return;
         }
+        // Alone, as a request that writes runs: a commit appended between the snapshot's walk and the marker would
+        // count as folded into a snapshot that never saw it. The wrapper's lock before the monitor, as everywhere.
+        final ExclusiveEngineLock held = enterExclusive();
+        try {
+            synchronized (this) {
+                checkpointAlone();
+            }
+        } finally {
+            leaveExclusive(held);
+        }
+    }
+
+    /**
+     * Sets the lock a wrapper serves this engine's requests under (see {@link ConcurrentDatabaseEngine}): what the
+     * engine runs on a thread of its own - a scheduled task run, an alert's evaluation, a dynamic table's refresh, a
+     * checkpoint - takes it before the engine's monitor, so that it never runs beside a request. Without one such
+     * work holds the monitor alone, as the in-process connections' statements do.
+     *
+     * @param lock the lock, or null for none
+     */
+    public void setExclusiveLock(final ExclusiveEngineLock lock) {
+        this.exclusiveLock = lock;
+    }
+
+    /** Takes the wrapper's lock for the calling thread where one is set: the lock taken, or null. */
+    private ExclusiveEngineLock enterExclusive() {
+        final ExclusiveEngineLock lock = exclusiveLock;
+        return lock != null && lock.acquire() ? lock : null;
+    }
+
+    /** Gives back what {@link #enterExclusive} took. */
+    private static void leaveExclusive(final ExclusiveEngineLock held) {
+        if (held != null) {
+            held.release();
+        }
+    }
+
+    /** {@link #checkpoint}'s work, holding the engine. */
+    private void checkpointAlone() {
         if (transactionManager.isLastingTransaction() || transactionManager.holdsLoggedStatements()) {
             // Another session's open transaction counts too: its statements replay after the checkpoint, over what
             // the snapshot holds of the commits made since they ran.
             logger.warn("Skipping WAL checkpoint while a transaction is open");
             return;
         }
+        // Taken for this checkpoint, and owed again when it fails.
+        final boolean owed = checkpointOwed.getAndSet(false);
         try {
             checkpointSeq++;
             final String ref = "cp-" + checkpointSeq;
@@ -1101,6 +1254,9 @@ public class DatabaseEngine {
             txnsSinceCheckpoint = 0;
             logger.info("WAL checkpoint {} written; log truncated", ref);
         } catch (final Exception e) {
+            if (owed) {
+                checkpointOwed.set(true);
+            }
             logger.error("WAL checkpoint failed", e);
         }
     }
@@ -1227,7 +1383,8 @@ public class DatabaseEngine {
         }
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "cp-*")) {
             for (final Path p : stream) {
-                if (!p.getFileName().toString().equals(keepRef)) {
+                final String ref = p.getFileName().toString();
+                if (!ref.equals(keepRef) && !unreadableCheckpoints.contains(ref)) {
                     deleteRecursively(p);
                 }
             }
@@ -1320,7 +1477,20 @@ public class DatabaseEngine {
         try {
             persistenceManager.initialize();
             persistenceManager.loadCatalog(catalog, storageEngine);
-            persistenceManager.startAutoSave(catalog, storageEngine);
+            persistenceManager.startAutoSave(catalog, storageEngine, new AutoSaveGuard() {
+                @Override
+                public void runAlone(final Runnable save) {
+                    // As a checkpoint: the wrapper's lock before the monitor, so no statement runs beside the save.
+                    final ExclusiveEngineLock held = enterExclusive();
+                    try {
+                        synchronized (DatabaseEngine.this) {
+                            save.run();
+                        }
+                    } finally {
+                        leaveExclusive(held);
+                    }
+                }
+            });
             logger.info("Persistence loaded from: {}", config.getPersistenceDirectory());
         } catch (final Exception e) {
             logger.error("Failed to initialize persistence", e);
@@ -1982,6 +2152,8 @@ public class DatabaseEngine {
         }
 
         if (wal != null) {
+            // A checkpoint still owed is written now, while the log is open, unless a transaction holds it off.
+            payOwedCheckpoint();
             wal.close();
         }
         if (pointLog != null) {

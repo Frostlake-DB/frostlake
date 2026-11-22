@@ -616,9 +616,16 @@ final class ValueRangeInferencer {
      * A bitwise function is tagged by its declared width, with two exceptions (live-verified): a bare NULL
      * argument empties the interval — BITAND(n, NULL) is [SB1] — and a FLOAT or text argument, converted
      * through a 64-bit integer, widens it to at least eight bytes — BITAND(f, 1) is NUMBER(2,0)[SB8] — while
-     * a wider width keeps its own tag (BITOR(f, 1) is NUMBER(19,0)[SB16]).
+     * a wider width keeps its own tag (BITOR(f, 1) is NUMBER(19,0)[SB16]). A VARIANT argument is converted the
+     * same way, a shift count included: BITSHIFTRIGHT(n5, v) is NUMBER(5,0)[SB8] — unless it is an element read
+     * out of a value or a number just made a VARIANT, which keeps the declared width's tag (BITNOT(o:a) and
+     * BITNOT(TO_VARIANT(n5)) are NUMBER(2,0)[SB1]). GETBIT is tagged as BITAND is.
      */
     private ValueRange bitwiseRange(final FunctionCallExpression call, final List<Expression> args) {
+        if (!(visitor.inferStaticType(call) instanceof NumericType)) {
+            // Over BINARY operands the answer is a BINARY, which carries no integer tag.
+            return null;
+        }
         for (final Expression arg : args) {
             if (isBareNull(arg)) {
                 return ValueRange.EMPTY;
@@ -631,13 +638,17 @@ final class ValueRangeInferencer {
         }
         // A shift count is no value the result is read through: BITSHIFTRIGHT(1, '2') keeps the declared width's
         // [SB1] (live-verified).
-        final boolean shifts = call.getFunctionName().toUpperCase(Locale.ROOT).startsWith("BITSHIFT");
+        final String shiftName = call.getFunctionName().toUpperCase(Locale.ROOT);
+        final boolean shifts = shiftName.startsWith("BITSHIFT") || shiftName.startsWith("BIT_SHIFT");
         boolean throughSixtyFourBits = false;
         for (int i = 0; i < args.size(); i++) {
+            final DataType type = visitor.inferStaticType(args.get(i));
+            if (type instanceof VariantType && isHeldVariant(args.get(i))) {
+                throughSixtyFourBits = true;
+            }
             if (shifts && i == 1) {
                 continue;
             }
-            final DataType type = visitor.inferStaticType(args.get(i));
             throughSixtyFourBits = throughSixtyFourBits || type instanceof StringType || NumericType.isApproximate(type);
         }
         final DataType declared = visitor.inferStaticType(call);
@@ -648,6 +659,30 @@ final class ValueRangeInferencer {
         return ValueRange.between(bound.negate(), bound)
             .union(ValueRange.between(BigDecimal.valueOf(Long.MIN_VALUE), BigDecimal.valueOf(Long.MAX_VALUE)))
             .withNullable(true);
+    }
+
+    /**
+     * Whether a VARIANT argument is a held value — a column, a parsed text, a branch — rather than an element read
+     * out of one by a path, an index or GET, or a value of another type converted on the spot.
+     */
+    private boolean isHeldVariant(final Expression arg) {
+        if (arg instanceof ObjectAccessExpression || arg instanceof ArrayAccessExpression) {
+            return false;
+        }
+        if (arg instanceof CastExpression) {
+            return visitor.inferStaticType(((CastExpression) arg).getExpression()) instanceof VariantType;
+        }
+        if (arg instanceof FunctionCallExpression) {
+            final FunctionCallExpression made = (FunctionCallExpression) arg;
+            final String name = made.getFunctionName().toUpperCase(Locale.ROOT);
+            if (name.equals("GET") || name.equals("GET_PATH") || name.equals("GET_IGNORE_CASE")) {
+                return false;
+            }
+            if (name.equals("TO_VARIANT") && made.getArguments().size() == 1) {
+                return visitor.inferStaticType(made.getArguments().get(0)) instanceof VariantType;
+            }
+        }
+        return true;
     }
 
     /**
@@ -912,6 +947,9 @@ final class ValueRangeInferencer {
             case "BIT_NOT":
             case "BITSHIFTLEFT":
             case "BITSHIFTRIGHT":
+            case "BIT_SHIFTLEFT":
+            case "BIT_SHIFTRIGHT":
+            case "GETBIT":
                 return bitwiseRange(call, args);
             case "FACTORIAL":
                 // Over a whole number written out the plan holds the value: FACTORIAL(5) is [SB1], where

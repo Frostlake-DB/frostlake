@@ -23,6 +23,7 @@ import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.types.BooleanType;
 import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.UuidTextNode;
+import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 
@@ -47,8 +48,9 @@ public class ArrayContains extends BuiltInFunction {
         final JsonNode target = ArrayFunctionHelper.toElementNode(ArrayFunctionHelper.MAPPER, value);
         for (final JsonNode el : arr) {
             if (ArrayFunctionHelper.nodesEqual(el, target)) return true;
-            // Also compare as string for text values
-            if (value != null && el.isTextual() && UuidTextNode.holds(el) == UuidTextNode.holds(target)
+            // Also compare as string for text values; a VARIANT needle compares by its node alone, so a JSON
+            // null never matches the string "null".
+            if (value != null && !(value instanceof VariantValue) && el.isTextual() && UuidTextNode.holds(el) == UuidTextNode.holds(target)
                     && !DecfloatTextNode.holds(el) && !DecfloatTextNode.holds(target)
                     && el.asText().equals(value.toString())) return true;
         }

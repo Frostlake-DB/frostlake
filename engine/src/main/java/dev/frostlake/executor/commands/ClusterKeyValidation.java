@@ -55,11 +55,12 @@ public final class ClusterKeyValidation {
             final String lastPart = afterDot.isEmpty()
                 ? ParseTreeText.namePartText(name.nameStartPart())
                 : ParseTreeText.namePartText(afterDot.get(afterDot.size() - 1));
-            final String column = SqlIdentifiers.canonicalText(lastPart);
-            if (tableOrNull == null || !tableOrNull.hasColumn(column)) {
+            // The canonical name matches exactly: neither bee nor "bee" reaches a column "Bee" (live-verified).
+            if (tableOrNull == null || !tableOrNull.hasColumnExactly(lastPart)) {
                 final Token start = ref.getStart();
                 throw new RuntimeException(SqlCompilationError.at(start.getLine(),
-                    start.getCharPositionInLine(), "invalid identifier '" + column + "'"));
+                    start.getCharPositionInLine(), "invalid identifier '" + SqlIdentifiers.spellCanonical(lastPart)
+                        + "'"));
             }
             return;
         }

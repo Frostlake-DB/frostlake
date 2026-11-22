@@ -62,6 +62,11 @@ import org.antlr.v4.runtime.misc.IntervalSet;
  *                                                       the call
  * </pre>
  *
+ * <p>A window call whose frame holds the fault reads on (all live-verified): in a call's argument to the token after
+ * the first one in its parentheses, whatever it is - {@code UPPER((SELECT SUM(v) OVER (… v PRECEDING …) …))} is
+ * 'SELECT', 'v', then the ')' after it - and compared in a clause to its frame's ROWS or RANGE. A select list's query
+ * whose first item opens with a name and an operator is read at that operator.
+ *
  * <p>A fault inside a call of a later item reads on past the query's own reading (all live-verified):
  *
  * <pre>
@@ -167,6 +172,14 @@ final class ValueSubqueryLines {
                 return lines;
             }
         }
+        if (place == ITEM && firstCall < 0 && open + 3 < close && SyntaxErrorListener.isNameLike(spoken.get(open + 2))
+                && isArithmetic(spoken.get(open + 3).getType()) && FrameOffsetLines.standsInFrame(spoken, fault)
+                && faultyQuery(sql, spoken, open + 2, close, -1) == null) {
+            // A frame's fault in a query of a select list whose first item opens with a name and an operator is read
+            // as that operator (live-verified).
+            lines.add(SyntaxErrorListener.sentence(spoken.get(open + 3)));
+            return lines;
+        }
         if (firstCall < 0 && faultyQuery(sql, spoken, open + 2, close, -1) == null) {
             final List<String> later = laterCallFault(sql, spoken, open, close, place);
             if (later != null) {
@@ -178,6 +191,17 @@ final class ValueSubqueryLines {
         if (worded != null) {
             lines.addAll(worded);
             return lines;
+        }
+        if (place == CLAUSE && open >= 1 && spoken.get(open - 1).getType() == FrostlakeLexer.IN) {
+            // An IN's query whose FROM writes a table function bare is read to that call's ')' - or, for a call whose
+            // later arguments are texts, which carries the FROM list on, to the query's own ')' (live-verified).
+            final int bare = bareCall(spoken, open, close);
+            final int bareClose = bare > 0 ? closing(spoken, bare, close) : -1;
+            if (bareClose > bare && bareClose < close) {
+                lines.add(SyntaxErrorListener.sentence(spoken.get(textsAfterFirst(spoken, bare, bareClose)
+                    ? close : bareClose)));
+                return lines;
+            }
         }
         if (place == CLAUSE) {
             // The queries inside it, each refused at its SELECT, then what follows the query.
@@ -656,6 +680,25 @@ final class ValueSubqueryLines {
             return null;
         }
         lines.add(SyntaxErrorListener.sentence(spoken.get(call + 1)));
+        // A window call compared in a clause is read on to its frame's ROWS or RANGE (live-verified).
+        final int callClose = closing(spoken, call, close);
+        if (place == CLAUSE && callClose + 1 < close && spoken.get(callClose + 1).getType() == FrostlakeLexer.OVER) {
+            for (int i = callClose + 2; i < close; i++) {
+                final int type = spoken.get(i).getType();
+                if (type == FrostlakeLexer.ROWS || type == FrostlakeLexer.RANGE) {
+                    lines.add(SyntaxErrorListener.sentence(spoken.get(i)));
+                    break;
+                }
+            }
+        }
+        // A query whose FROM writes a table function bare reads on, compared in a clause, to the token after the first
+        // one in the first item's call and then the bare call's first token (live-verified).
+        final int bare = place == CLAUSE ? bareCall(spoken, open, close) : -1;
+        if (bare > 0 && call + 2 < close && bare + 1 < close) {
+            lines.add(SyntaxErrorListener.sentence(spoken.get(call + 2)));
+            lines.add(SyntaxErrorListener.sentence(spoken.get(bare + 1)));
+            return lines;
+        }
         if (call + 4 < close && spoken.get(call + 2).getType() == FrostlakeLexer.ARROW
                 && spoken.get(call + 3).getType() == FrostlakeLexer.STAR
                 && spoken.get(call + 4).getType() == FrostlakeLexer.COMMA) {
@@ -797,11 +840,14 @@ final class ValueSubqueryLines {
     private static List<String> argumentCallTail(final List<Token> spoken, final int close, final int call,
                                                  final int outer, final int end) {
         final List<String> tail = new ArrayList<>();
-        if (call + 2 < close && StarModifierResync.isName(spoken.get(call + 2))) {
+        final int callClose = closing(spoken, call, close);
+        // A window call is read on to the token after the first one in its parentheses, whatever it is
+        // (live-verified).
+        final boolean window = callClose + 1 < close && spoken.get(callClose + 1).getType() == FrostlakeLexer.OVER;
+        if (call + 2 < close && (window || StarModifierResync.isName(spoken.get(call + 2)))) {
             tail.add(SyntaxErrorListener.sentence(spoken.get(call + 2)));
             return tail;
         }
-        final int callClose = closing(spoken, call, close);
         if (callClose + 1 < close && spoken.get(callClose + 1).getType() == FrostlakeLexer.FROM) {
             tail.add(SyntaxErrorListener.sentence(spoken.get(close)));
             return tail;
@@ -872,6 +918,55 @@ final class ValueSubqueryLines {
         }
         return name + 2 < close && StarModifierResync.isName(spoken.get(name + 1))
             && spoken.get(name + 2).getType() == FrostlakeLexer.COMMA ? name + 1 : -1;
+    }
+
+    /**
+     * The '(' of the table function a query's FROM writes bare, {@code FROM FLATTEN(…)}, or -1.
+     *
+     * @param open  the query's '('
+     * @param close the query's ')'
+     */
+    static int bareCall(final List<Token> spoken, final int open, final int close) {
+        int depth = 0;
+        for (int i = open + 1; i + 2 < close; i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.LPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.RPAREN) {
+                depth--;
+            } else if (depth == 0 && type == FrostlakeLexer.FROM) {
+                return StarModifierResync.isName(spoken.get(i + 1))
+                    && spoken.get(i + 2).getType() == FrostlakeLexer.LPAREN ? i + 2 : -1;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether the call between {@code open} and {@code close} has two arguments or more, the later ones texts. */
+    private static boolean textsAfterFirst(final List<Token> spoken, final int open, final int close) {
+        int depth = 0;
+        int arguments = 1;
+        for (int i = open + 1; i < close; i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.LPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.RPAREN) {
+                depth--;
+            } else if (type == FrostlakeLexer.COMMA && depth == 0) {
+                arguments++;
+                if (spoken.get(i + 1).getType() != FrostlakeLexer.STRING_LITERAL
+                        || spoken.get(i + 2).getType() != FrostlakeLexer.COMMA && i + 2 != close) {
+                    return false;
+                }
+            }
+        }
+        return arguments >= 2;
+    }
+
+    /** Whether a token is an arithmetic operator between two values. */
+    private static boolean isArithmetic(final int type) {
+        return type == FrostlakeLexer.PLUS || type == FrostlakeLexer.MINUS || type == FrostlakeLexer.STAR
+            || type == FrostlakeLexer.SLASH;
     }
 
     /** Whether a token is a number or a text written as a literal. */

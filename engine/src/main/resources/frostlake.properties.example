@@ -19,6 +19,9 @@ http.rest.resultRetentionMs=3600000
 # (a session policy's SESSION_IDLE_TIMEOUT_MINS defaults to 240). 0 keeps every session until it is released. A
 # client that sets CLIENT_SESSION_KEEP_ALIVE sends heartbeats, which count as activity.
 http.session.idleTimeoutMinutes=240
+# The most bytes a request body may hold, as sent and, for a gzip-compressed one, once unzipped: a larger request is
+# answered 413 before it is read whole. 256 MiB by default; 0 sets no bound.
+http.maxRequestBytes=268435456
 # An HTTPS listener beside the plain one, serving the same endpoints - what the Snowflake JDBC driver connects to with
 # its default ssl=on. It needs a keystore holding the server's key and certificate (PKCS12 by default); the driver must
 # trust the certificate (javax.net.ssl.trustStore) and, for a certificate no OCSP responder knows, connect with

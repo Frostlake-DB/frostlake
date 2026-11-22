@@ -205,7 +205,8 @@ in its place. A listed future grant answers its scope in the
 `securable` — `{"database": "D", "schema": "S", "name": "\"<TABLE>\""}`, the kind's placeholder quoted — with
 `containing_scope` and `granted_by` null. A statement that reaches objects by the count answers
 `Statement executed successfully. N objects affected.`: a grant over all objects of a kind counts the objects in its
-scope, a revoke the objects it took a privilege or a grant option back from.
+scope it granted something on, passing over those the role may not grant on, a revoke the objects it took a privilege
+or a grant option back from.
 
 | endpoint | runs |
 |---|---|

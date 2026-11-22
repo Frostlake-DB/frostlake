@@ -28,14 +28,14 @@ import java.util.List;
 import javax.crypto.Cipher;
 
 /**
- * ENCRYPT_RAW(value, key, iv [, additional_authenticated_data [, encryption_method]]) — raw-key AES
+ * ENCRYPT_RAW(value, key [, iv [, additional_authenticated_data [, encryption_method]]]) — raw-key AES
  * encryption in any mode the method names: GCM, CBC, ECB, CTR, OFB or CFB. All BINARY arguments (value,
  * key, iv, aad) are the engine's hex-string BINARY representation; {@code key} is used verbatim (16 / 24 /
  * 32 bytes select AES-128 / 192 / 256) and the IV must be exactly the size its mode takes — 12 bytes for
  * GCM, 16 for the other IV modes, none at all for ECB.
  *
- * <p>An IV of NULL is not a missing argument: one is DRAWN at random and returned with the answer, so the
- * call stays reversible. Only a NULL value or key makes the answer NULL.
+ * <p>An IV left out or NULL is DRAWN at random and returned with the answer, so the call stays reversible. Only a
+ * NULL value or key makes the answer NULL.
  *
  * <p>Returns a VARIANT OBJECT with the Snowflake-documented keys {@code ciphertext} and {@code iv} (each a
  * hex BINARY), plus {@code tag} for an authenticating mode — the 128-bit GCM tag split off from the cipher
@@ -52,19 +52,20 @@ public class EncryptRaw extends BuiltInFunction {
         if (args.get(0) == null || args.get(1) == null) {
             return null;
         }
+        final Object ivArg = args.size() >= 3 ? args.get(2) : null;
         final Object aadArg = args.size() >= 4 ? args.get(3) : null;
         // Live's order: the method, the key's size, the IV's size, then whether the mode takes AAD.
         final EncryptionMethod method = EncryptionMethod.of(args.size() >= 5 ? args.get(4) : null);
         RawCipherSupport.requireKeySize(RawCipherSupport.binaryBytes("ENCRYPT_RAW", args.get(1)));
-        if (args.get(2) != null) {
-            RawCipherSupport.requireIvSize(method, RawCipherSupport.binaryBytes("ENCRYPT_RAW", args.get(2)));
+        if (ivArg != null) {
+            RawCipherSupport.requireIvSize(method, RawCipherSupport.binaryBytes("ENCRYPT_RAW", ivArg));
         }
         method.requireAadSupport(aadArg != null);
         final byte[] plaintext = RawCipherSupport.binaryBytes("ENCRYPT_RAW", args.get(0));
         method.requireWholeBlocks(plaintext.length);
         try {
             final byte[] key = RawCipherSupport.binaryBytes("ENCRYPT_RAW", args.get(1));
-            final byte[] iv = RawCipherSupport.ivOrDrawn("ENCRYPT_RAW", method, args.get(2));
+            final byte[] iv = RawCipherSupport.ivOrDrawn("ENCRYPT_RAW", method, ivArg);
             final Cipher cipher = method.cipher(Cipher.ENCRYPT_MODE, key, iv);
             if (aadArg != null) {
                 cipher.updateAAD(RawCipherSupport.binaryBytes("ENCRYPT_RAW", aadArg));
@@ -104,7 +105,7 @@ public class EncryptRaw extends BuiltInFunction {
     }
 
     @Override
-    public int getMinArgCount() { return 3; }
+    public int getMinArgCount() { return 2; }
     @Override
     public int getMaxArgCount() { return 5; }
 }

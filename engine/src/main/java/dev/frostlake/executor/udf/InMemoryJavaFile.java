@@ -39,9 +39,13 @@ public class InMemoryJavaFile extends SimpleJavaFileObject {
         return sourceCode;
     }
 
-    /** A public class of any name may stand in the unit: the body is not a file named for its class. */
+    /**
+     * A public class of any name may stand in the unit: the body is not a file named for its class. Nor is it a
+     * module's declaration, whose file a compiler reads a unit that opens with no type as: a body that is no Java is
+     * {@code class, interface, enum, or record expected} (live-verified).
+     */
     @Override
     public boolean isNameCompatible(final String simpleName, final Kind kind) {
-        return kind == Kind.SOURCE;
+        return kind == Kind.SOURCE && !"module-info".equals(simpleName);
     }
 }

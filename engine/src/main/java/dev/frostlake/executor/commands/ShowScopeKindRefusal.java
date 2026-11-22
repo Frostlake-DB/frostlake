@@ -119,6 +119,11 @@ final class ShowScopeKindRefusal {
             }
             return;
         }
+        if ((kind == ShowScopeKind.FAILOVER_GROUP || kind == ShowScopeKind.REPLICATION_GROUP)
+                && (listing == ShowListing.DATABASES || listing == ShowListing.SHARES)) {
+            // A group lists the databases and the shares it replicates (FailoverGroupCommandHandler).
+            return;
+        }
         if (kind == ShowScopeKind.VIEW || kind == ShowScopeKind.PIPE || kind == ShowScopeKind.FAILOVER_GROUP
                 || kind == ShowScopeKind.REPLICATION_GROUP) {
             throw cannotShow(listing, kind.spelling());

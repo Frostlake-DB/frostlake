@@ -45,6 +45,7 @@ import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.UnaryOperationExpression;
 import dev.frostlake.executor.expressions.WhenClause;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
 import dev.frostlake.metastore.CopyJob;
 import dev.frostlake.metastore.CopyJobErrors;
 import dev.frostlake.metastore.LoadRecord;
@@ -72,6 +73,7 @@ import dev.frostlake.types.StatementResultWidths;
 import dev.frostlake.types.StringType;
 import dev.frostlake.types.VariantType;
 import dev.frostlake.values.CodePointText;
+import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantValue;
 
 import java.io.BufferedReader;
@@ -398,9 +400,9 @@ public final class CopyCommandExecutor {
             String targetDisplay = null;
             boolean isLoadIntoTable = false;
 
-            if (ctx.qualifiedName() != null) {
-                // COPY INTO table (loading data)
-                targetName = ParseTreeText.getQualifiedName(ctx.qualifiedName());
+            if (ctx.objectName() != null) {
+                // COPY INTO table (loading data), the table named or IDENTIFIER() referenced
+                targetName = executor.resolveObjectName(ctx.objectName());
                 isLoadIntoTable = true;
             } else if (ctx.stageRef() != null) {
                 // COPY INTO @stage | @~ | @%table [/path] (unloading data to a stage)
@@ -871,7 +873,7 @@ public final class CopyCommandExecutor {
                 // ALTER PIPE … REFRESH PREFIX / MODIFIED_AFTER: narrow the loaded set to matching files
                 // (these filters are set only for the duration of a pipe REFRESH; a plain COPY sees none).
                 if (!passesRefreshFilters(file, staged != null ? staged.relativeToPath(file)
-                        : baseDir.relativize(file).toString().replace('\\', '/'))) {
+                        : StagePathSegments.relativeText(baseDir, file))) {
                     continue;
                 }
                 final String fileKey = copyFileKey(file);
@@ -922,7 +924,9 @@ public final class CopyCommandExecutor {
                                 throw unreadable;
                             }
                             errors++;
-                            firstError = new CopyFileError(copyErrorMessage(unreadable), 1, null, null);
+                            firstError = unreadable instanceof JsonFileFault
+                                ? jsonFaultError((JsonFileFault) unreadable)
+                                : new CopyFileError(copyErrorMessage(unreadable), 1, null, null);
                             records = new ArrayList<>();
                         }
                         for (final JsonNode record : records) {
@@ -952,7 +956,7 @@ public final class CopyCommandExecutor {
                         // Streamed line read — materializing the whole file first doubled peak memory
                         // for a large CSV. The one-line lookahead keeps the last-line flag available,
                         // and is advanced BEFORE the blank-line skip so a `continue` can't stall it.
-                        try (final BufferedReader reader = StagedFileIo.reader(file, rowRules.charset())) {
+                        try (final BufferedReader reader = StagedFileIo.reader(file, rowRules.charset(), format.getCompression())) {
                             // The file is split as a staged-file query splits it (CsvRecordReader), so a record
                             // that does not parse is rejected here as the query refuses it.
                             final CsvRecordReader records = CsvRecordReader.forLoad(reader, fileName, format)
@@ -1231,7 +1235,7 @@ public final class CopyCommandExecutor {
             throws IOException {
         final List<JsonNode> records = reader instanceof JsonStageReader
             ? ((JsonStageReader) reader).readRecords(file, rules.stripsOuterArray(), rules.replacesInvalidCharacters(),
-                String.valueOf(file.getFileName()))
+                String.valueOf(file.getFileName()), true, format.allowsDuplicate(), format.getCompression())
             : reader.readRecords(file, format, String.valueOf(file.getFileName()));
         if (rules.stripsNullValues()) {
             for (final JsonNode record : records) {
@@ -1449,8 +1453,25 @@ public final class CopyCommandExecutor {
         final StagedFileMetadata metadata = transformItems != null ? metadataOf(staged, file) : null;
         try {
             if (recordReader != null) {
+                final List<JsonNode> records;
+                try {
+                    records = loadedRecords(recordReader, file, rowRules, format);
+                } catch (final JsonFileFault malformed) {
+                    if (errorCollector == null) {
+                        throw malformed;
+                    }
+                    // A file whose text is no sequence of JSON records is one error row, placed where the
+                    // account's reader stops, the row counted from 1.
+                    final CopyFileError described = jsonFaultError(malformed);
+                    final CopyErrorTaxonomy taxonomy = CopyErrorTaxonomy.jsonParsing();
+                    errorCollector.add(new Row(Arrays.asList(
+                        described.getMessage(), fileName, described.getLine(), described.getCharacter(), null,
+                        taxonomy.getCategory(), taxonomy.getCode(), taxonomy.getSqlState(), null,
+                        malformed.fault().row() + 1, malformed.fault().rowLine(), null)));
+                    return rows;
+                }
                 int recordNumber = 0;
-                for (final JsonNode record : loadedRecords(recordReader, file, rowRules, format)) {
+                for (final JsonNode record : records) {
                     recordNumber++;
                     try {
                         final Row row = transformItems != null
@@ -1476,7 +1497,7 @@ public final class CopyCommandExecutor {
                 }
             } else {
                 // Streamed line read with a one-line lookahead — see the load path's CSV loop.
-                try (final BufferedReader reader = StagedFileIo.reader(file, rowRules.charset())) {
+                try (final BufferedReader reader = StagedFileIo.reader(file, rowRules.charset(), format.getCompression())) {
                     // Split as the load splits it (see the load's CSV loop).
                     final CsvRecordReader records = CsvRecordReader.forLoad(reader, fileName, format)
                         .expectingWidth(checkColumnCount ? tableCols.size() : -1);
@@ -1675,6 +1696,16 @@ public final class CopyCommandExecutor {
             + " values such as 'SKIP_FILE' or 'CONTINUE' for the ON_ERROR option. For more information"
             + " on loading options, please run 'info loading_data' in a SQL client.");
         return sb.toString();
+    }
+
+    /**
+     * A JSON file's malformed record, described as the load's result reports it: the reader's sentence, and the
+     * line and character it stops at.
+     */
+    private static CopyFileError jsonFaultError(final JsonFileFault malformed) {
+        final JsonRecordFault fault = malformed.fault();
+        return new CopyFileError(malformed.sentence(), Math.max(fault.line(), 1),
+            fault.character() < 0 ? null : Integer.valueOf(fault.character()), null);
     }
 
     /**
@@ -2699,6 +2730,7 @@ public final class CopyCommandExecutor {
         boolean overwrite = false;
         boolean single = false;
         boolean detailedOutput = false;
+        boolean includeQueryId = false;
         // VALIDATION_MODE = RETURN_ROWS: the unload answers its query's rows and writes nothing.
         boolean returnRows = false;
         String compression = "AUTO";
@@ -2757,7 +2789,7 @@ public final class CopyCommandExecutor {
                 if ("DETAILED_OUTPUT".equals(optionName)) {
                     detailedOutput = requireBareBoolean("DETAILED_OUTPUT", clause.copyOptionValue());
                 } else if ("INCLUDE_QUERY_ID".equals(optionName)) {
-                    requireBareBoolean("INCLUDE_QUERY_ID", clause.copyOptionValue());
+                    includeQueryId = requireBareBoolean("INCLUDE_QUERY_ID", clause.copyOptionValue());
                 } else if (StorageIntegrationReference.PROPERTY.equals(optionName)) {
                     // An unload into a stage takes no integration: the stage carries its own (live-verified).
                     throw new RuntimeException("SQL compilation error: \n COPY statements targeting a stage do not"
@@ -2848,6 +2880,10 @@ public final class CopyCommandExecutor {
         // Resolve the target directory (file:// stage, mapped s3:// stage, or external location). An
         // unmapped target formats but writes nothing. PARTITION BY splits the rows across per-key files.
         final String extension = fileExtension != null ? fileExtension : (json ? "json" : "csv");
+        // INCLUDE_QUERY_ID = TRUE names each file after the statement, data_<query id>_0_0_0.csv.gz, so that a rerun
+        // writes beside the last run's files instead of colliding with them (documented). SINGLE = TRUE writes its
+        // one name as it does without the option.
+        final String queryIdPart = includeQueryId && !single ? "_" + unloadQueryId() : "";
         final StagePrefix target = partitionExpr == null ? executor.resolveStagePrefix(location) : null;
         Path dir;
         String singleFileName = null;
@@ -2864,8 +2900,8 @@ public final class CopyCommandExecutor {
             final String written = target.getPrefix();
             final String namePrefix = written.isEmpty() || written.endsWith("/") ? written + "data" : written;
             final String relativeName = single ? namePrefix
-                : namePrefix + "_0_0_0." + extension + (gzip ? ".gz" : "");
-            if (!overwrite && rowsUnloaded > 0 && target.getRoot() != null
+                : namePrefix + queryIdPart + "_0_0_0." + extension + (gzip ? ".gz" : "");
+            if (!overwrite && queryIdPart.isEmpty() && rowsUnloaded > 0 && target.getRoot() != null
                     && (single ? target.occupied(relativeName) : target.anyFileStartingWith(namePrefix))) {
                 throw new RuntimeException("Files already existing at the unload destination: "
                     + locationDisplay + ". Use overwrite option to force unloading.");
@@ -2894,8 +2930,8 @@ public final class CopyCommandExecutor {
             }
             // An occupied destination refuses without OVERWRITE = TRUE, echoing the target as written. A
             // partitioned unload never collides: each run names its files afresh.
-            if (!overwrite && partitionExpr == null && dir != null && Files.isDirectory(dir)
-                    && rowsUnloaded > 0) {
+            if (!overwrite && partitionExpr == null && queryIdPart.isEmpty() && dir != null
+                    && Files.isDirectory(dir) && rowsUnloaded > 0) {
                 final File[] existing = dir.toFile().listFiles();
                 if (existing != null) {
                     for (final File present : existing) {
@@ -2912,7 +2948,7 @@ public final class CopyCommandExecutor {
         // not the format's, and not the compression's: CSV, JSON, uncompressed and GZIP all land as
         // `data` (live-verified). Only a multi-file unload carries the numbered name and extension.
         final String defaultName = single
-            ? "data" : "data_0_0_0." + extension + (gzip ? ".gz" : "");
+            ? "data" : "data" + queryIdPart + "_0_0_0." + extension + (gzip ? ".gz" : "");
         final List<Row> detailRows = new ArrayList<>();
         int inputBytes = 0;
         int outputBytes = 0;
@@ -3024,9 +3060,10 @@ public final class CopyCommandExecutor {
 
         int inputTotal = 0;
         int outputTotal = 0;
-        // Each unload names its files after itself, so a rerun ADDS files beside the last run's rather than
-        // overwriting them — which is also why a partitioned unload is never refused over existing files.
-        final String fileName = "data_" + UUID.randomUUID() + "_0_0_0." + extension + (gzip ? ".gz" : "");
+        // Each unload names its files after itself, data_<query id>_0_0_0.csv.gz, so a rerun ADDS files beside the
+        // last run's rather than overwriting them — which is also why a partitioned unload is never refused over
+        // existing files.
+        final String fileName = "data_" + unloadQueryId() + "_0_0_0." + extension + (gzip ? ".gz" : "");
         for (final Map.Entry<String, List<Row>> entry : groups.entrySet()) {
             final ResultSet part = new ResultSet(data.getColumns(), entry.getValue());
             final String content = json ? formatRowsAsJson(part) : csv.text(part, header);
@@ -3042,17 +3079,40 @@ public final class CopyCommandExecutor {
         return new int[] {inputTotal, outputTotal};
     }
 
-    /** Make a partition-key value safe to use as a directory name (non-alphanumerics → underscore). */
+    /**
+     * The folder a partition-key value names. A {@code /} in the value separates nested folders, as in the
+     * documented {@code 'date=' || d || '/hour=' || h}, and an empty segment is dropped; inside a segment every
+     * character but a letter, a digit, {@code -}, {@code _} and {@code =} is written {@code _}, so no segment
+     * climbs out of the target.
+     */
     private String sanitizePartitionDir(final String key) {
         if (NULL_PARTITION.equals(key)) {
             return NULL_PARTITION;   // the NULL partition's own name, which the listing shows as written
         }
         final StringBuilder sb = new StringBuilder();
+        boolean segmentStart = true;
         for (int i = 0; i < key.length(); i++) {
             final char c = key.charAt(i);
+            if (c == '/') {
+                if (!segmentStart) {
+                    sb.append('/');
+                    segmentStart = true;
+                }
+                continue;
+            }
             sb.append(Character.isLetterOrDigit(c) || c == '-' || c == '_' || c == '=' ? c : '_');
+            segmentStart = false;
+        }
+        if (sb.length() > 0 && sb.charAt(sb.length() - 1) == '/') {
+            sb.setLength(sb.length() - 1);
         }
         return sb.length() == 0 ? "_" : sb.toString();
+    }
+
+    /** The query ID an unload names its files after: the running statement's, a fresh one where it has none. */
+    private static String unloadQueryId() {
+        final String running = StatementCancellation.runningQueryId();
+        return running != null ? running : UUID.randomUUID().toString();
     }
 
     /**
@@ -3089,39 +3149,46 @@ public final class CopyCommandExecutor {
         return sb.toString();
     }
 
-    /** True when the unload result is one column whose first non-null value is a JSON document (Map, List, or JSON text). */
+    /**
+     * Whether a TYPE = JSON unload takes the result: one column of VARIANT, OBJECT or ARRAY, whatever values it holds
+     * (documented: JSON unloads VARIANT columns), or one column every value of which is a JSON document. The verdict
+     * is the same whatever order the rows come in. A column whose rows are all NULL — or that has none — unloads
+     * cleanly: there is no non-JSON value to refuse over, and an empty unload writes nothing anyway.
+     */
     private boolean isSingleVariantColumn(final ResultSet data) {
         if (data.getColumns().size() != 1) {
             return false;
         }
+        if (VariantJsonText.isSemiStructured(data.getColumns().get(0).getDataType())) {
+            return true;
+        }
         for (final Row row : data.getRows()) {
             final Object v = row.getValues().isEmpty() ? null : row.getValue(0);
-            if (v == null) {
-                continue;
+            if (v != null && !isJsonDocument(v)) {
+                return false;
             }
-            if (v instanceof Map || v instanceof List) {
-                return true;
-            }
-            if (v instanceof VariantValue) {
-                return ((VariantValue) v).isJsonObject() || ((VariantValue) v).isJsonArray();
-            }
-            if (v instanceof String) {
-                final String t = ((String) v).trim();
-                if (!t.startsWith("{") && !t.startsWith("[")) {
-                    return false;
-                }
-                try {
-                    MAPPER.readTree(t);
-                    return true;
-                } catch (final RuntimeException e) {
-                    return false;
-                }
-            }
-            return false;
         }
-        // One column whose rows are all NULL — or none at all — unloads cleanly: there is no
-        // non-JSON value to refuse over, and an empty unload writes nothing anyway.
         return true;
+    }
+
+    /** Whether a value unloads as a JSON document: a semi-structured value, or a text that parses as an object or array. */
+    private static boolean isJsonDocument(final Object v) {
+        if (v instanceof Map || v instanceof List || v instanceof VariantValue) {
+            return true;
+        }
+        if (v instanceof String) {
+            final String t = ((String) v).trim();
+            if (!t.startsWith("{") && !t.startsWith("[")) {
+                return false;
+            }
+            try {
+                MAPPER.readTree(t);
+                return true;
+            } catch (final RuntimeException e) {
+                return false;
+            }
+        }
+        return false;
     }
 
     /**
@@ -3195,7 +3262,9 @@ public final class CopyCommandExecutor {
             return "null";
         }
         if (v instanceof VariantValue) {
-            return ((VariantValue) v).text();
+            // A DOUBLE is written as TO_JSON spells it, 1.000000000000000e+20 (see VariantJsonText).
+            final String converted = VariantJsonText.convertedTextOf(v);
+            return converted != null ? converted : ((VariantValue) v).text();
         }
         if (v instanceof String) {
             return ((String) v).trim();

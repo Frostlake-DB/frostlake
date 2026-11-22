@@ -79,8 +79,45 @@ public final class StatementCount {
      */
     public static int countTokens(final String sql) {
         final List<Token> tokens = tokens(sql);
+        final List<Token> separators = separators(tokens);
         int count = 0;
         boolean sawContent = false;
+        int next = 0;
+        for (final Token token : tokens) {
+            if (token.getType() == Token.EOF) {
+                break;
+            }
+            if (next < separators.size() && separators.get(next) == token) {
+                next++;
+                if (sawContent) {
+                    count++;
+                    sawContent = false;
+                }
+            } else if (token.getType() != FrostlakeLexer.SEMI) {
+                sawContent = true;
+            }
+        }
+        if (sawContent) {
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * The semicolons of {@code sql} that end a top-level statement, read off the lexer's tokens as
+     * {@link #countTokens} reads them: those standing outside a scripting region, so a block's own statements
+     * stay inside it.
+     *
+     * @param sql the text
+     * @return the semicolons' tokens, in order
+     */
+    public static List<Token> statementSeparators(final String sql) {
+        return separators(tokens(sql));
+    }
+
+    /** The SEMI tokens outside a scripting region (see {@link #countTokens}). */
+    private static List<Token> separators(final List<Token> tokens) {
+        final List<Token> separators = new ArrayList<>();
         int depth = 0;
         int parentheses = 0;
         boolean headerBeginPending = false;
@@ -90,13 +127,11 @@ public final class StatementCount {
                 break;
             }
             if (type == FrostlakeLexer.SEMI) {
-                if (depth == 0 && sawContent) {
-                    count++;
-                    sawContent = false;
+                if (depth == 0) {
+                    separators.add(tokens.get(i));
                 }
                 continue;
             }
-            sawContent = true;
             if (type == FrostlakeLexer.BEGIN) {
                 if (!startsTransaction(tokens, i) && !standsAsAName(tokens, i)) {
                     if (headerBeginPending && parentheses == 0) {
@@ -128,10 +163,7 @@ public final class StatementCount {
                 parentheses--;
             }
         }
-        if (sawContent) {
-            count++;
-        }
-        return count;
+        return separators;
     }
 
     /** Whether the BEGIN at {@code index} starts a transaction rather than a block. */

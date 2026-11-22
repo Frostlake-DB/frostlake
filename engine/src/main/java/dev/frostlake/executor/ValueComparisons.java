@@ -23,9 +23,12 @@ import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.types.DecimalText;
 import dev.frostlake.values.ApproximateValues;
 import dev.frostlake.values.DayTimeInterval;
+import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.NonFiniteDoubles;
 import dev.frostlake.values.VariantValue;
 import dev.frostlake.values.YearMonthInterval;
+import tools.jackson.databind.JsonNode;
+
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -112,7 +115,8 @@ public final class ValueComparisons {
      * FLOAT are one; a zoned timestamp keys by its instant (see {@link #canonicalGroupKeyValue}).
      */
     public static Object normalizeValueForDistinct(final Object value) {
-        if (value instanceof Number || value instanceof OffsetDateTime || value instanceof ZonedDateTime) {
+        if (value instanceof Number || value instanceof OffsetDateTime || value instanceof ZonedDateTime
+                || value instanceof VariantValue) {
             return canonicalGroupKeyValue(value);
         }
         return value;
@@ -140,7 +144,11 @@ public final class ValueComparisons {
             // A semi-structured value groups by the VARIANT order's own equality — numbers by value
             // whatever their notation, objects whatever their key order — which its equals and
             // hashCode carry (see VariantOrder); a typed and a text-carried equal value still meet.
-            return value;
+            // A number on its own keys as the number it holds, so it meets a number a VARIANT column
+            // carries unwrapped (a cast of a NUMBER or a FLOAT to VARIANT): 2.500::NUMBER(10,3)::VARIANT,
+            // TO_VARIANT(2.5::FLOAT) and PARSE_JSON('2.5') are one group (live-verified).
+            final Number number = variantScalarNumber((VariantValue) value);
+            return number != null ? canonicalGroupKeyValue(number) : value;
         }
         if (!(value instanceof Number)) {
             return value;
@@ -160,6 +168,28 @@ public final class ValueComparisons {
             }
         }
         return exact;
+    }
+
+    /**
+     * The number a semi-structured value holds on its own — a double as a {@link Double}, any other number as its
+     * exact {@link BigDecimal} — or null when it holds anything else: a string, a boolean, a JSON null, an array, an
+     * object, or a DECFLOAT, which keys apart from the other numbers in the VARIANT order.
+     *
+     * @param value a semi-structured value
+     * @return its number, or null
+     */
+    public static Number variantScalarNumber(final VariantValue value) {
+        if (value.isContainerValue()) {
+            return null;
+        }
+        final JsonNode node = value.node();
+        if (node == null || !node.isNumber() || DecfloatTextNode.holds(node)) {
+            return null;
+        }
+        if (node.isDouble() || node.isFloat()) {
+            return Double.valueOf(node.doubleValue());
+        }
+        return node.decimalValue();
     }
 
     @SuppressWarnings("unchecked")

@@ -209,7 +209,7 @@ final class ShowInfraExecutor {
                 stage.hasCredentials() ? "Y" : "N", stage.hasEncryptionKey() ? "Y" : "N",
                 stage.getOwner(),
                 ShowResultHelpers.text(stage.getComment()),
-                null, type, cloud, null, null, null,
+                null, type, cloud, null, stage.getStorageIntegration(), stage.getEndpoint(),
                 ShowResultHelpers.OWNER_ROLE_TYPE, stage.isDirectoryEnabled() ? "Y" : "N"
             )));
         }
@@ -585,6 +585,10 @@ final class ShowInfraExecutor {
             String.valueOf(stage.isDirectoryEnabled()), "false")));
         rows.add(new Row(Arrays.asList("DIRECTORY", "AUTO_REFRESH", "Boolean",
             String.valueOf(stage.isDirectoryAutoRefresh()), "false")));
+        if (stage.getEndpoint() != null && stage.getUrl() != null) {
+            // An external stage's endpoint follows its directory rows; an internal stage's is not told (live-verified).
+            rows.add(new Row(Arrays.asList("ENDPOINT", "ENDPOINT", "String", stage.getEndpoint(), "")));
+        }
         return new ResultSet(columns, rows);
     }
 }

@@ -240,7 +240,7 @@ final class ObjectDdl {
      * {@code create or replace stream S on table T;} — the source named by its own name alone, whatever schema
      * holds it: {@code on view V}, {@code on dynamic table D}, {@code on directory(@STG)} for a stage, and
      * {@code on table T} for a table or an event table; then {@code  append_only = true} for an append-only
-     * stream.
+     * stream. An external table's stream is {@code on external table ET insert_only = true} (live-verified).
      */
     static String stream(final Stream stream, final String name) {
         return stream(stream, name, null);
@@ -260,6 +260,10 @@ final class ObjectDdl {
             : SqlIdentifiers.spellCanonicalEscaped(QualifiedName.parse(stream.getSourceTableName()).last());
         final String kind = stream.getSourceType() == null ? "TABLE" : stream.getSourceType().name();
         final StringBuilder sb = new StringBuilder("create or replace stream ").append(name);
+        if (stream.getStreamType() == StreamType.INSERT_ONLY) {
+            // Only an external table takes an insert-only stream.
+            return sb.append(" on external table ").append(source).append(" insert_only = true;").toString();
+        }
         switch (kind) {
             case "VIEW":
                 sb.append(" on view ").append(source);

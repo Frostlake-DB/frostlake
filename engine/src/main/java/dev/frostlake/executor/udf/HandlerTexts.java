@@ -18,6 +18,8 @@ package dev.frostlake.executor.udf;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.values.BinaryValue;
+import dev.frostlake.values.DecimalOriginNode;
+import dev.frostlake.values.ScaledDecimalNode;
 import dev.frostlake.values.TypedScalarNode;
 import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantText;
@@ -89,6 +91,13 @@ public final class HandlerTexts {
         }
         if (member.isContainer()) {
             return VariantJsonText.render(VariantUndefined.withNulls(member));
+        }
+        // A number read from a scaled NUMBER is written at its type's scale: 12.50, 3.00 (live-verified).
+        if (member instanceof ScaledDecimalNode) {
+            return ((ScaledDecimalNode) member).scaledText();
+        }
+        if (member instanceof DecimalOriginNode && ((DecimalOriginNode) member).declaredScale() > 0) {
+            return ((DecimalOriginNode) member).scaledText();
         }
         return VariantText.canonical(member);
     }

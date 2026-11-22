@@ -146,7 +146,7 @@ public final class AuthenticationPolicyLists {
         }
         final FrostlakeParser.SecurityPropertyValueContext value = property.securityPropertyValue();
         final String shown;
-        if (value.LPAREN() != null && value.STRING_LITERAL().isEmpty() && value.SESSION_VAR_REF().isEmpty()) {
+        if (value.LPAREN() != null && SecurityListItems.holdsNoText(value)) {
             return new ArrayList<Object>();
         } else if (value.LPAREN() != null) {
             shown = "TOK_CONSTANT_LIST";

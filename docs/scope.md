@@ -144,6 +144,31 @@ statement escape or catches a pure-Python exception, and a JavaScript handler un
 Evaluating both languages in one polyglot context, or a nested Python evaluation on a thread of its own with the
 session's state carried over, would lift it; neither is done, since both reach deep into how a routine runs.
 
+## Python routines on one thread share one interpreter — module state can cross them, by design
+
+Python keeps one interpreter per thread (a GraalPy context, or a CPython worker process with `python.runtime`),
+and every engine and every routine that runs on that thread uses it. A routine's own names never reach another:
+each call starts with an empty module namespace. When an outermost statement ends, the runtime puts back what
+the interpreter shares between calls: the built-in names, the environment, the working directory, the decimal
+context, `sys.path`, `sys.meta_path`, `sys.path_hooks`, the importer cache, the recursion limit, its own modules
+and classes, and the members a routine replaced or deleted on the standard-library modules imported by then.
+
+Some state is not put back, and the next statement's routines on that thread see it, whichever engine runs them:
+
+- a member a routine **adds** to a module (`json.SECRET = 1` after `import json`), and any change to a module
+  first imported after the runtime started, such as a package's;
+- state a module keeps **inside its objects**: `random.seed(…)`, a `logging` handler, a `functools.lru_cache`'s
+  entries, a package's own caches and registries;
+- within **one statement**, all of the above and the built-in names too: the routines of `SELECT tamper(),
+  peek()` see a built-in that `tamper` added.
+
+On the account, no routine's state reaches another. Each way of closing the gap costs too much. Importing modules
+again per statement is ruled out because numpy and pandas cannot be imported twice in one interpreter. Comparing
+every module's members on every call is too slow. An interpreter per engine takes over a second to build and its
+own memory per thread, and it still leaves the within-engine cases. An interpreter per statement pays that build on
+every Python statement. So the one shared interpreter is kept. A handler that needs a clean module should not
+change shared modules, or should put back what it changed before it returns.
+
 ## Task notification and run properties — kept and shown, not acted on
 
 A task's SUCCESS_INTEGRATION and ERROR_INTEGRATION are kept and shown, but no notification is sent: no message
@@ -151,13 +176,37 @@ service stands behind an integration here. OVERLAP_POLICY is kept and read back,
 before the next run starts, so no run overlaps another. USER_TASK_TIMEOUT_MS is kept and shown and not enforced: a
 task's statement runs to completion.
 
+## Resource monitors, shares, failover groups, secondary databases and external tables — declared, never acted on
+
+`CREATE | ALTER | DROP RESOURCE MONITOR`, `CREATE | ALTER | DROP | DESCRIBE SHARE`, `CREATE | ALTER | DROP FAILOVER
+GROUP`, `CREATE DATABASE … AS REPLICA OF` and `CREATE | ALTER | DROP | DESCRIBE EXTERNAL TABLE` run, so that
+infrastructure tooling (the Snowflake Terraform provider among it) can manage these objects against the engine,
+and `SHOW RESOURCE MONITORS`, `SHOW SHARES`, `SHOW FAILOVER GROUPS` (and `SHOW REPLICATION GROUPS`), `SHOW
+REPLICATION DATABASES`, `SHOW DATABASES | SHARES IN FAILOVER GROUP` and `SHOW EXTERNAL TABLES` list what was
+declared. Nothing stands behind them:
+
+- a **resource monitor** keeps its quota, frequency, start and end, notified users and triggers; no credit is
+  metered, so `used_credits` stays `0.00` and no trigger ever notifies or suspends;
+- a **share** keeps its comment and the accounts it was given; no account reads through it and `DESCRIBE SHARE`
+  answers no object;
+- a **failover group** keeps its object types, allowed databases, shares, integration types and accounts and its
+  schedule; nothing is replicated, refreshed or failed over, and `REFRESH`, `PRIMARY`, `SUSPEND` and `RESUME` change
+  nothing;
+- a **secondary database** is an empty database that remembers its primary; nothing is refreshed into it;
+- an **external table** is a table of `VALUE` and its declared columns over an external stage, with its location
+  and file format kept for the listing. **No file is read through it**: a query over it answers no rows, and a
+  refresh finds nothing.
+
+These objects are not kept by a snapshot: a restored engine holds them only when its write-ahead log replays the
+statements that made them. The statements follow Snowflake's documentation; an account's answers for them were
+not measured, apart from the refusals of a malformed `CREATE EXTERNAL TABLE`.
+
 ## Object kinds that are listed but not modelled — the listing answers its columns and no rows
 
-A client that walks an account's metadata issues SHOW commands for kinds Frostlake has no object of: resource
-monitors, shares, connections, applications and application packages, indexes, channels, snapshots, Git
-repositories, semantic views, DBT projects, session, authentication and packages policies, external and data metric
-functions, replication databases, replication and failover groups, replication accounts, and delegated
-authorizations. None of these can be created here, and none is planned for its own sake: they are account
+A client that walks an account's metadata issues SHOW commands for kinds Frostlake has no object of: connections,
+applications and application packages, indexes, channels, snapshots, Git repositories, semantic views, DBT projects,
+external and data metric functions, replication accounts, and delegated authorizations. None of these can be
+created here, and none is planned for its own sake: they are account
 administration, sharing, replication and ingestion surfaces with nothing behind them in an in-memory engine.
 
 Their listings are in scope all the same, **as shapes**: each `SHOW <KIND>` answers the columns a real account

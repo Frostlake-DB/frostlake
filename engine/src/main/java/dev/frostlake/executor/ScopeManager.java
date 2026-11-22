@@ -19,7 +19,6 @@ package dev.frostlake.executor;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.Stack;
@@ -146,7 +145,7 @@ public class ScopeManager {
         if (declaredInScopeStack.isEmpty()) {
             return;
         }
-        final String key = name.toUpperCase(Locale.ROOT);
+        final String key = VariableKey.of(name);
         declaredInScopeStack.peek().add(key);
         final int level = bindRuleStack.size() - 1;
         final Integer enclosing = isolatedScopeStack.peek().booleanValue() ? null : declarationBelow(key, level);
@@ -194,7 +193,7 @@ public class ScopeManager {
      * scope declares, wherever it is read — but never one whose declaration shadows a name an enclosing DECLARE
      * section declares.
      *
-     * @return the names, upper-cased
+     * @return the names, as keys
      */
     public Set<String> namesWrittenAsBinds() {
         final Set<String> names = new HashSet<String>();
@@ -222,7 +221,7 @@ public class ScopeManager {
     /**
      * The names DECLARED in the innermost scope, the ones its exit discards.
      *
-     * @return a copy of the names, upper-cased; empty outside any scope
+     * @return a copy of the names, as keys; empty outside any scope
      */
     public Set<String> declaredInCurrentScope() {
         return declaredInScopeStack.isEmpty()
@@ -230,11 +229,34 @@ public class ScopeManager {
     }
 
     public void setVariable(final String name, final Object value) {
-        variables.put(name.toUpperCase(Locale.ROOT), value);
+        variables.put(VariableKey.of(name), value);
     }
 
     public Object getVariable(final String name) {
-        return variables.get(name.toUpperCase(Locale.ROOT));
+        return variables.get(heldKey(name));
+    }
+
+    /**
+     * Whether a name is a variable.
+     *
+     * @param name the name
+     * @return true when it is
+     */
+    public boolean holds(final String name) {
+        return variables.containsKey(heldKey(name));
+    }
+
+    /**
+     * The key a name is read under: its own, and where that is no variable, the one a reader that passes the name
+     * as written would mean.
+     */
+    private String heldKey(final String name) {
+        final String key = VariableKey.of(name);
+        if (key == null || variables.containsKey(key)) {
+            return key;
+        }
+        final String written = VariableKey.ofWritten(key);
+        return variables.containsKey(written) ? written : key;
     }
 
     /**
@@ -243,7 +265,7 @@ public class ScopeManager {
      * @param name the name
      */
     public void removeVariable(final String name) {
-        variables.remove(name.toUpperCase(Locale.ROOT));
+        variables.remove(VariableKey.of(name));
     }
 
     public Map<String, Object> getAllVariables() {

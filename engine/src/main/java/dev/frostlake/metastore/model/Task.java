@@ -22,7 +22,6 @@ import dev.frostlake.metastore.Named;
 import dev.frostlake.metastore.Taggable;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -50,9 +49,9 @@ public class Task implements Named, Taggable, ContactHolder {
     private String sqlStatement;
     private String warehouse;
     private final List<String> predecessors; // Tasks that must complete before this one
-    private LocalDateTime createdAt;
+    private Instant createdAt;
     private TaskState state;
-    private LocalDateTime lastRunTime;
+    private Instant lastRunTime;
     /** The instant the next fire is due at, kept on the instant line so a schedule counts elapsed time. */
     private Instant nextRunTime;
     private final List<TaskExecution> executionHistory;
@@ -94,7 +93,7 @@ public class Task implements Named, Taggable, ContactHolder {
         this.warehouse = warehouse;
         this.predecessors = new ArrayList<>();
         // The creating statement's instant, which a replayed statement reproduces (see SqlObject).
-        this.createdAt = StatementClock.hostLocal();
+        this.createdAt = StatementClock.instant();
         this.state = TaskState.SUSPENDED; // Tasks start suspended by default
         this.executionHistory = new ArrayList<>();
         this.successCount = 0;
@@ -107,7 +106,7 @@ public class Task implements Named, Taggable, ContactHolder {
 
     public void recordExecution(final TaskExecution execution) {
         executionHistory.add(execution);
-        lastRunTime = execution.getStartTime();
+        lastRunTime = execution.getStartInstant();
 
         if (execution.getState().equals("SUCCEEDED")) {
             successCount++;
@@ -234,7 +233,7 @@ public class Task implements Named, Taggable, ContactHolder {
         return predecessors;
     }
 
-    public LocalDateTime getCreatedAt() {
+    public Instant getCreatedAt() {
         return createdAt;
     }
 
@@ -244,7 +243,7 @@ public class Task implements Named, Taggable, ContactHolder {
      *
      * @param created the recorded creation time, or null
      */
-    public void restoreCreatedTime(final LocalDateTime created) {
+    public void restoreCreatedTime(final Instant created) {
         if (created != null) {
             this.createdAt = created;
         }
@@ -258,11 +257,11 @@ public class Task implements Named, Taggable, ContactHolder {
         this.state = state;
     }
 
-    public LocalDateTime getLastRunTime() {
+    public Instant getLastRunTime() {
         return lastRunTime;
     }
 
-    public void setLastRunTime(final LocalDateTime lastRunTime) {
+    public void setLastRunTime(final Instant lastRunTime) {
         this.lastRunTime = lastRunTime;
     }
 

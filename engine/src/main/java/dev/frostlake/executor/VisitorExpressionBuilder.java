@@ -516,7 +516,8 @@ public class VisitorExpressionBuilder {
             // This might be a variable reference
             final String varName = ((FrostlakeParser.QualifiedNameExprContext) ctx).qualifiedName().getText();
             if (scriptingNamesVisible && visitor.getProceduralExecutor() != null) {
-                final Object varValue = visitor.getProceduralExecutor().readExpressionValue(varName);
+                final Object varValue = visitor.getProceduralExecutor().readExpressionValue(
+                    visitor.getText(((FrostlakeParser.QualifiedNameExprContext) ctx).qualifiedName()));
                 if (varValue != null) {
                     return varValue;
                 }

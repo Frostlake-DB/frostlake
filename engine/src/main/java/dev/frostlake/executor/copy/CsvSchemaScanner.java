@@ -54,7 +54,7 @@ final class CsvSchemaScanner {
         long records = 0;
         // Under KIND => 'ICEBERG' the first conflict of types refuses the call once the file is read.
         InferenceConflict conflict = null;
-        try (BufferedReader source = StagedFileIo.reader(file.path())) {
+        try (BufferedReader source = StagedFileIo.reader(file.path(), options.format().getCompression())) {
             final CsvRecordReader reader = new CsvRecordReader(source, file.relativeName(), options.format(), false);
             final List<Boolean> enclosed = new ArrayList<Boolean>();
             if (options.parseHeader()) {

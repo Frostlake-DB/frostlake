@@ -16,6 +16,9 @@
 
 package dev.frostlake.executor.copy;
 
+import io.airlift.compress.bzip2.BZip2HadoopStreams;
+import io.airlift.compress.zstd.ZstdInputStream;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -32,14 +35,22 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 /**
- * Byte access to staged files with transparent gzip. The NAME is not the whole story: a name ending
- * {@code .gz} reads through a {@link GZIPInputStream}, and so does any file whose first two bytes are
- * gzip's own magic number — which is what an unload written with {@code SINGLE = TRUE} leaves behind,
- * since the account names that file {@code data} however it was compressed. PUT's default
- * AUTO_COMPRESS lands {@code .gz} files on the stage, and the loaders read them exactly as a real
- * account does.
+ * Byte access to staged files, decompressed by the file format's COMPRESSION (live-verified):
+ *
+ * <ul>
+ *   <li>AUTO, the default, reads gzip and zstd by their first bytes whatever the file is called — an unload written
+ *       with {@code SINGLE = TRUE} is named {@code data} however it was compressed — and bzip2 when the file both
+ *       starts with bzip2's mark and is named {@code .bz2}. Anything else is read as it is: a deflate stream, a
+ *       {@code .gz} file holding plain text, a bzip2 file of another name;</li>
+ *   <li>GZIP and DEFLATE each read a gzip and a zlib stream alike; BZ2, ZSTD and RAW_DEFLATE their own; a file the
+ *       named codec cannot read refuses as {@code Invalid data encountered during decompression for file:
+ *       '<name>',compression type used: 'BZ2', cause: '...'};</li>
+ *   <li>NONE reads the bytes as they are, gzip included.</li>
+ * </ul>
  */
 public final class StagedFileIo {
 
@@ -102,26 +113,113 @@ public final class StagedFileIo {
         }
     }
 
+    /**
+     * A staged file's bytes as COMPRESSION AUTO reads them.
+     *
+     * @param file the staged file
+     * @return its bytes, decompressed
+     * @throws IOException when the file cannot be read
+     */
     public static InputStream inputStream(final Path file) throws IOException {
-        if (file.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".gz")
-                || isGzipped(file)) {
-            return new GZIPInputStream(Files.newInputStream(file));
-        }
-        return Files.newInputStream(file);
+        return inputStream(file, null);
     }
 
     /**
-     * Whether a file begins with gzip's magic number, whatever it is called.
+     * A staged file's bytes as a file format's COMPRESSION reads them.
      *
-     * @param file the staged file
-     * @return true when its first two bytes are 0x1f 0x8b
+     * @param file        the staged file
+     * @param compression the format's COMPRESSION, upper case; null for AUTO
+     * @return its bytes, decompressed
      * @throws IOException when the file cannot be read
      */
-    private static boolean isGzipped(final Path file) throws IOException {
-        try (final InputStream head = Files.newInputStream(file)) {
-            final byte[] magic = head.readNBytes(2);
-            return magic.length == 2 && (magic[0] & 0xff) == 0x1f && (magic[1] & 0xff) == 0x8b;
+    public static InputStream inputStream(final Path file, final String compression) throws IOException {
+        final String codec = compression == null ? "AUTO" : compression;
+        if ("NONE".equals(codec)) {
+            return Files.newInputStream(file);
         }
+        final byte[] head;
+        try (InputStream in = Files.newInputStream(file)) {
+            head = in.readNBytes(4);
+        }
+        final String used;
+        if ("AUTO".equals(codec)) {
+            if (isGzip(head)) {
+                used = "GZIP";
+            } else if (isZstd(head)) {
+                used = "ZSTD";
+            } else if (isBzip2(head) && file.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".bz2")) {
+                used = "BZ2";
+            } else {
+                return Files.newInputStream(file);
+            }
+        } else {
+            used = codec;
+        }
+        return new ByteArrayInputStream(decompressed(file, used, head));
+    }
+
+    /** A staged file's bytes decompressed by one codec, or the account's refusal where that codec cannot read it. */
+    private static byte[] decompressed(final Path file, final String codec, final byte[] head) throws IOException {
+        final String name = file.getFileName().toString();
+        switch (codec) {
+            case "GZIP":
+            case "DEFLATE":
+                try (InputStream in = isGzip(head) ? new GZIPInputStream(Files.newInputStream(file))
+                        : new InflaterInputStream(Files.newInputStream(file))) {
+                    return in.readAllBytes();
+                } catch (final IOException unreadable) {
+                    throw undecodable(name, codec, "data error");
+                }
+            case "RAW_DEFLATE":
+                final Inflater raw = new Inflater(true);
+                try (InputStream in = new InflaterInputStream(Files.newInputStream(file), raw)) {
+                    return in.readAllBytes();
+                } catch (final IOException unreadable) {
+                    throw undecodable(name, codec, "data error");
+                } finally {
+                    raw.end();
+                }
+            case "BZ2":
+                if (!isBzip2(head)) {
+                    throw undecodable(name, codec, "data error magic");
+                }
+                try (InputStream in = new BZip2HadoopStreams().createInputStream(Files.newInputStream(file))) {
+                    return in.readAllBytes();
+                } catch (final IOException | RuntimeException unreadable) {
+                    throw undecodable(name, codec, "data error");
+                }
+            case "ZSTD":
+                if (!isZstd(head)) {
+                    throw undecodable(name, codec, "Unknown frame descriptor");
+                }
+                try (InputStream in = new ZstdInputStream(Files.newInputStream(file))) {
+                    return in.readAllBytes();
+                } catch (final IOException | RuntimeException unreadable) {
+                    throw undecodable(name, codec, "data error");
+                }
+            default:
+                throw new RuntimeException("Loading " + codec + "-compressed files is not supported by this engine"
+                    + " (supported: AUTO, GZIP, BZ2, ZSTD, DEFLATE, RAW_DEFLATE, NONE)");
+        }
+    }
+
+    /** The account's refusal of a file the named codec cannot read, the file named by its bare name. */
+    private static RuntimeException undecodable(final String name, final String codec, final String cause) {
+        return new RuntimeException("Invalid data encountered during decompression for file: '" + name
+            + "',compression type used: '" + codec + "', cause: '" + cause + "'");
+    }
+
+    private static boolean isGzip(final byte[] head) {
+        return head.length >= 2 && (head[0] & 0xff) == 0x1f && (head[1] & 0xff) == 0x8b;
+    }
+
+    private static boolean isZstd(final byte[] head) {
+        return head.length >= 4 && (head[0] & 0xff) == 0x28 && (head[1] & 0xff) == 0xb5
+            && (head[2] & 0xff) == 0x2f && (head[3] & 0xff) == 0xfd;
+    }
+
+    private static boolean isBzip2(final byte[] head) {
+        return head.length >= 3 && head[0] == 'B' && head[1] == 'Z' && head[2] == 'h';
     }
 
     /**
@@ -140,7 +238,19 @@ public final class StagedFileIo {
     }
 
     public static BufferedReader reader(final Path file) throws IOException {
-        return new BufferedReader(new InputStreamReader(inputStream(file), StandardCharsets.UTF_8));
+        return reader(file, (String) null);
+    }
+
+    /**
+     * A staged file's text as UTF-8, decompressed by a file format's COMPRESSION.
+     *
+     * @param file        the staged file
+     * @param compression the format's COMPRESSION, upper case; null for AUTO
+     * @return the reader
+     * @throws IOException when the file cannot be opened
+     */
+    public static BufferedReader reader(final Path file, final String compression) throws IOException {
+        return new BufferedReader(new InputStreamReader(inputStream(file, compression), StandardCharsets.UTF_8));
     }
 
     /**
@@ -153,7 +263,22 @@ public final class StagedFileIo {
      * @throws IOException when the file cannot be opened
      */
     public static BufferedReader reader(final Path file, final Charset charset) throws IOException {
-        return new BufferedReader(new UnreadableMarkingReader(inputStream(file), charset));
+        return reader(file, charset, null);
+    }
+
+    /**
+     * A staged file's text in a character set, decompressed by a file format's COMPRESSION, every byte the set
+     * cannot read kept as a mark of it.
+     *
+     * @param file        the staged file
+     * @param charset     its character set
+     * @param compression the format's COMPRESSION, upper case; null for AUTO
+     * @return the reader
+     * @throws IOException when the file cannot be opened
+     */
+    public static BufferedReader reader(final Path file, final Charset charset, final String compression)
+            throws IOException {
+        return new BufferedReader(new UnreadableMarkingReader(inputStream(file, compression), charset));
     }
 
     /**
@@ -165,8 +290,23 @@ public final class StagedFileIo {
      * @throws IOException when the file cannot be read
      */
     public static String readMarked(final Path file, final Charset charset) throws IOException {
+        return readMarked(file, charset, null);
+    }
+
+    /**
+     * A staged file's whole text in a character set, decompressed by a file format's COMPRESSION, every byte the set
+     * cannot read kept as a mark of it.
+     *
+     * @param file        the staged file
+     * @param charset     its character set
+     * @param compression the format's COMPRESSION, upper case; null for AUTO
+     * @return the text
+     * @throws IOException when the file cannot be read
+     */
+    public static String readMarked(final Path file, final Charset charset, final String compression)
+            throws IOException {
         final StringBuilder text = new StringBuilder();
-        try (BufferedReader reader = reader(file, charset)) {
+        try (BufferedReader reader = reader(file, charset, compression)) {
             final char[] buffer = new char[8192];
             int read = reader.read(buffer);
             while (read >= 0) {

@@ -44,7 +44,7 @@ import java.util.Map;
  * {@code catalog} is the catalog source (GLUE, OBJECT_STORE or POLARIS) with the source's own properties; a
  * Polaris catalog's REST configuration and OAuth authentication come from the REST_CONFIG and
  * REST_AUTHENTICATION objects DESCRIBE shows, the {@code warehouse} being the catalog name. The OAuth client
- * secret is write-only: DESCRIBE masks it and so does the response.
+ * secret is write-only: DESCRIBE leaves it out and so does the response.
  */
 public final class CatalogIntegrationResource implements RestResource {
 

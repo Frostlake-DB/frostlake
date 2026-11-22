@@ -52,6 +52,12 @@ import java.util.Locale;
  */
 final class JdbcMetadataQueries {
 
+    /** The escape {@code DatabaseMetaData.getSearchStringEscape()} names for pattern arguments. */
+    static final char SEARCH_STRING_ESCAPE = '\\';
+
+    /** The escape the generated {@code LIKE} filters declare. */
+    private static final char LIKE_ESCAPE = '!';
+
     private JdbcMetadataQueries() {
     }
 
@@ -353,7 +359,6 @@ final class JdbcMetadataQueries {
         return statement.getResultSet();
     }
 
-    /** {@code AND UPPER(col) IN ('A', 'B')}, skipped when the list is empty. */
     /**
      * {@code DatabaseMetaData.getProcedures(...)}, spanning every catalog in scope — the call a tool
      * makes to put a Procedures node under a schema.
@@ -478,17 +483,18 @@ final class JdbcMetadataQueries {
         return query(connection, sql.toString());
     }
 
+    /** {@code AND col IN ('A', 'b')}, names as stored, skipped when the list is empty. */
     private static void appendInList(final StringBuilder sql, final String column,
                                      final List<String> values) {
         if (values.isEmpty()) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") IN (");
+        sql.append(" AND ").append(column).append(" IN (");
         for (int i = 0; i < values.size(); i++) {
             if (i > 0) {
                 sql.append(", ");
             }
-            sql.append('\'').append(values.get(i).toUpperCase(Locale.ROOT).replace("'", "''")).append('\'');
+            sql.append(literal(values.get(i)));
         }
         sql.append(')');
     }
@@ -533,15 +539,12 @@ final class JdbcMetadataQueries {
     }
 
     /**
-     * Whether a database answers to the {@code catalog} argument. Frostlake folds unquoted
-     * identifiers to upper case and resolves names case-insensitively, so metadata arguments are
-     * matched the same way — as the sibling {@code getTables}/{@code getColumns} filters always have.
-     * Snowflake's own driver was measured to be case-SENSITIVE here (a lower-case catalog argument
-     * returns zero rows); Frostlake is deliberately the more forgiving of the two, since the strict
-     * reading can only ever hide objects that exist.
+     * Whether a database answers to the {@code catalog} argument: the name as stored, compared
+     * case-sensitively, as JDBC defines it and Snowflake's driver answers it — a lower-case argument
+     * names a quoted lower-case database, never the upper-case one (live-verified).
      */
     private static boolean matches(final String databaseName, final String catalog) {
-        return databaseName.equalsIgnoreCase(catalog);
+        return databaseName.equals(catalog);
     }
 
     /**
@@ -556,25 +559,73 @@ final class JdbcMetadataQueries {
     }
 
     /**
-     * A JDBC pattern argument as a {@code LIKE} filter. {@code null} and {@code "%"} match everything
-     * and need no filter; an empty pattern is left as a real {@code LIKE ''}, which matches nothing —
-     * live Snowflake returns zero rows for it.
+     * A JDBC pattern argument as a case-sensitive {@code LIKE} filter on the name as stored, so a quoted
+     * {@code "mixed"} and an unquoted {@code MIXED} never answer for each other. {@code null} and
+     * {@code "%"} match everything and need no filter; an empty pattern is left as a real
+     * {@code LIKE ''}, which matches nothing — live Snowflake returns zero rows for it. The pattern's
+     * {@link #SEARCH_STRING_ESCAPE} makes the next character literal; a pattern ending in a lone escape
+     * matches nothing.
      */
     private static void appendPattern(final StringBuilder sql, final String column, final String pattern) {
         if (pattern == null || "%".equals(pattern)) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") LIKE '")
-            .append(pattern.toUpperCase(Locale.ROOT).replace("'", "''")).append("'");
+        final String like = likePattern(pattern);
+        if (like == null) {
+            sql.append(" AND 1=0");
+            return;
+        }
+        sql.append(" AND ").append(column).append(" LIKE ").append(literal(like))
+            .append(" ESCAPE '").append(LIKE_ESCAPE).append('\'');
     }
 
-    /** An exact-name argument as an equality filter, skipping the "match all" cases (null, empty). */
+    /**
+     * A JDBC pattern rewritten for {@code LIKE ... ESCAPE} with {@link #LIKE_ESCAPE}: its wildcards kept, every
+     * character it escapes and every literal {@code %}, {@code _} or {@link #LIKE_ESCAPE} escaped.
+     *
+     * @param pattern the JDBC pattern, escaped with {@link #SEARCH_STRING_ESCAPE}
+     * @return the LIKE pattern, or null when the pattern ends in a lone escape
+     */
+    static String likePattern(final String pattern) {
+        final StringBuilder like = new StringBuilder();
+        for (int i = 0; i < pattern.length(); i++) {
+            final char c = pattern.charAt(i);
+            if (c == SEARCH_STRING_ESCAPE) {
+                if (i + 1 == pattern.length()) {
+                    return null;
+                }
+                i++;
+                appendLiteralChar(like, pattern.charAt(i));
+            } else if (c == '%' || c == '_') {
+                like.append(c);
+            } else {
+                appendLiteralChar(like, c);
+            }
+        }
+        return like.toString();
+    }
+
+    private static void appendLiteralChar(final StringBuilder like, final char c) {
+        if (c == '%' || c == '_' || c == LIKE_ESCAPE) {
+            like.append(LIKE_ESCAPE);
+        }
+        like.append(c);
+    }
+
+    /**
+     * An exact-name argument as a case-sensitive equality filter on the name as stored, skipping the
+     * "match all" cases (null, empty).
+     */
     private static void appendEquals(final StringBuilder sql, final String column, final String value) {
         if (value == null || value.isEmpty()) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") = '")
-            .append(value.toUpperCase(Locale.ROOT).replace("'", "''")).append("'");
+        sql.append(" AND ").append(column).append(" = ").append(literal(value));
+    }
+
+    /** Text as a SQL string literal: its quotes doubled, its backslashes escaped. */
+    private static String literal(final String text) {
+        return "'" + text.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     /**
@@ -586,8 +637,8 @@ final class JdbcMetadataQueries {
      * <p>{@code null} means "every type"; an empty array is a real filter that matches nothing, which
      * is what live Snowflake returns for it. Unrecognised entries — including the raw catalog values
      * {@code BASE TABLE} and {@code MATERIALIZED VIEW} — simply match no row, again as live. Live is
-     * case-sensitive here and rejects {@code "table"}; Frostlake matches case-insensitively, staying
-     * consistent with the leniency its other metadata arguments already have.
+     * case-sensitive here and rejects {@code "table"}; Frostlake still matches the type names
+     * case-insensitively.
      */
     private static void appendTypeFilter(final StringBuilder sql, final String[] types) {
         if (types == null) {

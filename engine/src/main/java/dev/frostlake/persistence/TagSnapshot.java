@@ -39,4 +39,6 @@ public class TagSnapshot implements Serializable {
     public String propagate;
     /** ON_CONFLICT (a string or {@code ALLOWED_VALUES_SEQUENCE}), or null when unset (and on older snapshots). */
     public String onConflict;
+    /** The masking policies the tag carries, each named in full; null on older snapshots. */
+    public List<String> maskingPolicies;
 }

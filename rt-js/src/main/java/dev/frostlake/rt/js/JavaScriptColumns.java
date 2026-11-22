@@ -16,6 +16,8 @@
 
 package dev.frostlake.rt.js;
 
+import dev.frostlake.executor.GeoOutput;
+import dev.frostlake.executor.SessionOutputFormats;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
@@ -34,12 +36,7 @@ import dev.frostlake.types.VariantType;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.Decfloats;
 import dev.frostlake.values.GeoValue;
-import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantValue;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.node.ArrayNode;
-import tools.jackson.databind.node.DoubleNode;
-import tools.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -49,7 +46,6 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
-import java.util.Iterator;
 import java.util.Locale;
 
 /**
@@ -174,8 +170,13 @@ final class JavaScriptColumns {
             return BINARY;
         }
         if (type instanceof GeographyType || type instanceof GeometryType) {
-            // Its GeoJSON object, as the default GEOGRAPHY_OUTPUT_FORMAT and GEOMETRY_OUTPUT_FORMAT give it.
-            return OBJECT;
+            // The form the session's GEOGRAPHY_OUTPUT_FORMAT or GEOMETRY_OUTPUT_FORMAT gives it (live-verified): its
+            // GeoJSON object by default, its text in WKT and EWKT, its bytes in WKB and EWKB.
+            final String format = SessionOutputFormats.geo(type instanceof GeographyType);
+            if ("WKT".equals(format) || "EWKT".equals(format)) {
+                return TEXT;
+            }
+            return "WKB".equals(format) || "EWKB".equals(format) ? BINARY : OBJECT;
         }
         return type == null ? TEXT : type.getName().toUpperCase(Locale.ROOT);
     }
@@ -280,8 +281,11 @@ final class JavaScriptColumns {
             return ((VariantValue) value).text();
         }
         if (value instanceof GeoValue) {
-            final GeoValue geo = (GeoValue) value;
-            return geo.isGeography() ? geo.geoJson() : VariantJsonText.render(doubles(geo.node()));
+            final Object given = GeoOutput.rendered((GeoValue) value);
+            if (!(given instanceof GeoValue)) {
+                return asString(given, type);
+            }
+            return GeoOutput.geoJsonText((GeoValue) value);
         }
         if (value instanceof BinaryValue) {
             final byte[] bytes = ((BinaryValue) value).bytes();
@@ -302,30 +306,6 @@ final class JavaScriptColumns {
                 : Double.toString(number);
         }
         return String.valueOf(value);
-    }
-
-    /** A GeoJSON tree with each of its numbers a DOUBLE, as a GEOMETRY's text spells them. */
-    private static JsonNode doubles(final JsonNode node) {
-        if (node.isNumber()) {
-            return new DoubleNode(node.doubleValue());
-        }
-        if (node.isArray()) {
-            final ArrayNode copy = ((ArrayNode) node).arrayNode();
-            for (final JsonNode element : node) {
-                copy.add(doubles(element));
-            }
-            return copy;
-        }
-        if (node.isObject()) {
-            final ObjectNode copy = ((ObjectNode) node).objectNode();
-            final Iterator<String> names = node.propertyNames().iterator();
-            while (names.hasNext()) {
-                final String name = names.next();
-                copy.set(name, doubles(node.get(name)));
-            }
-            return copy;
-        }
-        return node;
     }
 
     private static String clock(final LocalTime time, final int digits) {

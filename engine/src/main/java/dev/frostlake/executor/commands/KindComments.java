@@ -20,6 +20,7 @@ import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.SQLCommandVisitor;
 import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SqlObject;
@@ -29,15 +30,21 @@ import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObjectKind;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.UnmodelledDropKind;
+import dev.frostlake.parser.UnmodelledKindWords;
 
 /**
  * The comment of the kinds whose COMMENT ON the account answers exactly as their own ALTER … SET COMMENT: a missing
  * database or schema is refused, IF EXISTS or not; a missing object is refused in its kind's sentence unless IF
  * EXISTS forgives it; and one that is there takes the comment (live-verified). The kinds Frostlake models no object
  * of (a model, a Git repository, a semantic view, a DBT project) are always missing, for COMMENT ON and for the
- * ALTER that sets or unsets their comment alike.
+ * ALTER that sets or unsets their comment alike; a snapshot is missing for its ALTER, and takes no COMMENT ON. Any
+ * other word written where the kind stands is read as the name of a class, and no class is modelled:
+ * {@code ALTER foo bar SET COMMENT = 'c'} and {@code COMMENT ON foo x IS 'c'} are {@code Object type or Class 'FOO'
+ * does not exist or not authorized.}
  */
 final class KindComments {
+
+    private static final String SNAPSHOT = "SNAPSHOT";
 
     private final Catalog catalog;
     private final QueryExecutor queryExecutor;
@@ -60,6 +67,11 @@ final class KindComments {
     void comment(final FrostlakeParser.CommentedKindContext kind, final FrostlakeParser.QualifiedNameContext name,
                  final String comment, final boolean ifExists) {
         if (kind.unmodelledCommentKind() != null) {
+            if (className(kind.unmodelledCommentKind()) == null
+                    && unmodelledKind(kind.unmodelledCommentKind()) == UnmodelledDropKind.SNAPSHOT) {
+                // A snapshot takes its comment from ALTER SNAPSHOT alone (live-verified).
+                throw new RuntimeException("Unsupported feature 'TOK_SERVICE_SNAPSHOT'.");
+            }
             refuseUnmodelled(kind.unmodelledCommentKind(), name, ifExists);
         } else if (kind.ALERT() != null) {
             new AlertCommandHandler(queryExecutor).comment(name, comment, ifExists);
@@ -114,6 +126,12 @@ final class KindComments {
      */
     void refuseUnmodelled(final FrostlakeParser.UnmodelledCommentKindContext kind,
                           final FrostlakeParser.QualifiedNameContext name, final boolean ifExists) {
+        final String missingClass = className(kind);
+        if (missingClass != null) {
+            // No class is modelled: the class is missed before the instance's name is read, IF EXISTS or not.
+            throw new RuntimeException(SqlCompilationError.inline("Object type or Class '" + missingClass
+                + "' does not exist or not authorized."));
+        }
         final String[] parts = ParseTreeText.qualifiedNameParts(name);
         final Schema owner = catalog.requireOwningSchema(QualifiedName.of(parts));
         if (ifExists) {
@@ -121,6 +139,22 @@ final class KindComments {
         }
         throw new RuntimeException(SqlCompilationError.doesNotExist(unmodelledKind(kind).noun(),
             owner.qualifiedName(parts[parts.length - 1])));
+    }
+
+    /**
+     * The class a word names where a comment's kind stands, or null for the words of a kind: a plain word that is
+     * neither MODEL nor SNAPSHOT, or a quoted word, spelled as a name is: {@code foo} is FOO, {@code "MODEL"} is
+     * MODEL and {@code "foo"} keeps its quotes (live-verified).
+     */
+    private static String className(final FrostlakeParser.UnmodelledCommentKindContext kind) {
+        if (kind.QUOTED_IDENTIFIER() != null) {
+            return SqlIdentifiers.spellCanonical(SqlIdentifiers.canonicalText(kind.QUOTED_IDENTIFIER().getText()));
+        }
+        if (kind.model == null || UnmodelledKindWords.is(kind.model, "MODEL")
+                || UnmodelledKindWords.is(kind.model, SNAPSHOT)) {
+            return null;
+        }
+        return SqlIdentifiers.spellCanonical(SqlIdentifiers.canonicalText(kind.model.getText()));
     }
 
     /**
@@ -136,7 +170,10 @@ final class KindComments {
         if (kind.SEMANTIC() != null) {
             return UnmodelledDropKind.SEMANTIC_VIEW;
         }
-        return kind.DBT() != null ? UnmodelledDropKind.DBT_PROJECT : UnmodelledDropKind.MODEL;
+        if (kind.DBT() != null) {
+            return UnmodelledDropKind.DBT_PROJECT;
+        }
+        return UnmodelledKindWords.is(kind.model, SNAPSHOT) ? UnmodelledDropKind.SNAPSHOT : UnmodelledDropKind.MODEL;
     }
 
     private void securityObject(final SecurityObjectKind kind, final FrostlakeParser.QualifiedNameContext name,

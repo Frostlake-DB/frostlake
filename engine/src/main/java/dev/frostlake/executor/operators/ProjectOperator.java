@@ -20,10 +20,12 @@ import dev.frostlake.executor.DeferredFault;
 import dev.frostlake.executor.ExpressionEvaluator;
 import dev.frostlake.executor.ProjectionSlot;
 import dev.frostlake.executor.RelationBody;
+import dev.frostlake.executor.ViewBodyRows;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.RowOrdinal;
 import dev.frostlake.executor.expressions.SourcePosition;
+import dev.frostlake.executor.expressions.UnsupportedSubqueryException;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.storage.Row;
 import org.slf4j.Logger;
@@ -229,14 +231,20 @@ public class ProjectOperator implements Operator {
                     try {
                         computed = evaluateExpression(parsedExpressions.get(i), row);
                     } catch (final RuntimeException failed) {
-                        if (!RelationBody.isActive() || !DeferredFault.deferrable(failed)) {
+                        if (RelationBody.isActive() && ViewBodyRows.current() != null
+                                && failed instanceof UnsupportedSubqueryException) {
+                            // A view's subquery the account cannot evaluate waits for its reader too, and is
+                            // refused in the view's name (see ViewBodyRows).
+                            computed = ViewBodyRows.hold((UnsupportedSubqueryException) failed);
+                        } else if (!RelationBody.isActive() || !DeferredFault.deferrable(failed)) {
                             // Note which item this was on the way out, so a DML wrapping this query can
                             // name the target column the projection was feeding — see ProjectionSlot.
                             ProjectionSlot.failedAt(i);
                             throw failed;
+                        } else {
+                            // A relation's item waits for its reader: the fault stays in the cell.
+                            computed = new DeferredFault(failed);
                         }
-                        // A relation's item waits for its reader: the fault stays in the cell.
-                        computed = new DeferredFault(failed);
                     } finally {
                         ExpressionSource.end(displaced);
                     }

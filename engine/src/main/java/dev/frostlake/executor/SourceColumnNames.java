@@ -166,7 +166,7 @@ final class SourceColumnNames {
         for (final Function overload : executor.udtfOverloads(called)) {
             final Set<String> names = new HashSet<>();
             for (final Parameter column : overload.getReturnColumns()) {
-                names.add(SqlIdentifiers.canonicalText(column.getName()));
+                names.add(column.getName());
             }
             if (shared != null && !shared.equals(names)) {
                 return null;

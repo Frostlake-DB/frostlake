@@ -110,7 +110,7 @@ final class OrAlterPolicies {
                         InlineTags.resolveAll(clause.tagList(), queryExecutor);
                     } else if (clause.MASKING() != null) {
                         PolicyReferences.maskingPolicy(queryExecutor.getCatalog(),
-                            ParseTreeText.getQualifiedName(clause.qualifiedName()), null);
+                            queryExecutor.resolveObjectName(clause.objectName()), null);
                     } else {
                         PolicyReferences.projectionPolicy(queryExecutor.getCatalog(),
                             ParseTreeText.getQualifiedName(clause.qualifiedName()), null);
@@ -128,7 +128,7 @@ final class OrAlterPolicies {
         for (final FrostlakeParser.ColumnConstraintContext constraint : column.columnConstraint()) {
             if (constraint.MASKING() != null) {
                 PolicyReferences.maskingPolicy(queryExecutor.getCatalog(),
-                    ParseTreeText.getQualifiedName(constraint.qualifiedName()), null);
+                    queryExecutor.resolveObjectName(constraint.objectName()), null);
                 attaches = true;
             } else if (constraint.PROJECTION() != null) {
                 PolicyReferences.projectionPolicy(queryExecutor.getCatalog(),

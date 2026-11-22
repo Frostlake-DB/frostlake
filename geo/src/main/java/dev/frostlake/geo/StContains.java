@@ -32,7 +32,8 @@ public class StContains extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null) return null;
         GeoShapes.requireSameKind("ST_CONTAINS", a, b);
-        return Boolean.valueOf(GeoShapes.within(b, a));
+        GeoRelation.requireNoCollection(a, b);
+        return Boolean.valueOf(GeoRelation.contains(a, b));
     }
 
     @Override

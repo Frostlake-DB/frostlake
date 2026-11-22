@@ -104,7 +104,6 @@ import dev.frostlake.task.TaskGraphs;
 import dev.frostlake.task.TaskScheduler;
 import dev.frostlake.task.TriggeredTaskInterval;
 import dev.frostlake.transaction.TransactionManager;
-import dev.frostlake.types.ArrayType;
 import dev.frostlake.types.BinaryType;
 import dev.frostlake.types.BooleanType;
 import dev.frostlake.types.DataType;
@@ -114,7 +113,6 @@ import dev.frostlake.types.DeclaredTypeFold;
 import dev.frostlake.types.GeographyType;
 import dev.frostlake.types.IcebergTypes;
 import dev.frostlake.types.NumericType;
-import dev.frostlake.types.ObjectType;
 import dev.frostlake.types.SqlTypeNames;
 import dev.frostlake.types.StringType;
 import dev.frostlake.types.StructuredTypes;
@@ -683,6 +681,9 @@ public class AlterCommandHandler implements CommandHandler {
                     }
                     throw new RuntimeException("Unsupported feature 'UNSET'.");
                 }
+                // IF EXISTS forgives only the format's absence, which the handler answers: an option the format's
+                // type does not take, or a change of type, still refuses (live-verified).
+                branchHandlesIfExists = true;
                 return ddlHandler.handleAlterStatement(ctx);
             } else if (ctx.FUNCTION() != null || ctx.PROCEDURE() != null) {
                 // IF EXISTS forgives only the routine's absence: a malformed signature or a taken new name
@@ -898,9 +899,11 @@ public class AlterCommandHandler implements CommandHandler {
                     final Table table = catalog.resolveTable(QualifiedName.of(tableParts));
                     requireStatementOfTableKind(ctx, table);
                     if (ctx.tableAction() != null && ctx.tableAction().SWAP() == null
-                            && ctx.tableAction().wholeObjectName() == null) {
+                            && ctx.tableAction().wholeObjectName() == null
+                            && !attachesMaskingOrRowAccessPolicy(ctx.tableAction())) {
                         // Every change but a rename or a swap, which ask for OWNERSHIP, asks for MODIFY, and is
-                        // refused naming no privilege (live-verified).
+                        // refused naming no privilege (live-verified). A masking or a row access policy is set and
+                        // unset by APPLY instead (see requireApplyMaskingPolicy).
                         queryExecutor.requireTableModify(tableParts);
                     }
                     refuseEventTableShapeChange(table, ctx.tableAction());
@@ -1236,8 +1239,8 @@ public class AlterCommandHandler implements CommandHandler {
                     } else if ((ctx.tableAction().ALTER() != null || ctx.tableAction().MODIFY() != null)
                             && ctx.tableAction().MASKING() != null) {
                         columnMaskingPolicy(table, ctx.tableAction().identifier(0),
-                            ctx.tableAction().UNSET() != null ? null : ctx.tableAction().qualifiedName(),
-                            ctx.tableAction().identifierList(), ctx.tableAction().FORCE() != null);
+                            ctx.tableAction().UNSET() != null ? null : ctx.tableAction().objectName(),
+                            ctx.tableAction().identifierList(), ctx.tableAction().FORCE() != null, tableParts);
                         logger.trace("Set/unset masking policy on column of {}", tableName);
                     } else if (!ctx.tableAction().alterColumnItem().isEmpty()) {
                         // ALTER/MODIFY [(] [COLUMN] c1 action [, [COLUMN] c2 action]* [)]
@@ -1378,7 +1381,7 @@ public class AlterCommandHandler implements CommandHandler {
                         final String policyName = visitor.getText(ctx.tableAction().qualifiedName());
                         final List<String> cols = rowAccessPolicyColumns(ctx.tableAction().identifierList(),
                             table, table.getName(), policyName, table.hasRowAccessPolicy());
-                        requireApplyRowAccessPolicy(policyName);
+                        requireApplyRowAccessPolicy(policyName, tableParts);
                         // Recorded in full, as every policy attachment is, so a query from another schema
                         // still finds it (see PolicyReferences).
                         table.setRowAccessPolicyName(catalog.qualifiedExactName(policyName));
@@ -1393,7 +1396,7 @@ public class AlterCommandHandler implements CommandHandler {
                                 table.getName(), table.getRowAccessPolicyName());
                         }
                         if (table.getRowAccessPolicyName() != null) {
-                            requireApplyRowAccessPolicy(table.getRowAccessPolicyName());
+                            requireApplyRowAccessPolicy(table.getRowAccessPolicyName(), tableParts);
                         }
                         table.setRowAccessPolicyName(null);
                         table.setRowAccessPolicyColumns(new ArrayList<>());
@@ -1401,10 +1404,12 @@ public class AlterCommandHandler implements CommandHandler {
                     } else if (ctx.tableAction().columnTagAction() != null) {
                         final FrostlakeParser.ColumnTagActionContext cta = ctx.tableAction().columnTagAction();
                         final String colName = visitor.getText(cta.identifier());
-                        final TableColumn col = table.getColumn(colName);
-                        if (col == null) {
-                            throw new RuntimeException(SqlCompilationError.invalidIdentifier(colName));
+                        if (!table.hasColumnExactly(colName)) {
+                            new AlteredTags(queryExecutor, visitor).requireNamed(cta.tagSet(), cta.tagUnset());
+                            throw new RuntimeException(SqlCompilationError.invalidIdentifier(
+                                SqlIdentifiers.spellCanonical(colName)));
                         }
+                        final TableColumn col = table.getColumn(colName);
                         if (cta.tagSet() != null) {
                             applyTagSet(col, cta.tagSet());
                         } else {
@@ -1720,8 +1725,8 @@ public class AlterCommandHandler implements CommandHandler {
                     final Table columns = viewColumns(view);
                     for (final FrostlakeParser.ViewColumnMaskingContext masking
                             : ctx.viewAction().viewColumnMasking()) {
-                        columnMaskingPolicy(columns, masking.identifier(), masking.qualifiedName(),
-                            masking.identifierList(), masking.FORCE() != null);
+                        columnMaskingPolicy(columns, masking.identifier(), masking.objectName(),
+                            masking.identifierList(), masking.FORCE() != null, null);
                     }
                     logger.trace("Set/unset masking policies on columns of view {}", viewName);
                 } else if (ctx.viewAction().PROJECTION() != null) {
@@ -1765,7 +1770,7 @@ public class AlterCommandHandler implements CommandHandler {
                 }
 
             } else if (ctx.TASK() != null) {
-                final String[] taskParts = qualifiedNameParts(ctx.qualifiedName());
+                final String[] taskParts = queryExecutor.alterTargetNameParts(ctx);
                 final String taskName = taskParts[taskParts.length - 1];
                 final Schema schema;
                 schema = catalog.requireOwningSchema(QualifiedName.of(taskParts));
@@ -1905,6 +1910,12 @@ public class AlterCommandHandler implements CommandHandler {
                             pipe.setPaused(opt.booleanValue().TRUE() != null);
                         } else if ("COMMENT".equals(optName) && opt.STRING_LITERAL() != null) {
                             pipe.setComment(visitor.extractStringLiteral(opt.STRING_LITERAL()));
+                        } else if (("LOG_LEVEL".equals(optName) || "LOG_EVENT_LEVEL".equals(optName))
+                                && opt.STRING_LITERAL() != null) {
+                            // A pipe keeps its own two log levels, told by SHOW PARAMETERS IN PIPE.
+                            final String level = visitor.extractStringLiteral(opt.STRING_LITERAL());
+                            TaskParameterValues.requireText(optName, level);
+                            pipe.getOwnParameters().set(optName, level);
                         } else if ("ERROR_INTEGRATION".equals(optName) && opt.booleanValue() == null) {
                             // A string is the integration's exact name; an identifier folds as one does.
                             final String integration = opt.STRING_LITERAL() != null
@@ -1926,6 +1937,8 @@ public class AlterCommandHandler implements CommandHandler {
                             pipe.setComment(null);
                         } else if ("PIPE_EXECUTION_PAUSED".equals(optName)) {
                             pipe.setPaused(false);
+                        } else if ("LOG_LEVEL".equals(optName) || "LOG_EVENT_LEVEL".equals(optName)) {
+                            pipe.getOwnParameters().unset(optName);
                         } else {
                             throw new RuntimeException(SqlCompilationError.invalidPropertyFor(optName, "PIPE"));
                         }
@@ -2112,7 +2125,9 @@ public class AlterCommandHandler implements CommandHandler {
                         null);
                 }
 
-                if (ctx.tagAction().ADD() != null) {
+                if (!ctx.tagAction().tagMaskingPolicy().isEmpty()) {
+                    alterTagMaskingPolicies(tag, ctx.tagAction());
+                } else if (ctx.tagAction().ADD() != null) {
                     // The conflict rule is judged against the values the statement would leave, before they change.
                     final List<String> values = tag.getAllowedValues();
                     for (final var stringLiteral : ctx.tagAction().stringLiteralList().STRING_LITERAL()) {
@@ -2736,7 +2751,7 @@ public class AlterCommandHandler implements CommandHandler {
         final String policyName = visitor.getText(policy);
         final List<String> cols = rowAccessPolicyColumns(columns, viewColumns(view), view.getName(), policyName,
             view.hasRowAccessPolicy());
-        requireApplyRowAccessPolicy(policyName);
+        requireApplyRowAccessPolicy(policyName, null);
         view.setRowAccessPolicyName(catalog.qualifiedExactName(policyName));
         view.setRowAccessPolicyColumns(cols);
         logger.trace("Added row access policy {} to view {}", policyName, view.getName());
@@ -2748,7 +2763,7 @@ public class AlterCommandHandler implements CommandHandler {
             requireRowAccessPolicyAttached(visitor.getText(policy), view.getName(), view.getRowAccessPolicyName());
         }
         if (view.getRowAccessPolicyName() != null) {
-            requireApplyRowAccessPolicy(view.getRowAccessPolicyName());
+            requireApplyRowAccessPolicy(view.getRowAccessPolicyName(), null);
         }
         view.setRowAccessPolicyName(null);
         view.setRowAccessPolicyColumns(new ArrayList<>());
@@ -2854,12 +2869,13 @@ public class AlterCommandHandler implements CommandHandler {
     private void validateAlterColumnItem(final Table table, final String tableName,
             final FrostlakeParser.AlterColumnItemContext item) {
         final String colName = visitor.getText(item.identifier());
-        if (!table.hasColumn(colName)) {
+        if (!table.hasColumnExactly(colName)) {
             // A missing column is a POSITIONED semantic refusal: the prefix line points at the
-            // identifier itself, live-verified against ALTER COLUMN on a column the table lost.
+            // identifier itself, live-verified against ALTER COLUMN on a column the table lost. The name
+            // is matched by its canonical spelling, so bee and "bee" both miss a column "Bee".
             final Token at = item.identifier().getStart();
-            throw new RuntimeException(SqlCompilationError.at(at.getLine(),
-                at.getCharPositionInLine(), "invalid identifier '" + colName.toUpperCase(Locale.ROOT) + "'"));
+            throw new RuntimeException(SqlCompilationError.invalidIdentifier(at.getLine(),
+                at.getCharPositionInLine(), SqlIdentifiers.spellCanonical(colName)));
         }
         final TableColumn column = table.getColumn(colName);
         final FrostlakeParser.AlterColumnItemActionContext action = item.alterColumnItemAction();
@@ -2938,42 +2954,23 @@ public class AlterCommandHandler implements CommandHandler {
     }
 
     /**
-     * SET NOT NULL over the rows already stored. Snowflake documents two refusals: "if the column contains
-     * NULL values, an error is returned and no changes are applied to the column", and a semi-structured
-     * column (ARRAY, OBJECT, VARIANT) "cannot be set to NOT NULL, except when the table is empty". It gives
-     * no wording for either, so these sentences are Frostlake's own and not live-verified. The flag used to
-     * flip over any data, leaving a NOT NULL column that held NULLs.
+     * SET NOT NULL over the rows already stored: a column holding a NULL keeps its nullability, refused as
+     * {@code Column 'Bee' contains null values. Not null constraint cannot be added.} with the column's name as the
+     * table spells it. A semi-structured column holding no NULL takes the constraint like any other, rows or not
+     * (live-verified).
      */
     private void requireNotNullHolds(final Table table, final String tableName, final String colName,
             final TableColumn column) {
         final TableStorage storage = queryExecutor.getStorageEngine()
             .getTableStorage(queryExecutor.getFullyQualifiedTableName(tableName));
-        if (storage == null) {
+        if (storage == null || !table.hasColumnExactly(colName)) {
             return;
         }
-        int slot = -1;
-        final List<TableColumn> columns = table.getColumns();
-        for (int i = 0; i < columns.size(); i++) {
-            if (columns.get(i).getName().equalsIgnoreCase(colName)) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            return;
-        }
-        final List<Row> rows = storage.scan();
-        final DataType type = column.getDataType();
-        if (!rows.isEmpty()
-                && (type instanceof VariantType || type instanceof ObjectType || type instanceof ArrayType)) {
-            throw new RuntimeException(SqlCompilationError.trailing("cannot change column "
-                + colName.toUpperCase(Locale.ROOT) + " of type " + typeText(type)
-                + " to NOT NULL because the table is not empty."));
-        }
-        for (final Row row : rows) {
+        final int slot = table.getColumnIndex(colName);
+        for (final Row row : storage.scan()) {
             if (row.getValue(slot) == null) {
-                throw new RuntimeException(SqlCompilationError.trailing("cannot change column "
-                    + colName.toUpperCase(Locale.ROOT) + " to NOT NULL because it contains NULL values."));
+                throw new RuntimeException(SqlCompilationError.of("Column '" + column.getName()
+                    + "' contains null values. Not null constraint cannot be added.\n"));
             }
         }
     }
@@ -4623,21 +4620,23 @@ public class AlterCommandHandler implements CommandHandler {
      * @param policy the policy a SET names, or null for an UNSET
      * @param using  the USING list, or null
      * @param force  whether FORCE is written
+     * @param ownedTable the table's name parts, whose OWNERSHIP goes with APPLY on the policy, or null for a view
      */
     private void columnMaskingPolicy(final Table target, final FrostlakeParser.IdentifierContext column,
-                                     final FrostlakeParser.QualifiedNameContext policy,
-                                     final FrostlakeParser.IdentifierListContext using, final boolean force) {
+                                     final FrostlakeParser.ObjectNameContext policy,
+                                     final FrostlakeParser.IdentifierListContext using, final boolean force,
+                                     final String[] ownedTable) {
         final String colName = visitor.getText(column);
         // Recorded in full, the way live reports an attachment however little of the name the statement wrote — and
         // so that re-attaching the SAME policy under a different spelling stays the no-op live makes it.
         final String policyName = policy == null ? null
-            : catalog.qualifiedExactName(requireMaskingPolicy(visitor.getText(policy)));
+            : catalog.qualifiedExactName(requireMaskingPolicy(queryExecutor.resolveObjectName(policy)));
         requireColumn(target, colName, column);
         final TableColumn col = target.getColumn(colName);
         if (policyName == null) {
             // Detaching what is not attached is a no-op, not an error — the opposite of the row access policy's DROP.
             if (col.getMaskingPolicyName() != null) {
-                requireApplyMaskingPolicy(col.getMaskingPolicyName());
+                requireApplyMaskingPolicy(col.getMaskingPolicyName(), ownedTable);
             }
             col.setMaskingPolicyName(null);
             col.setMaskingPolicyArguments(null);
@@ -4666,23 +4665,106 @@ public class AlterCommandHandler implements CommandHandler {
             }
         }
         MaskingPolicyAttachment.requireTypeMatch(catalog.findMaskingPolicyExact(policyName), col);
-        requireApplyMaskingPolicy(policyName);
+        requireApplyMaskingPolicy(policyName, ownedTable);
         if (col.getMaskingPolicyName() != null && !sameMaskingPolicy(col.getMaskingPolicyName(), policyName)) {
             // FORCE replaces the policy there, which detaches it.
-            requireApplyMaskingPolicy(col.getMaskingPolicyName());
+            requireApplyMaskingPolicy(col.getMaskingPolicyName(), ownedTable);
         }
         col.setMaskingPolicyName(policyName);
         // A conditional policy reads its further arguments from the columns USING names, in order.
         col.setMaskingPolicyArguments(arguments);
     }
 
+    /** Whether an ALTER TABLE action sets or unsets a masking policy on a column, or adds or drops a row access one. */
+    private static boolean attachesMaskingOrRowAccessPolicy(final FrostlakeParser.TableActionContext action) {
+        return (action.ALTER() != null || action.MODIFY() != null) && action.MASKING() != null
+            && action.PROJECTION() == null
+            || action.ROW() != null && action.ACCESS() != null && (action.ADD() != null || action.DROP() != null);
+    }
+
+    /**
+     * ALTER TAG … SET / UNSET MASKING POLICY (live-verified). Each policy is resolved first. A SET carries at most one
+     * policy per data type: two of one type in the statement are refused, and a policy of a type the tag already has
+     * another for is refused unless FORCE replaces it; setting a policy the tag carries is a no-op. An UNSET of a
+     * policy the tag does not carry is a no-op too.
+     *
+     * @param tag    the tag
+     * @param action the statement's action
+     */
+    private void alterTagMaskingPolicies(final Tag tag, final FrostlakeParser.TagActionContext action) {
+        final List<String> named = new ArrayList<>();
+        for (final FrostlakeParser.TagMaskingPolicyContext written : action.tagMaskingPolicy()) {
+            named.add(catalog.qualifiedExactName(requireMaskingPolicy(visitor.getText(written.qualifiedName()))));
+        }
+        final List<String> carried = tag.getMaskingPolicies();
+        if (action.UNSET() != null) {
+            for (final String policy : named) {
+                if (carried.remove(policy)) {
+                    requireApplyMaskingPolicy(policy, null);
+                }
+            }
+            tag.setMaskingPolicies(carried);
+            return;
+        }
+        final List<MaskingPolicy> policies = new ArrayList<>();
+        for (final String policy : named) {
+            final MaskingPolicy found = catalog.findMaskingPolicyExact(policy);
+            for (final MaskingPolicy earlier : policies) {
+                if (earlier != found && SqlTypeNames.sameFamily(typeMasked(earlier), typeMasked(found))) {
+                    throw new RuntimeException(SqlCompilationError.inline(
+                        "Multiple masking policies are specified with same data type "
+                            + SqlTypeNames.canonical(typeMasked(found)) + "."));
+                }
+            }
+            policies.add(found);
+        }
+        for (int i = 0; i < named.size(); i++) {
+            final String policy = named.get(i);
+            requireApplyMaskingPolicy(policy, null);
+            for (int c = carried.size() - 1; c >= 0; c--) {
+                final String held = carried.get(c);
+                if (held.equals(policy)) {
+                    continue;
+                }
+                MaskingPolicy heldPolicy;
+                try {
+                    heldPolicy = catalog.findMaskingPolicyExact(held);
+                } catch (final RuntimeException gone) {
+                    heldPolicy = null;
+                }
+                if (heldPolicy == null
+                        || !SqlTypeNames.sameFamily(typeMasked(heldPolicy), typeMasked(policies.get(i)))) {
+                    continue;
+                }
+                if (action.FORCE() == null) {
+                    // Live's wording, its capitalisation included.
+                    throw new RuntimeException("SQl execution error: Tag is already assigned to a masking policy "
+                        + heldPolicy.getName() + " with same data-type.");
+                }
+                carried.remove(c);
+            }
+            if (!carried.contains(policy)) {
+                carried.add(policy);
+            }
+        }
+        tag.setMaskingPolicies(carried);
+        catalog.noteTagMasking();
+    }
+
+    /** The type a masking policy masks: its first parameter's. */
+    private static DataType typeMasked(final MaskingPolicy policy) {
+        return policy == null || policy.getParameters().isEmpty() ? null
+            : policy.getParameters().get(0).getDataType();
+    }
+
     /**
      * Refuses attaching or detaching a masking policy the session may not apply: it needs APPLY MASKING POLICY on the
-     * account, or APPLY on the policy (see {@link ApplyPrivileges}).
+     * account, or APPLY on the policy and, over a table, OWNERSHIP of the table (see {@link ApplyPrivileges}).
      *
      * @param policyName the policy's name in full, as an attachment records it
+     * @param ownedTable the table's name parts, or null where no table is altered
      */
-    private void requireApplyMaskingPolicy(final String policyName) {
+    private void requireApplyMaskingPolicy(final String policyName, final String[] ownedTable) {
         MaskingPolicy policy;
         try {
             policy = catalog.findMaskingPolicyExact(policyName);
@@ -4690,16 +4772,17 @@ public class AlterCommandHandler implements CommandHandler {
             policy = null;
         }
         ApplyPrivileges.require(queryExecutor, Privilege.APPLY_MASKING_POLICY, "MASKING_POLICY", policyName,
-            policy == null ? null : policy.getOwner());
+            policy == null ? null : policy.getOwner(), ownedTable);
     }
 
     /**
      * Refuses adding or dropping a row access policy the session may not apply: it needs APPLY ROW ACCESS POLICY on
-     * the account, or APPLY on the policy (see {@link ApplyPrivileges}).
+     * the account, or APPLY on the policy and, over a table, OWNERSHIP of the table (see {@link ApplyPrivileges}).
      *
      * @param policyName the policy's name, as written or as the attachment records it
+     * @param ownedTable the table's name parts, or null where no table is altered
      */
-    private void requireApplyRowAccessPolicy(final String policyName) {
+    private void requireApplyRowAccessPolicy(final String policyName, final String[] ownedTable) {
         RowAccessPolicy policy;
         try {
             policy = catalog.findRowAccessPolicyExact(policyName);
@@ -4713,7 +4796,7 @@ public class AlterCommandHandler implements CommandHandler {
             fullName = policyName;
         }
         ApplyPrivileges.require(queryExecutor, Privilege.APPLY_ROW_ACCESS_POLICY, "ROW_ACCESS_POLICY", fullName,
-            policy == null ? null : policy.getOwner());
+            policy == null ? null : policy.getOwner(), ownedTable);
     }
 
     /**
@@ -4746,12 +4829,10 @@ public class AlterCommandHandler implements CommandHandler {
 
     private void requireColumn(final Table table, final String colName,
                                final FrostlakeParser.IdentifierContext where) {
-        try {
-            table.getColumn(colName);
-        } catch (final RuntimeException unknown) {
+        if (!table.hasColumnExactly(colName)) {
             throw new RuntimeException(SqlCompilationError.invalidIdentifier(
                 where.getStart().getLine(), where.getStart().getCharPositionInLine(),
-                colName.toUpperCase(Locale.ROOT)), unknown);
+                SqlIdentifiers.spellCanonical(colName)));
         }
     }
 

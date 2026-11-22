@@ -23,6 +23,7 @@ import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.types.IntegerResultWidths;
 import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.UuidTextNode;
+import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 
@@ -45,7 +46,8 @@ public class ArrayPosition extends BuiltInFunction {
         for (int i = 0; i < arr.size(); i++) {
             final JsonNode el = arr.get(i);
             if (ArrayFunctionHelper.nodesEqual(el, target)) return (long) i;
-            if (value != null && el.isTextual() && UuidTextNode.holds(el) == UuidTextNode.holds(target)
+            // A VARIANT needle compares by its node alone, so a JSON null never matches the string "null".
+            if (value != null && !(value instanceof VariantValue) && el.isTextual() && UuidTextNode.holds(el) == UuidTextNode.holds(target)
                     && !DecfloatTextNode.holds(el) && !DecfloatTextNode.holds(target)
                     && el.asText().equals(value.toString())) return (long) i;
         }

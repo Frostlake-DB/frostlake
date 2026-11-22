@@ -21,5 +21,6 @@ package dev.frostlake.metastore.model;
  */
 public enum StreamType {
     STANDARD,      // Tracks all changes (INSERT, UPDATE, DELETE)
-    APPEND_ONLY    // Tracks only INSERTs
+    APPEND_ONLY,   // Tracks only INSERTs
+    INSERT_ONLY    // An external table's stream: tracks only the rows added
 }

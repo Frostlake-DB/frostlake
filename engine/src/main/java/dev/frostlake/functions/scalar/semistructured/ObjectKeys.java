@@ -18,6 +18,7 @@ package dev.frostlake.functions.scalar.semistructured;
 
 import dev.frostlake.functions.VariantAccessorFunction;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.JsonTypeHelper;
 import dev.frostlake.types.ArrayType;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
@@ -31,9 +32,17 @@ public class ObjectKeys extends VariantAccessorFunction {
 
     @Override
     public Object evaluate(final List<Object> args) {
-        final JsonNode src = ArrayFunctionHelper.parseNode(args.get(0));
+        JsonNode src = ArrayFunctionHelper.parseNode(args.get(0));
         if (src == null || src.isNull()) {
             return null;
+        }
+        if (src.isTextual()) {
+            // A VARIANT string holding an object's JSON text lists that object's keys; any other string is
+            // refused (live-verified: OBJECT_KEYS(PARSE_JSON('"{\\"a\\":1}"')) is ["a"]).
+            final JsonNode parsed = JsonTypeHelper.parse(src.asText());
+            if (parsed != null && parsed.isObject()) {
+                src = ArrayFunctionHelper.canonicalize(parsed);
+            }
         }
         if (!src.isObject()) {
             // A VARIANT that holds no object is refused as the cast of it to one is (live-verified).

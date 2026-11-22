@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>dev.frostlake</groupId>
+        <artifactId>frostlake-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>frostlake-sf-transport</artifactId>
+    <packaging>jar</packaging>
+    <name>Frostlake Snowflake JDBC transport</name>
+    <description>Lets Snowflake's own JDBC driver reach an embedded Frostlake engine without a socket: an HttpTransport
+        provider, registered for ServiceLoader as "frostlake", that hands the driver's requests to the engine's
+        Snowflake endpoints in process. jdbc:snowflake://NAME/?account=frostlake&amp;httpTransport=frostlake reaches
+        the engine jdbc:frostlake:direct:NAME connections share. Needs a Snowflake JDBC driver that offers the
+        HttpTransport SPI.</description>
+
+    <properties>
+        <!-- A Snowflake JDBC driver build that offers net.snowflake.client.api.http.HttpTransport. No released
+             driver does yet, which is why the parent builds this module only under -Psf-transport; name the build
+             with -Dsnowflake.jdbc.transport.version=<version>. -->
+        <snowflake.jdbc.transport.version>4.4.2-SNAPSHOT</snowflake.jdbc.transport.version>
+    </properties>
+
+    <dependencies>
+        <!-- The engine: its Snowflake endpoints answered in process (dev.frostlake.http.SnowflakeDirectEndpoint). -->
+        <dependency>
+            <groupId>dev.frostlake</groupId>
+            <artifactId>frostlake-db</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Snowflake's JDBC driver: the SPI this module implements. Provided: the application brings its driver.
+             The driver jar carries its dependencies shaded inside it, so none of its pom's are needed (a build
+             installed from the driver's sources still lists them). -->
+        <dependency>
+            <groupId>net.snowflake</groupId>
+            <artifactId>snowflake-jdbc</artifactId>
+            <version>${snowflake.jdbc.transport.version}</version>
+            <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>6.0.3</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+                <configuration>
+                    <!-- The driver reads Arrow results through off-heap buffers. -->
+                    <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+            <!-- License-header audit (Apache RAT): fails the build at `verify` if any owned .java file is
+                 missing the Apache-2.0 header. -->
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+                <version>${apache-rat-plugin.version}</version>
+                <configuration>
+                    <consoleOutput>true</consoleOutput>
+                    <inputExcludes>
+                        <inputExclude>/pom.xml</inputExclude>
+                        <inputExclude>/.flattened-pom.xml</inputExclude>
+                        <inputExclude>/src/main/resources/**</inputExclude>
+                        <inputExclude>/src/test/resources/**</inputExclude>
+                        <inputExclude>**/*.md</inputExclude>
+                        <inputExclude>**/*.log</inputExclude>
+                    </inputExcludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>check-license-headers</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -17,11 +17,13 @@
 package dev.frostlake.functions.scalar.conversion;
 
 import dev.frostlake.executor.SessionZone;
+import dev.frostlake.functions.scalar.EpochOutOfRange;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.functions.scalar.SnowflakeDateParser;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.TemporalAccessor;
@@ -79,9 +81,13 @@ public final class TimestampFlavourConversion {
             return null;
         }
         if (value instanceof Number) {
-            final ZonedDateTime inSession = SharedFunctionHelpers
-                .parseTimestampWithFormatOrScale(value, formatOrScale)
-                .atZone(ZoneOffset.UTC).withZoneSameInstant(SessionZone.current());
+            final LocalDateTime utc;
+            try {
+                utc = SharedFunctionHelpers.parseTimestampWithFormatOrScale(value, formatOrScale);
+            } catch (final EpochOutOfRange past) {
+                throw writtenOffset ? past.withSessionOffset() : past;
+            }
+            final ZonedDateTime inSession = utc.atZone(ZoneOffset.UTC).withZoneSameInstant(SessionZone.current());
             return writtenOffset ? inSession.withFixedOffsetZone() : inSession.toOffsetDateTime();
         }
         if (formatOrScale instanceof String && SharedFunctionHelpers.isExplicitFormat((String) formatOrScale)) {

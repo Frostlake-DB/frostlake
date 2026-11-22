@@ -28,11 +28,13 @@ import dev.frostlake.executor.StorageIntegrationReference;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.FileFormat;
+import dev.frostlake.metastore.model.Integration;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.ResultSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -48,6 +50,7 @@ import org.slf4j.LoggerFactory;
  *                               once, by its last value; nothing is applied when one of them is refused
  *   SET COMMENT = NULL          takes the comment away; = 5 is  invalid value [5] for parameter 'COMMENT'
  *   SET FOO = 'x'               invalid property 'FOO' for 'STAGE'
+ *   SET ENDPOINT = 'host'       judged at the location the statement leaves the stage at (see StageEndpoint)
  *   SET URL | CREDENTIALS | ENCRYPTION on an internal stage
  *                               Cannot set URL, credentials, or encryption key of an internal or temporary stage.
  *   SET DIRECTORY = ( … )       see {@link StageDirectoryOptions}
@@ -96,6 +99,7 @@ final class AlterStageHandler {
         if (action.REFRESH() != null) {
             requireOptionValues(action);
         }
+        requireWellFormedCredentials(action.stageSetting());
         if (ifExists && action.REFRESH() == null && !exists(stageName)) {
             logger.debug("Stage does not exist (IF EXISTS): {}", stageName);
             return null;
@@ -159,6 +163,20 @@ final class AlterStageHandler {
         }
         altered = stage;
         return null;
+    }
+
+    /** A key of the CREDENTIALS is judged by its shape before the stage is looked up (see StageCredentials). */
+    private static void requireWellFormedCredentials(final List<FrostlakeParser.StageSettingContext> settings) {
+        final List<FrostlakeParser.ParenOptionListContext> credentials = new ArrayList<>();
+        final List<FrostlakeParser.ParenOptionListContext> formats = new ArrayList<>();
+        for (final FrostlakeParser.StageSettingContext setting : settings) {
+            if (setting.parenOptionList() != null && StageCredentials.names(setting.identifier())) {
+                credentials.add(setting.parenOptionList());
+            } else if (setting.parenOptionList() != null && setting.FILE_FORMAT() != null) {
+                formats.add(setting.parenOptionList());
+            }
+        }
+        StageCredentials.requireWellFormed(credentials, formats);
     }
 
     private boolean exists(final String stageName) {
@@ -237,7 +255,7 @@ final class AlterStageHandler {
                 stage.setEncryptionKey(judged.key());
             }
         } else {
-            setNamed(stage, setting, apply);
+            setNamed(stage, setting, apply, location);
         }
     }
 
@@ -287,7 +305,8 @@ final class AlterStageHandler {
     }
 
     /** A property named by a plain word: DIRECTORY and COPY_OPTIONS are modeled, the other known ones inert. */
-    private void setNamed(final Stage stage, final FrostlakeParser.StageSettingContext setting, final boolean apply) {
+    private void setNamed(final Stage stage, final FrostlakeParser.StageSettingContext setting, final boolean apply,
+                          final String location) {
         final String key = visitor.getText(setting.identifier()).toUpperCase(Locale.ROOT);
         if (!CreateInfrastructureHandler.isStageOption(key)) {
             // Named as written: invalid property 'foo' for 'STAGE' (live-verified).
@@ -295,8 +314,18 @@ final class AlterStageHandler {
         }
         if ("CREDENTIALS".equals(key)) {
             refuseOnInternalStage(stage);
+            StageCredentials.requireFilled(setting.parenOptionList(), location);
         } else if ("STORAGE_INTEGRATION".equals(key)) {
-            requireIntegration(setting);
+            final Integration integration = requireIntegration(setting);
+            if (apply) {
+                stage.setStorageIntegration(integration == null ? null : integration.getName());
+            }
+        } else if (StageEndpoint.PROPERTY.equals(key)) {
+            final String endpoint = StageEndpoint.read(setting.copyOptionValue());
+            StageEndpoint.require(endpoint, location);
+            if (apply) {
+                stage.setEndpoint(endpoint);
+            }
         } else if ("DIRECTORY".equals(key)) {
             final StageDirectoryOptions options = StageDirectoryOptions.read(setting.parenOptionList(), false);
             if (apply) {
@@ -320,9 +349,9 @@ final class AlterStageHandler {
         }
     }
 
-    /** STORAGE_INTEGRATION names an integration that exists. */
-    private void requireIntegration(final FrostlakeParser.StageSettingContext setting) {
-        StorageIntegrationReference.require(catalog, queryExecutor.getSecurityManager(),
+    /** STORAGE_INTEGRATION names an integration that exists: the integration, or null for no value. */
+    private Integration requireIntegration(final FrostlakeParser.StageSettingContext setting) {
+        return StorageIntegrationReference.require(catalog, queryExecutor.getSecurityManager(),
             setting.copyOptionValue());
     }
 

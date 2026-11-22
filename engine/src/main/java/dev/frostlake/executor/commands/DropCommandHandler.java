@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.ConditionalDdlOutcome;
 import dev.frostlake.executor.LeadingCommentOffset;
 import dev.frostlake.executor.QueryExecutor;
@@ -234,6 +235,55 @@ public class DropCommandHandler implements CommandHandler {
         }
     }
 
+    /**
+     * Keep a schema a CREATE OR REPLACE replaces as a dropped version of its name, as DROP SCHEMA keeps one: SHOW
+     * SCHEMAS HISTORY lists it, and UNDROP restores it once the name is free (live-verified for the listing). Its
+     * tables' storage waits with the version. The caller drops the schema, and then sets its stages aside under the
+     * version (see QueryExecutor#setAsideStages).
+     *
+     * @param databaseName the schema's database
+     * @param schema       the schema replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedSchema(final String databaseName, final Schema schema) {
+        final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
+        final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
+        final Map<String, String> kept = new LinkedHashMap<>();
+        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+        snapshotAndReleaseStorage(databaseName, schema, tableRows, hiddenTableRows, kept, ownTemporary);
+        final DroppedObject dropped = new DroppedObject(schema, tableRows, hiddenTableRows,
+            RetentionChain.effectiveDays(catalog.databaseExact(databaseName), schema, null),
+            StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
+        keepStorages(dropped, kept);
+        dropped.keepSessionTables(ownTemporary);
+        catalog.recordDropped("SCHEMA:" + QualifiedName.key(databaseName, schema.getName()), dropped);
+        return dropped;
+    }
+
+    /**
+     * Keep a database a CREATE OR REPLACE replaces as a dropped version of its name, as DROP DATABASE keeps one: SHOW
+     * DATABASES HISTORY lists it (live-verified). The caller drops the database, and then sets its stages aside.
+     *
+     * @param database the database replaced
+     * @return the version recorded
+     */
+    DroppedObject keepReplacedDatabase(final Database database) {
+        final Map<String, List<Row>> tableRows = new LinkedHashMap<>();
+        final Map<String, List<Row>> hiddenTableRows = new LinkedHashMap<>();
+        final Map<String, String> kept = new LinkedHashMap<>();
+        final List<DroppedSessionTable> ownTemporary = new ArrayList<>();
+        for (final Schema schema : database.getAllSchemas()) {
+            snapshotAndReleaseStorage(database.getName(), schema, tableRows, hiddenTableRows, kept, ownTemporary);
+        }
+        final DroppedObject dropped = new DroppedObject(database, tableRows, hiddenTableRows,
+            RetentionChain.effectiveDays(database, null, null),
+            StatementTokens.draw(STAGE_TOKEN_ALPHABET, STAGE_TOKEN_LENGTH));
+        keepStorages(dropped, kept);
+        dropped.keepSessionTables(ownTemporary);
+        catalog.recordDropped("DATABASE:" + database.getName(), dropped);
+        return dropped;
+    }
+
     /** Notes on a dropped schema's or database's version where each of its tables' storage waits. */
     private static void keepStorages(final DroppedObject dropped, final Map<String, String> kept) {
         for (final Map.Entry<String, String> table : kept.entrySet()) {
@@ -369,7 +419,8 @@ public class DropCommandHandler implements CommandHandler {
      * DROP of a kind Frostlake has no statements for, so no object of it ever exists: the name resolves the way
      * any object's does — a missing database or schema is refused, IF EXISTS or not, and so is a name with too
      * many parts — and then the object is missing, which IF EXISTS forgives. CASCADE and RESTRICT change nothing.
-     * A session policy is read with these kinds and is modelled: one that is there is dropped.
+     * A session policy is read with these kinds and is modelled: one that is there is dropped. So is a resource
+     * monitor, a share, a failover group and an external table that was declared.
      */
     private Object dropUnmodelled(final FrostlakeParser.DropClassStatementContext ctx, final UnmodelledDropKind kind) {
         final FrostlakeParser.ObjectNameContext instance = ctx.dropInstanceName().objectName();
@@ -391,6 +442,11 @@ public class DropCommandHandler implements CommandHandler {
                 // A policy of another kind holds the name, which IF EXISTS does not forgive (live-verified).
                 throw new RuntimeException(SqlCompilationError.objectOfOtherType(otherPolicy, modelled.name()));
             }
+            if (kind == UnmodelledDropKind.EXTERNAL_TABLE
+                    && ExternalTableCommandHandler.drop(owner, parts[parts.length - 1], queryExecutor)) {
+                // An external table that is there is dropped.
+                return null;
+            }
             final boolean relationKind = kind == UnmodelledDropKind.EXTERNAL_TABLE
                 || kind == UnmodelledDropKind.SEMANTIC_VIEW;
             final RelationKind found = relationKind ? owner.relationKindOf(parts[parts.length - 1]) : null;
@@ -401,6 +457,10 @@ public class DropCommandHandler implements CommandHandler {
             missing = SqlCompilationError.doesNotExist(kind.noun(), owner.qualifiedName(parts[parts.length - 1]));
         } else if (parts.length > 1) {
             throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
+        } else if (dropKept(kind, parts[0])) {
+            // The account's kinds kept as metadata: a resource monitor, a share or a failover group that is there
+            // is dropped.
+            return null;
         } else if (kind == UnmodelledDropKind.SHARE) {
             missing = SqlCompilationError.doesNotExistAsSpelled(kind.noun(), shareName(catalog.getAccountLocator(),
                 parts[0]));
@@ -415,6 +475,18 @@ public class DropCommandHandler implements CommandHandler {
             return null;
         }
         throw new RuntimeException(missing);
+    }
+
+    private boolean dropKept(final UnmodelledDropKind kind, final String name) {
+        if (kind == UnmodelledDropKind.RESOURCE_MONITOR) {
+            return new ResourceMonitorCommandHandler(catalog).drop(name);
+        }
+        final AccountIdentity identity = AccountIdentity.of(queryExecutor.getEngineConfig());
+        if (kind == UnmodelledDropKind.SHARE) {
+            return new ShareCommandHandler(catalog, identity).drop(name);
+        }
+        return kind == UnmodelledDropKind.FAILOVER_GROUP
+            && new FailoverGroupCommandHandler(catalog, identity).drop(name);
     }
 
     /**
@@ -528,6 +600,7 @@ public class DropCommandHandler implements CommandHandler {
                     final String snapSchemaName = parts.length == 1 ? parts[0] : parts[1];
                     final Database snapDb = catalog.databaseExact(snapDbName);
                     final Schema snapSchema = snapDb.schemaExact(snapSchemaName);
+                    NetworkRuleAssociations.requireFree(catalog, snapSchema);
                     // A schema holding a table another table references stays under RESTRICT. Otherwise the drop
                     // takes the foreign keys tables outside it hold with it.
                     final ForeignKeyDependents dependents = new ForeignKeyDependents(catalog);
@@ -571,7 +644,10 @@ public class DropCommandHandler implements CommandHandler {
                     }
                     logger.trace("Dropped schema: {}", schemaName);
                 } catch (final RuntimeException e) {
-                    if (!forgiven(ifExists, e) || e instanceof DropDependencyRefusal) throw e;
+                    if (!forgiven(ifExists, e) || e instanceof DropDependencyRefusal
+                            || e instanceof NetworkRuleAssociationRefusal) {
+                        throw e;
+                    }
                     ConditionalDdlOutcome.dropSkipped();
                     logger.debug("Schema does not exist (IF EXISTS): {}", schemaName);
                 }
@@ -1010,6 +1086,11 @@ public class DropCommandHandler implements CommandHandler {
                 try {
                     queryExecutor.requireOwnership("TAG", dropNameParts(ctx), null);
                     final Tag droppedTag = catalog.getTagExact(tagName);
+                    if (droppedTag.hasMaskingPolicies()) {
+                        // A tag carrying a masking policy stays until the policy is unset from it (live-verified).
+                        throw new RuntimeException(SqlCompilationError.PREFIX + " Tag " + droppedTag.getName()
+                            + " cannot be dropped/replaced as it is associated with one or more policies.");
+                    }
                     catalog.dropTagExact(tagName);
                     final String[] tagParts = dropNameParts(ctx);
                     final String tagDb = tagParts.length == 3 ? tagParts[0] : catalog.getCurrentDatabase();

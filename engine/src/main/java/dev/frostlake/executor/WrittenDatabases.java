@@ -54,17 +54,30 @@ final class WrittenDatabases {
         }
         final Set<String> written = new HashSet<>();
         collect(statement, executor, written);
-        final Catalog catalog = executor.getCatalog();
         for (final String name : written) {
-            if (SystemDatabase.is(name) || !catalog.hasDatabaseExact(name)) {
-                continue;
-            }
-            final Database database = catalog.databaseExact(name);
-            if (!security.sees("DATABASE", database.getName(), database.getOwner())) {
+            if (hides(name, executor)) {
                 hidden.add(name);
             }
         }
         return hidden;
+    }
+
+    /**
+     * Whether the session does not see a database a statement names, written or reached through a name it computes,
+     * as {@code IDENTIFIER('db.s.t')} does.
+     *
+     * @param name     the database's canonical name
+     * @param executor the executor whose session judges what is seen
+     * @return whether the database is there and the session does not see it
+     */
+    static boolean hides(final String name, final QueryExecutor executor) {
+        final SecurityManager security = executor.getSecurityManager();
+        final Catalog catalog = executor.getCatalog();
+        if (security == null || SystemDatabase.is(name) || !catalog.hasDatabaseExact(name)) {
+            return false;
+        }
+        final Database database = catalog.databaseExact(name);
+        return !security.sees("DATABASE", database.getName(), database.getOwner());
     }
 
     private static void collect(final ParseTree node, final QueryExecutor executor, final Set<String> written) {

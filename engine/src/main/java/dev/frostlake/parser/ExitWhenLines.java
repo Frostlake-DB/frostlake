@@ -22,14 +22,17 @@ import java.util.List;
 import org.antlr.v4.runtime.Token;
 
 /**
- * The lines the account reports for a BREAK or an EXIT given a condition, {@code EXIT WHEN i = 2;}. There is no
- * such form: the account reads WHEN as the loop's label and refuses the token after it, and then the semicolon
- * that ends the statement; a label written before WHEN changes nothing (live-verified):
+ * The lines the account reports for a BREAK, an EXIT, a CONTINUE or an ITERATE given a condition,
+ * {@code EXIT WHEN i = 2;}. There is no such form: the account reads WHEN as the loop's label and refuses the token
+ * after it, and then the semicolon that ends the statement; a label written before WHEN changes nothing
+ * (live-verified):
  *
  * <pre>
  *   … DO EXIT WHEN i = 2; END FOR …          'i', ';'
  *   … DO BREAK WHEN i = 2; END FOR …         'i', ';'
  *   … DO EXIT outer WHEN i = 2; END FOR …    'i', ';'
+ *   … DO CONTINUE WHEN i = 2; END FOR …      'i', ';'
+ *   … DO ITERATE lp WHEN i = 2; END FOR lp … 'i', ';'
  * </pre>
  */
 final class ExitWhenLines {
@@ -38,7 +41,7 @@ final class ExitWhenLines {
     }
 
     /**
-     * The lines for a text holding a BREAK or an EXIT followed by WHEN ahead of its first fault, or null for any
+     * The lines for a text holding one of the four words followed by WHEN ahead of its first fault, or null for any
      * other text.
      *
      * @param spoken the text's default-channel tokens, end of input included
@@ -48,7 +51,8 @@ final class ExitWhenLines {
     static List<String> lines(final List<Token> spoken, final int fault) {
         for (int i = 0; i + 2 < spoken.size() && i < fault; i++) {
             final int type = spoken.get(i).getType();
-            if (type != FrostlakeLexer.BREAK && type != FrostlakeLexer.EXIT) {
+            if (type != FrostlakeLexer.BREAK && type != FrostlakeLexer.EXIT && type != FrostlakeLexer.CONTINUE
+                    && type != FrostlakeLexer.ITERATE) {
                 continue;
             }
             int when = i + 1;

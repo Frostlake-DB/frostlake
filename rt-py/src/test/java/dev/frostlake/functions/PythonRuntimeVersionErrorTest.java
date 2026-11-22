@@ -62,7 +62,7 @@ public class PythonRuntimeVersionErrorTest extends BaseDatabaseTest {
             CREATE FUNCTION py_modern(n NUMBER)
             RETURNS VARCHAR
             LANGUAGE PYTHON
-            RUNTIME_VERSION = '3.10'
+            RUNTIME_VERSION = '3.11'
             HANDLER = 'go'
             AS
             $$

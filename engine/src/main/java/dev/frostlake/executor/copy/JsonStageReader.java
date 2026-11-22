@@ -18,11 +18,16 @@ package dev.frostlake.executor.copy;
 
 import dev.frostlake.functions.scalar.JsonNumberNotation;
 import dev.frostlake.functions.scalar.JsonNumberRange;
+import dev.frostlake.functions.scalar.JsonTypeHelper;
+import dev.frostlake.functions.scalar.semistructured.JsonFileRecords;
+import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.cfg.JsonNodeFeature;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.NullNode;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -31,9 +36,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * JSON staged-file reader: a file is read as newline-delimited JSON, one record per non-blank line, and a top-level
- * array is one record — or, under STRIP_OUTER_ARRAY = TRUE, one record per element (live-verified). The reader's
- * own {@link #readRecords(Path)} strips the outer array, as callers that know no file format read it.
+ * JSON staged-file reader: a file is read as a sequence of documents, one record each, whether they stand one to a
+ * line, run across lines or share one, with or without a comma between them; a top-level array is one record, or
+ * under STRIP_OUTER_ARRAY = TRUE one record per element (see {@link JsonFileRecords}, live-verified). An object that
+ * names a key twice refuses the file unless ALLOW_DUPLICATE = TRUE keeps the key's last value. The reader's own
+ * {@link #readRecords(Path)} strips the outer array, as callers that know no file format read it.
  */
 public class JsonStageReader implements StageFileReader {
 
@@ -54,72 +61,79 @@ public class JsonStageReader implements StageFileReader {
      */
     public List<JsonNode> readRecords(final Path file, final boolean stripOuterArray) throws IOException {
         // A JSON file's byte order mark is passed over whatever SKIP_BYTE_ORDER_MARK says (live-verified).
-        return records(StagedFileIo.withoutByteOrderMark(StagedFileIo.readString(file)).trim(), stripOuterArray, file);
+        final String text = StagedFileIo.withoutByteOrderMark(StagedFileIo.readString(file));
+        return records(text, stripOuterArray, false, String.valueOf(file.getFileName()), true, file);
     }
 
     /**
-     * A file's records under the format's STRIP_OUTER_ARRAY and REPLACE_INVALID_CHARACTERS: a byte that is no part of
-     * UTF-8 refuses the file in the account's words — {@code Error parsing JSON: invalid UTF-8 sequence: 0xE9}, the
-     * file, the line and the byte's character within it — unless the option reads each such sequence as U+FFFD
-     * (live-verified).
+     * A file's records under the format's STRIP_OUTER_ARRAY, REPLACE_INVALID_CHARACTERS and ALLOW_DUPLICATE: a byte
+     * that is no part of UTF-8 refuses the file in the account's words — {@code Error parsing JSON: invalid UTF-8
+     * sequence: 0xE9}, the file, the line and the byte's character within it — unless the option reads each such
+     * sequence as U+FFFD (live-verified); a malformed record refuses it in the account's words too, {@code Error
+     * parsing JSON: unknown keyword "tru"}, the file, the line and the character, and the row (see
+     * {@link JsonFileFault}).
      *
      * @param file             the file
      * @param stripOuterArray  whether a top-level array's elements are records of their own
      * @param replaceInvalid   whether REPLACE_INVALID_CHARACTERS = TRUE
      * @param shownName        the file as the refusal names it
+     * @param namesColumn      whether a refusal names the column, $1 (see
+     *                         {@link StagedFileIo#unreadableRefusal(String, String, int, String, boolean)})
+     * @param allowDuplicate   whether ALLOW_DUPLICATE = TRUE
      * @return the records
      * @throws IOException when the file cannot be read
      */
     public List<JsonNode> readRecords(final Path file, final boolean stripOuterArray, final boolean replaceInvalid,
-                                      final String shownName) throws IOException {
-        return readRecords(file, stripOuterArray, replaceInvalid, shownName, true);
+                                      final String shownName, final boolean namesColumn,
+                                      final boolean allowDuplicate) throws IOException {
+        return readRecords(file, stripOuterArray, replaceInvalid, shownName, namesColumn, allowDuplicate, null);
     }
 
     /**
-     * {@link #readRecords(Path, boolean, boolean, String)}, the refusal naming the column being read only where the
-     * reading query reads one (see {@link StagedFileIo#unreadableRefusal(String, String, int, String, boolean)}).
+     * A file's records as {@link #readRecords(Path, boolean, boolean, String, boolean, boolean)} reads them, the file
+     * decompressed by its format's COMPRESSION (see {@link StagedFileIo}).
      *
      * @param file             the file
      * @param stripOuterArray  whether a top-level array's elements are records of their own
      * @param replaceInvalid   whether REPLACE_INVALID_CHARACTERS = TRUE
      * @param shownName        the file as the refusal names it
      * @param namesColumn      whether a refusal names the column, $1
+     * @param allowDuplicate   whether ALLOW_DUPLICATE = TRUE
+     * @param compression      the format's COMPRESSION, upper case; null for AUTO
      * @return the records
      * @throws IOException when the file cannot be read
      */
     public List<JsonNode> readRecords(final Path file, final boolean stripOuterArray, final boolean replaceInvalid,
-                                      final String shownName, final boolean namesColumn) throws IOException {
-        final String marked = StagedFileIo.readMarked(file, StandardCharsets.UTF_8);
+                                      final String shownName, final boolean namesColumn,
+                                      final boolean allowDuplicate, final String compression) throws IOException {
+        final String marked = StagedFileIo.readMarked(file, StandardCharsets.UTF_8, compression);
         final int unreadable = StagedFileIo.firstUnreadable(marked);
         if (unreadable >= 0 && !replaceInvalid) {
             throw StagedFileIo.unreadableRefusal("JSON", marked, unreadable, shownName, namesColumn);
         }
-        return records(StagedFileIo.withoutByteOrderMark(StagedFileIo.unreadableReplaced(marked)).trim(),
-            stripOuterArray, file);
+        final String text = StagedFileIo.withoutByteOrderMark(StagedFileIo.unreadableReplaced(marked));
+        return records(text, stripOuterArray, allowDuplicate, shownName, namesColumn, file);
     }
 
-    private static List<JsonNode> records(final String text, final boolean stripOuterArray, final Path file) {
-        final List<JsonNode> records = new ArrayList<>();
-        if (text.isEmpty()) {
-            return records;
+    private static List<JsonNode> records(final String text, final boolean stripOuterArray,
+                                          final boolean allowDuplicate, final String shownName,
+                                          final boolean namesColumn, final Path file) {
+        final JsonFileRecords read = JsonFileRecords.of(text, stripOuterArray, allowDuplicate);
+        if (read.fault() != null) {
+            throw new JsonFileFault(read.fault(), shownName, namesColumn);
         }
-        try {
-            if (text.charAt(0) == '[' && stripOuterArray) {
-                final JsonNode array = readTree(text);
-                for (int i = 0; i < array.size(); i++) {
-                    records.add(array.get(i));
-                }
-            } else {
-                for (final String line : text.split("\\r?\\n")) {
-                    final String trimmed = line.trim();
-                    if (!trimmed.isEmpty()) {
-                        records.add(readTree(trimmed));
-                    }
-                }
+        final List<JsonNode> records = new ArrayList<>();
+        for (final String record : read.records()) {
+            if (record == null) {
+                records.add(NullNode.getInstance());
+                continue;
             }
-        } catch (final RuntimeException jsonError) {
-            throw new RuntimeException("Invalid JSON in file " + file.getFileName() + ": " + jsonError.getMessage(),
-                jsonError);
+            try {
+                records.add(readTree(record));
+            } catch (final RuntimeException jsonError) {
+                throw new RuntimeException("Invalid JSON in file " + file.getFileName() + ": "
+                    + jsonError.getMessage(), jsonError);
+            }
         }
         return records;
     }
@@ -130,8 +144,19 @@ public class JsonStageReader implements StageFileReader {
      * {@link JsonNumberRange}), so a staged file types a document as the function does.
      */
     private static JsonNode readTree(final String text) {
-        return JsonNumberRange.applyDoubleRange(text,
-            JsonNumberNotation.applyExponentNotation(MAPPER, text, MAPPER.readTree(text)));
+        final JsonNode strict;
+        try {
+            strict = MAPPER.readTree(text);
+        } catch (final JacksonException malformed) {
+            // What strict JSON refuses and the account reads - an unquoted key, a single-quoted string, a
+            // trailing comma - is read as PARSE_JSON reads it.
+            final JsonNode lenient = JsonTypeHelper.parseLenient(text);
+            if (lenient == null || JsonRecordFault.breaksALine(text)) {
+                throw malformed;
+            }
+            return lenient;
+        }
+        return JsonNumberRange.applyDoubleRange(text, JsonNumberNotation.applyExponentNotation(MAPPER, text, strict));
     }
 
     @Override

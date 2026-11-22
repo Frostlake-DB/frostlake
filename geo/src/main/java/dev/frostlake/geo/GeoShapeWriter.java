@@ -14,23 +14,21 @@
  * limitations under the License.
  */
 
-package dev.frostlake.functions.scalar.datetime;
+package dev.frostlake.geo;
 
-import dev.frostlake.executor.StatementClock;
-import dev.frostlake.functions.BuiltInFunction;
-import dev.frostlake.types.DateTimeType;
+import dev.frostlake.values.GeoValue;
+import dev.frostlake.values.GeoWriter;
 
-import java.util.List;
-
-/** NOW() / LOCALTIMESTAMP() — aliases of CURRENT_TIMESTAMP. */
-public class NowFn extends BuiltInFunction {
-    public NowFn(final String name) { super(name, DateTimeType.TIMESTAMP_NTZ); }
+/** The geospatial forms a session's output format asks for, written as ST_ASWKT and ST_ASWKB write them. */
+public final class GeoShapeWriter implements GeoWriter {
 
     @Override
-    public Object evaluate(final List<Object> args) { return StatementClock.now(); }
+    public String wkt(final GeoValue value) {
+        return GeoShapes.toWkt(value.node());
+    }
 
     @Override
-    public int getMinArgCount() { return 0; }
-    @Override
-    public int getMaxArgCount() { return 0; }
+    public byte[] wkb(final GeoValue value) {
+        return GeoShapes.toWkb(value.node());
+    }
 }

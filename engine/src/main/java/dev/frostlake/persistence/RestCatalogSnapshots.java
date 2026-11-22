@@ -570,6 +570,8 @@ final class RestCatalogSnapshots {
         snapshot.temporary = stage.isTemporary();
         snapshot.credentials = stage.hasCredentials();
         snapshot.encryptionKey = stage.hasEncryptionKey();
+        snapshot.endpoint = stage.getEndpoint();
+        snapshot.storageIntegration = stage.getStorageIntegration();
         snapshot.directoryRefreshed = stage.getDirectoryRefreshed();
         snapshot.fileFormatOptions = new HashMap<>(stage.getFileFormatOptions());
         snapshot.copyOptions = new HashMap<>(stage.getCopyOptions());
@@ -593,6 +595,8 @@ final class RestCatalogSnapshots {
         stage.setTemporary(snapshot.temporary);
         stage.setCredentials(snapshot.credentials);
         stage.setEncryptionKey(snapshot.encryptionKey);
+        stage.setEndpoint(snapshot.endpoint);
+        stage.setStorageIntegration(snapshot.storageIntegration);
         stage.setDirectoryRefreshed(snapshot.directoryRefreshed);
         if (snapshot.fileFormatOptions != null) {
             stage.getFileFormatOptions().putAll(snapshot.fileFormatOptions);
@@ -625,15 +629,26 @@ final class RestCatalogSnapshots {
 
     /** Adds what the older role snapshot left out: grantors, grant options, future grants, database roles, tags. */
     static void saveRoleGrants(final Role role, final RoleSnapshot saved) {
+        final List<PrivilegeSnapshot> instances = new ArrayList<>();
         for (final PrivilegeSnapshot privilege : saved.privileges) {
             if (privilege.column != null) {
                 continue;
             }
             final Privilege granted = Privilege.valueOf(privilege.privilege);
             privilege.grantor = role.getPrivilegeGrantor(privilege.objectType, privilege.objectName, granted);
-            privilege.grantOption = role.hasGrantOption(privilege.objectType, privilege.objectName, granted);
+            privilege.grantOption = role.hasGrantOption(privilege.objectType, privilege.objectName, granted,
+                privilege.grantor);
             privilege.grantedOn = role.getPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted);
+            for (final String grantor : role.privilegeGrantors(privilege.objectType, privilege.objectName, granted)) {
+                if (!grantor.equals(privilege.grantor)) {
+                    instances.add(instance(privilege, grantor,
+                        role.hasGrantOption(privilege.objectType, privilege.objectName, granted, grantor),
+                        role.getPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, grantor)));
+                }
+            }
         }
+        // Another grantor's instance of a privilege follows the first one's entry, so it is restored after it.
+        saved.privileges.addAll(instances);
         saved.roleGrantors = new HashMap<>();
         saved.roleGrantTimes = new HashMap<>();
         for (final String granted : role.getGrantedRoles()) {
@@ -683,14 +698,25 @@ final class RestCatalogSnapshots {
      *  tags. */
     static void saveUserGrants(final User user, final UserSnapshot saved) {
         saved.parameters = new HashMap<>(user.getParameters().entries());
+        final List<PrivilegeSnapshot> instances = new ArrayList<>();
         for (final PrivilegeSnapshot privilege : saved.privileges) {
             if (privilege.column == null) {
                 final Privilege granted = Privilege.valueOf(privilege.privilege);
                 privilege.grantor = user.getPrivilegeGrantor(privilege.objectType, privilege.objectName, granted);
-                privilege.grantOption = user.hasGrantOption(privilege.objectType, privilege.objectName, granted);
+                privilege.grantOption = user.hasGrantOption(privilege.objectType, privilege.objectName, granted,
+                    privilege.grantor);
                 privilege.grantedOn = user.getPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted);
+                for (final String grantor
+                        : user.privilegeGrantors(privilege.objectType, privilege.objectName, granted)) {
+                    if (!grantor.equals(privilege.grantor)) {
+                        instances.add(instance(privilege, grantor,
+                            user.hasGrantOption(privilege.objectType, privilege.objectName, granted, grantor),
+                            user.getPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, grantor)));
+                    }
+                }
             }
         }
+        saved.privileges.addAll(instances);
         saved.roleGrantors = new HashMap<>();
         saved.roleGrantTimes = new HashMap<>();
         for (final String granted : user.getGrantedRoles()) {
@@ -706,41 +732,76 @@ final class RestCatalogSnapshots {
         saved.tags = new HashMap<>(user.getTagValues());
     }
 
-    /** Grants one recorded privilege to a role, with its grantor and grant option when the snapshot has them. */
+    /** The entry of another grantor's instance of a privilege an entry records. */
+    private static PrivilegeSnapshot instance(final PrivilegeSnapshot first, final String grantor,
+                                              final boolean option, final Instant granted) {
+        final PrivilegeSnapshot instance = new PrivilegeSnapshot();
+        instance.objectType = first.objectType;
+        instance.objectName = first.objectName;
+        instance.privilege = first.privilege;
+        instance.grantor = grantor;
+        instance.grantOption = option;
+        instance.grantedOn = granted;
+        return instance;
+    }
+
+    /**
+     * Grants one recorded privilege to a role, with its grantor and grant option when the snapshot has them; a
+     * later entry of the same privilege from another grantor restores that grantor's instance.
+     */
     static void grant(final Role role, final PrivilegeSnapshot privilege) {
         final Privilege granted = Privilege.valueOf(privilege.privilege);
         if (privilege.column != null) {
             role.grantColumnPrivilege(privilege.objectType, privilege.objectName, privilege.column, granted);
             return;
         }
-        if (privilege.grantor != null) {
-            role.grantPrivilege(privilege.objectType, privilege.objectName, granted, privilege.grantor);
-        } else {
+        if (privilege.grantor == null) {
             role.grantPrivilege(privilege.objectType, privilege.objectName, granted);
+            if (Boolean.TRUE.equals(privilege.grantOption)) {
+                role.setGrantOption(privilege.objectType, privilege.objectName, granted, true);
+            }
+            if (privilege.grantedOn != null) {
+                role.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantedOn);
+            }
+            return;
         }
+        role.grantPrivilege(privilege.objectType, privilege.objectName, granted, privilege.grantor);
         if (Boolean.TRUE.equals(privilege.grantOption)) {
-            role.setGrantOption(privilege.objectType, privilege.objectName, granted, true);
+            role.setGrantOption(privilege.objectType, privilege.objectName, granted, privilege.grantor, true);
         }
         if (privilege.grantedOn != null) {
-            role.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantedOn);
+            role.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantor,
+                privilege.grantedOn);
         }
     }
 
-    /** Grants one recorded privilege to a user, with its grantor and grant option when the snapshot has them. */
+    /**
+     * Grants one recorded privilege to a user, with its grantor and grant option when the snapshot has them; a
+     * later entry of the same privilege from another grantor restores that grantor's instance.
+     */
     static void grant(final User user, final PrivilegeSnapshot privilege) {
         final Privilege granted = Privilege.valueOf(privilege.privilege);
         if (privilege.column != null) {
             user.grantColumnPrivilege(privilege.objectType, privilege.objectName, privilege.column, granted);
-        } else if (privilege.grantor != null) {
-            user.grantPrivilege(privilege.objectType, privilege.objectName, granted, privilege.grantor);
-        } else {
+            return;
+        }
+        if (privilege.grantor == null) {
             user.grantPrivilege(privilege.objectType, privilege.objectName, granted);
+            if (Boolean.TRUE.equals(privilege.grantOption)) {
+                user.setGrantOption(privilege.objectType, privilege.objectName, granted, true);
+            }
+            if (privilege.grantedOn != null) {
+                user.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantedOn);
+            }
+            return;
         }
-        if (privilege.column == null && Boolean.TRUE.equals(privilege.grantOption)) {
-            user.setGrantOption(privilege.objectType, privilege.objectName, granted, true);
+        user.grantPrivilege(privilege.objectType, privilege.objectName, granted, privilege.grantor);
+        if (Boolean.TRUE.equals(privilege.grantOption)) {
+            user.setGrantOption(privilege.objectType, privilege.objectName, granted, privilege.grantor, true);
         }
-        if (privilege.column == null && privilege.grantedOn != null) {
-            user.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantedOn);
+        if (privilege.grantedOn != null) {
+            user.setPrivilegeGrantTime(privilege.objectType, privilege.objectName, granted, privilege.grantor,
+                privilege.grantedOn);
         }
     }
 

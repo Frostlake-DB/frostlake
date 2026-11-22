@@ -64,8 +64,8 @@ final class BlockQueryLines {
         FrostlakeLexer.ROLLBACK, FrostlakeLexer.EXECUTE, FrostlakeLexer.CALL, FrostlakeLexer.EXPLAIN,
         FrostlakeLexer.COMMENT, FrostlakeLexer.LET, FrostlakeLexer.RETURN, FrostlakeLexer.IF, FrostlakeLexer.FOR,
         FrostlakeLexer.WHILE, FrostlakeLexer.LOOP, FrostlakeLexer.REPEAT, FrostlakeLexer.BREAK,
-        FrostlakeLexer.CONTINUE, FrostlakeLexer.RAISE, FrostlakeLexer.OPEN, FrostlakeLexer.CLOSE,
-        FrostlakeLexer.FETCH, FrostlakeLexer.BEGIN, FrostlakeLexer.DECLARE, FrostlakeLexer.CASE,
+        FrostlakeLexer.CONTINUE, FrostlakeLexer.ITERATE, FrostlakeLexer.RAISE, FrostlakeLexer.OPEN,
+        FrostlakeLexer.CLOSE, FrostlakeLexer.FETCH, FrostlakeLexer.BEGIN, FrostlakeLexer.DECLARE, FrostlakeLexer.CASE,
     };
 
     private BlockQueryLines() {

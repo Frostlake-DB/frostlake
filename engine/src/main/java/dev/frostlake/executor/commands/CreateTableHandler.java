@@ -314,6 +314,9 @@ public class CreateTableHandler implements CommandHandler {
                 }
             }
 
+            // Key properties the account refuses are refused before a table of the name is replaced.
+            KeyConstraintProperties.judge(ctx.columnList());
+
             // A temporary table may take a permanent table's name, and a permanent table may be created
             // under a temporary one's; each create meets only the tables of its own persistence.
             createdIn = schema;
@@ -448,8 +451,7 @@ public class CreateTableHandler implements CommandHandler {
                 if (!table.getClusterKeys().isEmpty()) {
                     table.setReclusterSuspended(true);
                 }
-                final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "TABLE", schema,
-                    table.getName());
+                final CreationGrants grantsOfNew = grantsOfNew(schema, table.getName(), copyGrants);
                 table.setOwner(grantsOfNew.owner());
                 table.setLastDdlBy(catalog.currentUserForDdl());
                 InlineTags.applyFrom(table, ctx.tableTailOption(), queryExecutor);
@@ -500,8 +502,7 @@ public class CreateTableHandler implements CommandHandler {
                     table.setComment(comment);
                 }
 
-                final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "TABLE", schema,
-                    table.getName());
+                final CreationGrants grantsOfNew = grantsOfNew(schema, table.getName(), copyGrants);
                 table.setOwner(grantsOfNew.owner());
                 table.setLastDdlBy(catalog.currentUserForDdl());
                 InlineTags.applyFrom(table, ctx.tableTailOption(), queryExecutor);
@@ -590,8 +591,7 @@ public class CreateTableHandler implements CommandHandler {
                     table.setClusterKeys(clusterKeys, clusterByText(ctx));
                 }
 
-                final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "TABLE", schema,
-                    table.getName());
+                final CreationGrants grantsOfNew = grantsOfNew(schema, table.getName(), copyGrants);
                 table.setOwner(grantsOfNew.owner());
                 table.setLastDdlBy(catalog.currentUserForDdl());
                 InlineTags.applyFrom(table, ctx.tableTailOption(), queryExecutor);
@@ -700,8 +700,7 @@ public class CreateTableHandler implements CommandHandler {
                     table.setClusterKeys(clusterKeys, clusterByText(ctx));
                 }
 
-                final CreationGrants grantsOfNew = FutureGrants.ofNew(catalog, "TABLE", schema,
-                    table.getName());
+                final CreationGrants grantsOfNew = grantsOfNew(schema, table.getName(), copyGrants);
                 table.setOwner(grantsOfNew.owner());
                 table.setLastDdlBy(catalog.currentUserForDdl());
                 InlineTags.applyFrom(table, ctx.tableTailOption(), queryExecutor);
@@ -742,6 +741,15 @@ public class CreateTableHandler implements CommandHandler {
             }
         }
         return null;
+    }
+
+    /**
+     * The owner and future grants of a new table. With COPY GRANTS the table inherits none of the future grants of
+     * its schema or database: the creating role owns it and holds only the privileges copied onto it (documented).
+     */
+    private CreationGrants grantsOfNew(final Schema schema, final String tableName, final boolean copyGrants) {
+        final CreationGrants grants = FutureGrants.ofNew(catalog, "TABLE", schema, tableName);
+        return copyGrants ? grants.withoutFutureGrants() : grants;
     }
 
     /** The dropped version a replaced table leaves: its rows, and the retention its database and schema give it. */
@@ -1105,6 +1113,11 @@ public class CreateTableHandler implements CommandHandler {
         }
         PropertyDuplicates.reject(keys);
         for (final FrostlakeParser.TableTailOptionContext tail : ctx.tableTailOption()) {
+            if (writesComment(tail) && tail.parenOptionList() != null
+                    && !tail.parenOptionList().parenOption().isEmpty()) {
+                // A comment written as a list of properties is the parser's word for the list (live-verified).
+                table.setComment(ListValues.PROPERTY_LIST);
+            }
             if (tail.propertyName() == null || tail.copyOptionValue() == null) {
                 continue;
             }

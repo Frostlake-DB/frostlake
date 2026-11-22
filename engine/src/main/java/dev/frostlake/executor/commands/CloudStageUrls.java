@@ -21,7 +21,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import java.util.Locale;
 
 /**
- * What an S3, GCS or Azure stage location must spell before a stage may stand on it, as CREATE STAGE and ALTER
+ * What an S3 (S3-compatible storage too), GCS or Azure stage location must spell before a stage may stand on it, as CREATE STAGE and ALTER
  * STAGE ... SET URL judge it (live-verified). The scheme, in any case, is followed by {@code //}, or the location is
  * no URL at all: {@code invalid URL: s3:x/}. The bucket, everything up to the next slash, is not empty and holds only
  * letters, digits, hyphens, periods and underscores; any other character, a space or a {@code ?} included, is refused
@@ -31,7 +31,7 @@ import java.util.Locale;
 final class CloudStageUrls {
 
     /** The schemes whose location starts with a bucket. */
-    private static final String[] BUCKET_SCHEMES = {"s3", "s3gov", "s3china", "gcs"};
+    private static final String[] BUCKET_SCHEMES = {"s3", "s3gov", "s3china", "s3compat", "gcs"};
 
     /** The one Azure endpoint a stage stands on: the blob service of the public cloud. */
     private static final String AZURE_BLOB = "blob.core.windows.net";

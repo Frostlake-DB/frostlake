@@ -77,7 +77,7 @@ public class StreamBacklogFunction extends TableFunction {
         final Object written = namedArgs.get(STREAM_NAME);
         final String name = written == null ? "" : String.valueOf(written);
         final Stream stream = resolve(name);
-        final boolean appendOnly = stream.getStreamType() == StreamType.APPEND_ONLY;
+        final boolean appendOnly = stream.getStreamType() != StreamType.STANDARD;
         final List<Row> rows = new ArrayList<>();
         for (final StreamVersion version : stream.getPendingVersions()) {
             rows.add(new Row(Arrays.<Object>asList(version.getBaseTable(),

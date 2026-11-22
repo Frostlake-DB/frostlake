@@ -104,7 +104,7 @@ public class AlterDynamicTablePropertyTest extends BaseDatabaseTest {
             assertRefused("ALTER DYNAMIC TABLE DT SET NOSUCHPROP = 1",
                 "invalid property 'NOSUCHPROP' for 'DYNAMIC_TABLE'");
             engine.execute("SHOW DYNAMIC TABLES LIKE 'DT' IN SCHEMA P445_DB.PUBLIC");
-            assertEquals("DOWNSTREAM, INCREMENTAL, ",
+            assertEquals("DOWNSTREAM, ADAPTIVE, ",
                 rows("SELECT \"target_lag\", \"refresh_mode\", \"comment\" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))"));
         } finally {
             engine.execute("DROP DATABASE IF EXISTS P445_DB");

@@ -272,14 +272,15 @@ final class PlanExpressionText extends AstPrinterVisitor {
             case NOT_ILIKE:
                 return like(expr);
             case DIVIDE:
-                if (isWhole(left) && isWhole(right)) {
+                if (isWhole(left) && isWhole(right) && !isCountingWindow(left) && !isCountingWindow(right)) {
                     return "SCALED_ROUND_INT_DIVIDE(" + spell(left) + ", " + spell(right) + ")";
                 }
                 return operand(left, true) + " / " + operand(right, true);
             case MULTIPLY: {
                 final boolean converted = !isLiteral(left) && !isLiteral(right) && positive(scaleOf(left))
                     && positive(scaleOf(right));
-                return operand(left, converted) + " * " + operand(right, converted);
+                return term(left, converted || widened(left, right, '*', false), '*', right) + " * "
+                    + term(right, converted || widened(right, left, '*', true), '*', left);
             }
             case ADD:
             case SUBTRACT:
@@ -657,6 +658,15 @@ final class PlanExpressionText extends AstPrinterVisitor {
         if (expression instanceof WindowFunctionExpression) {
             return windowType((WindowFunctionExpression) expression);
         }
+        if (expression instanceof FunctionCallExpression && isAggregate((FunctionCallExpression) expression)) {
+            // A sum, a mean or an extreme of a FLOAT is a FLOAT, as the window is.
+            final FunctionCallExpression call = (FunctionCallExpression) expression;
+            final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+            final DataType argument = call.getArguments().size() == 1 && call.getQuantifier() == null
+                && ("SUM".equals(name) || "AVG".equals(name) || "MIN".equals(name) || "MAX".equals(name))
+                ? typeOf(call.getArguments().get(0)) : null;
+            return "FLOAT".equals(familyOf(argument)) ? argument : null;
+        }
         return expression instanceof CastExpression ? ((CastExpression) expression).getTargetDataType() : null;
     }
 
@@ -692,7 +702,10 @@ final class PlanExpressionText extends AstPrinterVisitor {
         flatten(expr, BinaryOperator.CONCAT, operands);
         final StringBuilder text = new StringBuilder();
         for (final Expression operand : operands) {
-            text.append(text.length() == 0 ? "" : " || ").append(operand(operand, false));
+            // An aggregate of the query's own Aggregate stands in parentheses here as in arithmetic.
+            final boolean aggregate = operand instanceof FunctionCallExpression
+                && isAggregate((FunctionCallExpression) operand) && !isCompound(operand);
+            text.append(text.length() == 0 ? "" : " || ").append(operand(operand, aggregate));
         }
         return text.toString();
     }
@@ -748,17 +761,252 @@ final class PlanExpressionText extends AstPrinterVisitor {
         // (live-verified).
         if (("+".equals(symbol) || "-".equals(symbol)) && "FLOAT".equals(familyOf(typeOf(left)))
                 && floatLiteral(right) != null) {
-            return operand(left, false) + " " + symbol + " " + floatLiteral(right);
+            return term(left, false, symbol.charAt(0), right) + " " + symbol + " " + floatLiteral(right);
         }
         if (("+".equals(symbol) || "-".equals(symbol)) && "FLOAT".equals(familyOf(typeOf(right)))
                 && floatLiteral(left) != null) {
-            return floatLiteral(left) + " " + symbol + " " + operand(right, false);
+            return floatLiteral(left) + " " + symbol + " " + term(right, false, symbol.charAt(0), left);
         }
         final Integer leftScale = scaleOf(left);
         final Integer rightScale = scaleOf(right);
         final boolean known = leftScale != null && rightScale != null;
-        return operand(left, known && leftScale.intValue() < rightScale.intValue()) + " " + symbol + " "
-            + operand(right, known && rightScale.intValue() < leftScale.intValue());
+        final boolean arithmetic = "+".equals(symbol) || "-".equals(symbol);
+        return term(left, known && leftScale.intValue() < rightScale.intValue()
+                || arithmetic && widened(left, right, symbol.charAt(0), false), symbol.charAt(0), right)
+            + " " + symbol + " "
+            + term(right, known && rightScale.intValue() < leftScale.intValue()
+                || arithmetic && widened(right, left, symbol.charAt(0), true), symbol.charAt(0), left);
+    }
+
+    /**
+     * An operand of a sum, a difference, a product, a remainder or a comparison, in parentheses where the account
+     * converts it to the width the operation is worked in (live-verified). The account stores whole numbers in the
+     * fewest bytes their values need - one, two, four, eight or sixteen - and:
+     * <ul>
+     *   <li>an aggregate of the query's own Aggregate always stands in parentheses in arithmetic, and in a
+     *       comparison unless it is a count: {@code (SUM(T.A)) + 1}, {@code (COUNT(*)) * 2}, {@code COUNT(*) = 1};</li>
+     *   <li>a counting or ranking window - COUNT, ROW_NUMBER, RANK, DENSE_RANK, NTILE - is converted in a sum, a
+     *       difference and a product, and so is what stands beside it: {@code (COUNT(*) OVER ()) + (T.N)};</li>
+     *   <li>a SUM or an AVG window is eight bytes wide, a MAX, a MIN, a LAG, a LEAD, a FIRST_VALUE or a LAST_VALUE
+     *       window as wide as the column it reads, and the narrower operand is converted: {@code (T.A) + SUM(T.A)
+     *       OVER ()}, {@code (MAX(T.A) OVER ()) + T.N5};</li>
+     *   <li>two columns of whole numbers are compared by their stored widths, and both are converted where the
+     *       result needs more than either: {@code (T.N5) + T.N18}, {@code (T.N5) * (T.N5)}.</li>
+     * </ul>
+     * A column of a table holding no value is one byte wide.
+     *
+     * @param operand   the operand
+     * @param converted whether another rule converts it already
+     * @param operator  the operation's first character: '+', '-', '*', '%' or a comparison's
+     * @param other     the operand beside it
+     * @return the operand's text
+     */
+    private String term(final Expression operand, final boolean converted, final char operator,
+                        final Expression other) {
+        if (converted || isLiteral(operand)) {
+            return operand(operand, converted);
+        }
+        final boolean arithmetic = operator == '+' || operator == '-' || operator == '*';
+        final boolean comparison = !arithmetic && operator != '%';
+        if (operand instanceof FunctionCallExpression && isAggregate((FunctionCallExpression) operand)
+                && !isCompound(operand)) {
+            return comparison && isCount((FunctionCallExpression) operand) ? operand(operand, false)
+                : "(" + spell(operand) + ")";
+        }
+        if (arithmetic && (isCountingWindow(operand) || isCountingWindow(other) && !isFloat(operand))) {
+            return operand(operand, true);
+        }
+        final int mine = widthOf(operand);
+        final int theirs = widthOf(other);
+        if (mine == 0 || theirs == 0) {
+            return operand(operand, false);
+        }
+        int needed = Math.max(mine, theirs);
+        final BigInteger[] range = rangeOf(operand);
+        final BigInteger[] beside = rangeOf(other);
+        if (arithmetic && range != null && beside != null) {
+            needed = Math.max(needed, resultBytes(range, beside, operator));
+        }
+        return operand(operand, mine < needed);
+    }
+
+    /** Whether an aggregate is a count, which a comparison leaves as it stands. */
+    private static boolean isCount(final FunctionCallExpression call) {
+        final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+        return "COUNT".equals(name) || "COUNT_IF".equals(name);
+    }
+
+    private boolean isFloat(final Expression expression) {
+        return "FLOAT".equals(familyOf(typeOf(expression)));
+    }
+
+    /** Whether an expression is a counting or a ranking window. */
+    private static boolean isCountingWindow(final Expression expression) {
+        if (!(expression instanceof WindowFunctionExpression)) {
+            return false;
+        }
+        final String name = windowName((WindowFunctionExpression) expression);
+        return "COUNT".equals(name) || "ROW_NUMBER".equals(name) || "RANK".equals(name)
+            || "DENSE_RANK".equals(name) || "NTILE".equals(name);
+    }
+
+    private static String windowName(final WindowFunctionExpression window) {
+        return window.getFunctionName() == null ? "" : window.getFunctionName().toUpperCase(Locale.ROOT);
+    }
+
+    /** The window's one argument where it is a window that answers a value of the column it reads; null otherwise. */
+    private static Expression carriedArgument(final Expression expression) {
+        if (!(expression instanceof WindowFunctionExpression)) {
+            return null;
+        }
+        final WindowFunctionExpression window = (WindowFunctionExpression) expression;
+        final String name = windowName(window);
+        final List<Expression> arguments = window.getArguments();
+        return arguments != null && !arguments.isEmpty() && ("MAX".equals(name) || "MIN".equals(name)
+            || "LAG".equals(name) || "LEAD".equals(name) || "FIRST_VALUE".equals(name) || "LAST_VALUE".equals(name)
+            || "ANY_VALUE".equals(name)) ? arguments.get(0) : null;
+    }
+
+    /**
+     * The bytes an operand is worked in: a whole literal's, a stored whole-number column's, eight for a SUM or an AVG
+     * window and for a sum or a count of the query's Aggregate, a carrying window's or aggregate's argument's; a
+     * column of exact numbers with decimals counts as narrower than eight. Zero where the width is not known.
+     */
+    private int widthOf(final Expression expression) {
+        if (expression instanceof WindowFunctionExpression) {
+            final String name = windowName((WindowFunctionExpression) expression);
+            if ("SUM".equals(name) || "AVG".equals(name)) {
+                return isFloat(expression) ? 0 : 8;
+            }
+            final Expression carried = carriedArgument(expression);
+            return carried == null ? 0 : widthOf(carried);
+        }
+        if (expression instanceof FunctionCallExpression && isAggregate((FunctionCallExpression) expression)) {
+            final FunctionCallExpression call = (FunctionCallExpression) expression;
+            final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+            if ("SUM".equals(name) || "COUNT".equals(name) || "COUNT_IF".equals(name)) {
+                return 8;
+            }
+            return ("MAX".equals(name) || "MIN".equals(name)) && call.getArguments().size() == 1
+                ? widthOf(call.getArguments().get(0)) : 0;
+        }
+        final BigInteger[] range = rangeOf(expression);
+        if (range != null) {
+            return Math.max(storageBytes(range[0]), storageBytes(range[1]));
+        }
+        if (constants != null && expression instanceof ColumnReferenceExpression) {
+            final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
+            if (column != null && column.getStoredTable() != null && positive(scaleOf(column.getType()))) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * The least and the greatest whole number an operand holds: a whole literal's value, a stored whole-number
+     * column's values - zero alone where it holds none - and a carrying window's argument's; null otherwise.
+     */
+    private BigInteger[] rangeOf(final Expression expression) {
+        if (isWholeLiteral(expression)) {
+            final BigInteger value = new BigDecimal(((LiteralExpression) expression).getValue().toString())
+                .toBigInteger();
+            return new BigInteger[] {value, value};
+        }
+        final Expression carried = carriedArgument(expression);
+        if (carried != null) {
+            return rangeOf(carried);
+        }
+        if (constants == null || !(expression instanceof ColumnReferenceExpression)) {
+            return null;
+        }
+        final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
+        final Integer scale = column == null ? null : scaleOf(column.getType());
+        if (scale == null || scale.intValue() != 0 || column.getStoredTable() == null || column.isCompound()) {
+            return null;
+        }
+        final BigInteger[] stored = constants.storedRange(column);
+        return stored != null ? stored : new BigInteger[] {BigInteger.ZERO, BigInteger.ZERO};
+    }
+
+    /** The bytes the result of a sum, a difference or a product over two ranges needs. */
+    private static int resultBytes(final BigInteger[] left, final BigInteger[] right, final char operator) {
+        final BigInteger[] ends;
+        if (operator == '*') {
+            ends = new BigInteger[] {left[0].multiply(right[0]), left[0].multiply(right[1]),
+                left[1].multiply(right[0]), left[1].multiply(right[1])};
+        } else if (operator == '+') {
+            ends = new BigInteger[] {left[0].add(right[0]), left[1].add(right[1])};
+        } else {
+            ends = new BigInteger[] {left[0].subtract(right[1]), left[1].subtract(right[0])};
+        }
+        int bytes = 1;
+        for (final BigInteger end : ends) {
+            bytes = Math.max(bytes, storageBytes(end));
+        }
+        return bytes;
+    }
+
+    /**
+     * Whether a whole-number column beside a whole-number literal in a sum, a difference or a product is converted to
+     * a wider integer, and so stands in parentheses: the account stores a column of whole numbers in the fewest bytes
+     * its values need - one for -128 to 127, then two, four, eight and sixteen - and converts it where the literal,
+     * or the operation's result over the values, needs more. Over 5, 7 and 9, {@code (FZ.ID) + 119} and
+     * {@code (FZ.ID) - 133} but {@code FZ.ID + 118}, and {@code (FZ.ID) * 15} but {@code FZ.ID * 14}
+     * (live-verified).
+     *
+     * @param column       the operand that may be the column
+     * @param literal      the other operand, which may be the literal
+     * @param operator     '+', '-' or '*'
+     * @param literalFirst whether the literal is written first
+     * @return true where the column is converted
+     */
+    private boolean widened(final Expression column, final Expression literal, final char operator,
+                            final boolean literalFirst) {
+        if (constants == null || !(column instanceof ColumnReferenceExpression) || !isWholeLiteral(literal)) {
+            return false;
+        }
+        final PlanColumn resolved = scope == null ? null : scope.resolve((ColumnReferenceExpression) column);
+        final Integer scale = resolved == null ? null : scaleOf(resolved.getType());
+        final BigInteger[] range = scale == null || scale.intValue() != 0 ? null : constants.storedRange(resolved);
+        if (range == null) {
+            return false;
+        }
+        final BigInteger value = new BigDecimal(((LiteralExpression) literal).getValue().toString()).toBigInteger();
+        final BigInteger least;
+        final BigInteger greatest;
+        if (operator == '*') {
+            least = range[0].multiply(value).min(range[1].multiply(value));
+            greatest = range[0].multiply(value).max(range[1].multiply(value));
+        } else if (operator == '+') {
+            least = range[0].add(value);
+            greatest = range[1].add(value);
+        } else if (literalFirst) {
+            least = value.subtract(range[1]);
+            greatest = value.subtract(range[0]);
+        } else {
+            least = range[0].subtract(value);
+            greatest = range[1].subtract(value);
+        }
+        final int stored = Math.max(storageBytes(range[0]), storageBytes(range[1]));
+        return Math.max(storageBytes(value), Math.max(storageBytes(least), storageBytes(greatest))) > stored;
+    }
+
+    /** Whether an expression is a literal whole number written with no point, a long's or a wider one. */
+    private static boolean isWholeLiteral(final Expression expression) {
+        if (!(expression instanceof LiteralExpression)) {
+            return false;
+        }
+        final LiteralExpression literal = (LiteralExpression) expression;
+        return literal.getType() == LiteralType.INTEGER && literal.getValue() instanceof Number
+            || literal.getType() == LiteralType.DECIMAL && literal.getValue() instanceof BigDecimal
+                && ((BigDecimal) literal.getValue()).scale() == 0;
+    }
+
+    /** The bytes a whole number is stored in: 1 for -128 to 127, then 2, 4, 8 and 16. */
+    private static int storageBytes(final BigInteger value) {
+        final int bits = value.bitLength() + 1;
+        return bits <= 8 ? 1 : bits <= 16 ? 2 : bits <= 32 ? 4 : bits <= 64 ? 8 : 16;
     }
 
     /** An operand of an infix operator, in parentheses where it is an operation, a scalar call or converted. */
@@ -770,13 +1018,22 @@ final class PlanExpressionText extends AstPrinterVisitor {
         return converted || isCompound(operand) ? "(" + text + ")" : text;
     }
 
-    /** Whether an expression is an operation or a computed call, which stands in parentheses as an operand. */
-    private boolean isCompound(final Expression expression) {
+    /**
+     * Whether an expression is an operation or a computed call, which stands in parentheses as an operand: a column
+     * that stands for one, a view's or a derived table's, too.
+     *
+     * @param expression the expression
+     * @return true where it is
+     */
+    boolean isCompound(final Expression expression) {
         if (sequenceReads.contains(expression)) {
             return true;
         }
-        if (expression instanceof ColumnReferenceExpression || expression instanceof WindowFunctionExpression
-                || expression instanceof SubqueryExpression) {
+        if (expression instanceof ColumnReferenceExpression) {
+            final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
+            return column != null && column.isCompound();
+        }
+        if (expression instanceof WindowFunctionExpression || expression instanceof SubqueryExpression) {
             return false;
         }
         if (expression instanceof FunctionCallExpression) {
@@ -846,6 +1103,16 @@ final class PlanExpressionText extends AstPrinterVisitor {
         return scale != null && scale.intValue() > 0;
     }
 
+    /**
+     * The decimals of the exact number an expression answers, where the plan can tell them.
+     *
+     * @param expression the expression
+     * @return the decimals, or null for any other value or where they are not known
+     */
+    Integer decimalsOf(final Expression expression) {
+        return scaleOf(expression);
+    }
+
     /** The decimals of an exact number an expression answers; null for any other value or where it is not known. */
     private Integer scaleOf(final Expression expression) {
         if (expression instanceof LiteralExpression) {
@@ -865,6 +1132,17 @@ final class PlanExpressionText extends AstPrinterVisitor {
         if (expression instanceof ColumnReferenceExpression) {
             final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
             return column == null ? null : scaleOf(column.getType());
+        }
+        if (expression instanceof WindowFunctionExpression) {
+            // A window that sums or carries its argument has the argument's decimals; a counting one has none.
+            final WindowFunctionExpression window = (WindowFunctionExpression) expression;
+            if (isCountingWindow(window)) {
+                return Integer.valueOf(0);
+            }
+            final List<Expression> arguments = window.getArguments();
+            return arguments != null && arguments.size() == 1 && !window.isDistinct()
+                && ("SUM".equals(windowName(window)) || carriedArgument(window) != null)
+                ? scaleOf(arguments.get(0)) : null;
         }
         if (expression instanceof FunctionCallExpression) {
             final FunctionCallExpression call = (FunctionCallExpression) expression;

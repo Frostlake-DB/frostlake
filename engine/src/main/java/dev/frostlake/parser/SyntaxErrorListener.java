@@ -2275,6 +2275,17 @@ public class SyntaxErrorListener extends BaseErrorListener {
         // ★ A DYNAMIC TABLE'S COLUMN IT CANNOT READ is refused at the column's name — see DynamicTableColumnLines.
         // ★ A ROW ACCESS POLICY ADDED TO A MATERIALIZED VIEW is refused at its ADD — see MaterializedViewAddLines.
         // ★ A CREATE OR ALTER OF A PRIVACY POLICY is refused at the OR alone — see CreateOrAlterKindLines.
+        // ★ A SEQUENCE'S OPTION AFTER THE FIRST THAT DOES NOT READ WHOLE is refused where it starts, or at the comma
+        // before it — see SequenceOptionLines.
+        // ★ BRACKETS THAT OPEN NO QUERY AFTER A MULTI-TABLE INSERT'S INTO name their first token and the token after
+        // them — see MultiTableInsertLines.
+        final int fault = offendingIndexes.get(0).intValue();
+        return MultiTableInsertLines.lines(spoken, fault,
+            SequenceOptionLines.lines(spoken, fault, linesBeforeSequenceOptions(spoken, lines)));
+    }
+
+    /** The lines of the models read before a sequence's options are (workOutReportedLines). */
+    private List<String> linesBeforeSequenceOptions(final List<Token> spoken, final List<String> lines) {
         return CreateOrAlterKindLines.lines(spoken, offendingIndexes, MaterializedViewAddLines.lines(spoken,
             offendingIndexes, DynamicTableColumnLines.lines(spoken, offendingIndexes,
             PivotCallShapeLines.lines(spoken, offendingIndexes, PackagesPolicyLines.lines(spoken, offendingIndexes,
@@ -2293,6 +2304,50 @@ public class SyntaxErrorListener extends BaseErrorListener {
                 && (firstOffendingStartIndex < 0 || firstOffendingStartIndex >= unknownCharacterAt)) {
             return Collections.singletonList(unknownCharacterLine());
         }
+        // ★ A DECLARE SECTION'S CURSOR OVER TOP ? is refused at each such '?' alone — see DeclaredCursorTopBindLines.
+        final List<String> topBinds = sql == null || firstOnly || !statementParse && !blockReadsOn
+            ? null : DeclaredCursorTopBindLines.lines(defaultChannelTokens());
+        if (topBinds != null) {
+            return topBinds;
+        }
+        // ★ A BLOCK'S EXECUTE IMMEDIATE WHOSE TEXT CLOSES EARLY names the word after it, then its USING's '(' — see
+        // ImmediateStringWordLines.
+        final List<String> earlyClose = sql == null || firstOnly || !statementParse && !blockReadsOn
+            || offendingIndexes.isEmpty() ? null
+            : ImmediateStringWordLines.lines(defaultChannelTokens(), offendingIndexes.get(0).intValue());
+        if (earlyClose != null) {
+            return earlyClose;
+        }
+        // ★ A CASE OR A CAST WRITTEN AS THE FIRST ITEM OF A BLOCK'S SELECT is refused at the token after it — see
+        // BlockKeywordValueLines.
+        final List<String> selectItem = sql == null || firstOnly || !statementParse && !blockReadsOn
+            ? null : BlockKeywordValueLines.selectItemLines(sql);
+        if (selectItem != null) {
+            return selectItem;
+        }
+        // ★ A BLOCK'S VALUE THAT OPENS A BRACKET AND HOLDS NOTHING names the token after the brackets — see
+        // OpenBracketValueLines.
+        final List<String> openBracket = sql == null || firstOnly || !statementParse && !blockReadsOn
+            || offendingIndexes.isEmpty() ? null
+            : OpenBracketValueLines.lines(defaultChannelTokens(), offendingIndexes);
+        if (openBracket != null) {
+            return openBracket;
+        }
+        // ★ A BLOCK'S OBJECT CONSTANT WHOSE KEY IS NO TEXT is told by the statement it stands in — see
+        // BlockObjectConstantLines.
+        final List<String> blockConstant = sql == null || firstOnly || !statementParse && !blockReadsOn
+            ? null : BlockObjectConstantLines.lines(sql, defaultChannelTokens(), offendingIndexes);
+        if (blockConstant != null) {
+            return blockConstant;
+        }
+        // ★ A BLOCK'S PLAIN ASSIGNMENT WHOSE VALUE DOES NOT PARSE is refused at the value's first token and read on
+        // — see BlockAssignmentValueLines. An object constant's key is read first, by BlockObjectConstantLines.
+        final List<String> assignedValue = blockConstant != null || sql == null || firstOnly
+            || !statementParse && !blockReadsOn || offendingIndexes.isEmpty() ? null
+            : BlockAssignmentValueLines.lines(defaultChannelTokens(), offendingIndexes);
+        if (assignedValue != null) {
+            return assignedValue;
+        }
         if (sql != null && statementParse) {
             final List<Token> opening = defaultChannelTokens();
             // ★ A BLOCK'S STATEMENT THAT OPENS WITH A CALL AND IS NO WHOLE CALL STATEMENT, or with a word that opens
@@ -2309,6 +2364,25 @@ public class SyntaxErrorListener extends BaseErrorListener {
                 : ObjectConstantKeyLines.lines(sql, opening, offendingIndexes.get(0).intValue());
             if (objectKey != null) {
                 return objectKey;
+            }
+            // ★ A REPLICATION LISTING'S WITH PRIMARY WITHOUT A NAME AND THE STATEMENT'S END stops at the token there —
+            // see ReplicationPrimaryLines.
+            final List<String> primary = firstOnly ? null : ReplicationPrimaryLines.lines(opening);
+            if (primary != null) {
+                return primary;
+            }
+            // ★ A JOIN WHERE A TABLE IS NAMED tells the token after it twice — see LoneJoinLines.
+            final List<String> loneJoin = offendingIndexes.isEmpty() || firstOnly ? null
+                : LoneJoinLines.lines(opening, offendingIndexes.get(0).intValue());
+            if (loneJoin != null) {
+                return loneJoin;
+            }
+            // ★ A WORD THAT OPENS WHAT MUST FOLLOW - a lone LEFT, a dangling IS, a word after AS - is told as the
+            // account reads it — see DanglingWordLines.
+            final List<String> dangling = offendingIndexes.isEmpty() || firstOnly ? null
+                : DanglingWordLines.lines(opening, offendingIndexes.get(0).intValue());
+            if (dangling != null) {
+                return dangling;
             }
             // A BEGIN before a literal opens no block: see RunInStatementLines.
             final List<String> begun = opening.isEmpty() || opening.get(0).getType() != FrostlakeLexer.BEGIN ? null

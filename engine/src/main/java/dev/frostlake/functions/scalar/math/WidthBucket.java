@@ -21,6 +21,7 @@ import dev.frostlake.types.DecimalText;
 import dev.frostlake.types.NumericType;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.List;
 
 /**
@@ -43,10 +44,12 @@ import java.util.List;
  *   WIDTH_BUCKET(&lt;NUMBER(10,2)&gt;, 0.5, 10.5, 0)  … 50 (min_value) != 1050 (max_value)
  * </pre>
  *
- * <p>Any NULL argument makes the answer NULL, the bucket count included. A FLOAT that is NaN or infinite takes
- * FLOAT arithmetic as the comparisons and the bucket's floor read it: a NaN value is in bucket 1, an infinite one at
- * the end it lies past, a NaN bound turns the range around, and a NaN or infinite count is out of the whole number's
- * range (live-verified).
+ * <p>Any NULL argument makes the answer NULL, the bucket count included. Exact NUMBERs are bucketed exactly, a
+ * value on a bucket boundary being that bucket's first. A FLOAT among the value and the bounds takes FLOAT
+ * arithmetic, {@code count · (value − min) / (max − min)} floored, so {@code WIDTH_BUCKET(0.3::FLOAT, 0, 0.9, 3)}
+ * is 1; a NaN value is in bucket 1, an infinite one at the end it lies past, a NaN bound turns the range around,
+ * and a NaN or infinite count is out of the whole number's range (live-verified). A DECFLOAT among them is held at
+ * the scale its exact neighbours declare before it arrives here (see the evaluator).
  */
 public class WidthBucket extends NumericArgumentFunction {
     public WidthBucket() { super("WIDTH_BUCKET", NumericType.INTEGER); }
@@ -69,6 +72,10 @@ public class WidthBucket extends NumericArgumentFunction {
         final BigDecimal high = DecimalText.parse(args.get(2).toString());
         if (count <= 0 || low.compareTo(high) == 0) {
             throw new RuntimeException(refusal(count, low, high, value));
+        }
+        if (args.get(0) instanceof Double || args.get(1) instanceof Double || args.get(2) instanceof Double) {
+            return Long.valueOf(floatBucket(((Number) args.get(0)).doubleValue(), ((Number) args.get(1)).doubleValue(),
+                ((Number) args.get(2)).doubleValue(), count));
         }
         final boolean reversed = low.compareTo(high) > 0;
         if (reversed) {
@@ -94,7 +101,7 @@ public class WidthBucket extends NumericArgumentFunction {
         return !(arg instanceof Double) || Double.isFinite(((Double) arg).doubleValue());
     }
 
-    /** The bucket in FLOAT arithmetic, for an argument that is NaN or infinite. */
+    /** The bucket in FLOAT arithmetic, for a FLOAT among the value and the bounds. */
     private static long floatBucket(final double value, final double low, final double high, final long count) {
         if (low < high) {
             if (value < low) {
@@ -114,9 +121,17 @@ public class WidthBucket extends NumericArgumentFunction {
         return (long) Math.floor(count * (low - value) / (low - high)) + 1;
     }
 
-    /** How far into the range {@code offset} sits, in buckets, counting from one. */
+    /**
+     * How far into the range {@code offset} sits, in buckets, counting from one: {@code count · offset} and the span
+     * as the scaled integers the account holds them as, one over the other in double arithmetic. A value on a bucket
+     * boundary is the bucket's first, {@code WIDTH_BUCKET(0.3, 0, 0.9, 3)} being 2, and a quotient a hair below a
+     * whole number past double precision rounds onto it (both live-verified).
+     */
     private static long bucketOf(final BigDecimal offset, final BigDecimal span, final long count) {
-        return (long) Math.floor(count * offset.doubleValue() / span.doubleValue()) + 1;
+        final int scale = Math.max(0, Math.max(offset.scale(), span.scale()));
+        final BigInteger scaledOffset = offset.setScale(scale).unscaledValue().multiply(BigInteger.valueOf(count));
+        final BigInteger scaledSpan = span.setScale(scale).unscaledValue();
+        return (long) Math.floor(scaledOffset.doubleValue() / scaledSpan.doubleValue()) + 1;
     }
 
     /** Live's sentence, with the bounds unscaled at the widest scale the three numbers carry. */

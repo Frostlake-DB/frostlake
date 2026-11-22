@@ -16,20 +16,26 @@
 
 package dev.frostlake.functions.scalar.datetime;
 
+import dev.frostlake.executor.SessionZone;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.DateTimeType;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 
 /**
  * ADD_MONTHS(input, n) — shifts a date or timestamp by {@code n} months, preserving end-of-month: an
  * input on the last day of its month lands on the last day of the target month. The result type
  * follows the input — a DATE stays DATE, a TIMESTAMP keeps its time of day, and a VARCHAR is
- * implicitly cast to TIMESTAMP_NTZ (a date-only string becomes midnight). NULL in either argument
- * yields NULL.
+ * implicitly cast to TIMESTAMP_NTZ (a date-only string becomes midnight). A zoned timestamp moves its wall
+ * clock and keeps its flavour, as {@code DATEADD(month, …)} does: a TIMESTAMP_TZ at the offset it was written
+ * with, a TIMESTAMP_LTZ read in the session's zone and given back there (live-verified). NULL in either
+ * argument yields NULL.
  */
 public class AddMonths extends BuiltInFunction {
     /** Registers the function as {@code ADD_MONTHS} returning TIMESTAMP_NTZ. */
@@ -49,7 +55,20 @@ public class AddMonths extends BuiltInFunction {
         if (input instanceof LocalDate) {
             return shiftMonths((LocalDate) input, months);
         }
-        final LocalDateTime dt = SharedFunctionHelpers.toLocalDateTime(input);
+        if (input instanceof ZonedDateTime) {
+            final ZonedDateTime written = (ZonedDateTime) input;
+            return shiftMonths(written.toLocalDateTime(), months).atZone(written.getOffset());
+        }
+        if (input instanceof OffsetDateTime) {
+            final ZoneId zone = SessionZone.current();
+            final LocalDateTime wallClock = ((OffsetDateTime) input).toInstant().atZone(zone).toLocalDateTime();
+            return ZonedDateTime.ofLocal(shiftMonths(wallClock, months), zone, null).toOffsetDateTime();
+        }
+        return shiftMonths(SharedFunctionHelpers.toLocalDateTime(input), months);
+    }
+
+    /** A wall clock shifted by whole months, its time of day kept and its end-of-month rule applied. */
+    private LocalDateTime shiftMonths(final LocalDateTime dt, final long months) {
         return LocalDateTime.of(shiftMonths(dt.toLocalDate(), months), dt.toLocalTime());
     }
 

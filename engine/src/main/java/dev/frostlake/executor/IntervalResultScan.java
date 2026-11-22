@@ -32,7 +32,8 @@ import org.antlr.v4.runtime.ParserRuleContext;
  * alike: "invalid type [CAST(STRIP_NULL_VALUE(GET(RESULT_SCAN_RESULT_SCAN.$1, 0)) AS
  * INTERVAL DAY(9) TO SECOND(9))] for parameter 'TO_INTERVAL_DAY_TIME'". The column is read by its place in the
  * result, counted from 0, whatever its name; the relation is named RESULT_SCAN_ and its alias when it has one
- * (RESULT_SCAN_R), and a column that cannot hold NULL is read without STRIP_NULL_VALUE. Only the bare
+ * (RESULT_SCAN_R), and a column that cannot hold NULL - a NOT NULL column, an interval constant, an operation over
+ * either - is read without STRIP_NULL_VALUE. Only the bare
  * {@code SELECT * FROM TABLE(RESULT_SCAN(…))}, with or without an alias, hands the result back as it is
  * (live-verified).
  */
@@ -66,7 +67,10 @@ final class IntervalResultScan {
         if (interval == null || bareStar(call)) {
             return;
         }
-        final boolean nullable = interval.isNullable() || !interval.isNullabilityKnown();
+        // The projection's judgement of its item - a constant, an operation over what is never NULL and a derived
+        // relation's column of either cannot hold NULL - else the column's own NOT NULL.
+        final boolean nullable = interval.getDerivedNullable() != null ? interval.getDerivedNullable().booleanValue()
+            : interval.isNullable() || !interval.isNullabilityKnown();
         final String read = "GET(RESULT_SCAN_" + (alias == null ? "RESULT_SCAN" : alias) + ".$1, " + place + ")";
         final DataType type = declared(interval);
         throw new RuntimeException(SqlCompilationError.of("invalid type [CAST("

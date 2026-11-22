@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.expressions.GroupingKeys;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.storage.Row;
 
@@ -47,6 +48,14 @@ public interface GroupedExpressionValues {
      * @return the value, or {@link #UNRESOLVED} when this row has no group or the text does not compute
      */
     Object valueOf(Row projectedRow, String expressionText);
+
+    /**
+     * The grouping set a grouped output row was computed for, which GROUPING and GROUPING_ID read.
+     *
+     * @param projectedRow the output row, one per group
+     * @return the set's keys, or null for a row of a plain GROUP BY or one with no group
+     */
+    GroupingKeys groupingKeysOf(Row projectedRow);
 
     /**
      * The relation the groups were formed over — the FROM table the projected rows no longer are.

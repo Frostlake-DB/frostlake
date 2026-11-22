@@ -230,9 +230,39 @@ public final class NumericRangeRefusal {
      * @return whether no NUMBER of that scale could hold it
      */
     public static boolean pastEveryNumber(final BigDecimal value, final int scale) {
-        final BigDecimal atScale = value.scale() == scale ? value : value.setScale(scale, RoundingMode.HALF_UP);
-        return atScale.unscaledValue().abs().compareTo(RAW_MAX) > 0;
+        if (value.signum() != 0 && integerDigits(value) + scale > OVERSIZED_DIGITS) {
+            return true;
+        }
+        return atScale(value, scale).unscaledValue().abs().compareTo(RAW_MAX) > 0;
     }
+
+    /**
+     * A value rounded half up to a scale, without ever writing out the digits of a far exponent: a value whose
+     * first digit stands below the scale's last place by more than one rounds to zero there, so
+     * {@code '1e-999999999'} is 0.00 at scale 2 as {@code '1e-400'} is. A caller rules out a value too large for
+     * any number first ({@link #pastEveryNumber}, {@link #exceeds}).
+     *
+     * @param value the value
+     * @param scale the scale
+     * @return the value at that scale
+     */
+    public static BigDecimal atScale(final BigDecimal value, final int scale) {
+        if (value.scale() == scale) {
+            return value;
+        }
+        if (value.signum() == 0 || integerDigits(value) < -(long) scale - 1) {
+            return BigDecimal.ZERO.setScale(scale);
+        }
+        return value.setScale(scale, RoundingMode.HALF_UP);
+    }
+
+    /** The digits a value has left of its point, negative for a value below one tenth. */
+    private static long integerDigits(final BigDecimal value) {
+        return (long) value.precision() - value.scale();
+    }
+
+    /** More digits than any number at any scale holds, with room: a value past them needs no rounding to judge. */
+    private static final long OVERSIZED_DIGITS = 2L * MAX_PRECISION;
 
     /** The first value no NUMBER holds: ten to the thirty-eighth. */
     private static final BigDecimal NUMBER_LIMIT = BigDecimal.TEN.pow(MAX_PRECISION);
@@ -265,7 +295,10 @@ public final class NumericRangeRefusal {
      * merely carries extra fractional digits rounds into range instead of overflowing.
      */
     public static boolean exceeds(final BigDecimal value, final int precision, final int scale) {
-        final BigDecimal atScale = value.scale() == scale ? value : value.setScale(scale, RoundingMode.HALF_UP);
+        if (value.signum() != 0 && integerDigits(value) > OVERSIZED_DIGITS) {
+            return true;
+        }
+        final BigDecimal atScale = atScale(value, scale);
         return atScale.precision() - atScale.scale() > precision - scale;
     }
 

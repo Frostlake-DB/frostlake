@@ -31,7 +31,7 @@ public class Getdate extends BuiltInFunction {
     public Getdate() { super("GETDATE", DateTimeType.TIMESTAMP_LTZ); }
 
     @Override
-    public Object evaluate(final List<Object> args) { return StatementClock.now(); }
+    public Object evaluate(final List<Object> args) { return StatementClock.nowInSession(); }
 
     @Override
     public int getMinArgCount() { return 0; }

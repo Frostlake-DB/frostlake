@@ -20,7 +20,6 @@ import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.DecimalOriginNode;
 import dev.frostlake.values.TypedVectorNode;
 import dev.frostlake.values.UuidTextNode;
-import dev.frostlake.values.VariantText;
 import dev.frostlake.values.VariantUndefined;
 import dev.frostlake.values.VariantValue;
 
@@ -116,19 +115,10 @@ final class JsonPathExtractor {
         // (live-verified).
         if (DecfloatTextNode.holds(node)) return VariantValue.ofNode(node);
         if (node.isTextual()) {
-            // A STRING whose content itself looks like JSON structure ('["ROLE"]', '{"a":1}') keeps its
-            // QUOTED JSON form — unquoting it made a string value indistinguishable from a real
-            // array/object's JSON text, so ::ARRAY wrongly PARSED it (Snowflake's ::ARRAY, which is
-            // TO_ARRAY, wraps a string into a one-element array instead). Plain strings unwrap as before.
-            // The literal string "null" keeps the quoted form for the same reason: bare "null" IS this
-            // engine's JSON-null marker, and unquoting turned a real string value into a null member
-            // when re-embedded (OBJECT_AGG over {"v": "null"} must keep the STRING, as Snowflake does).
-            final String text = node.asText();
-            final String trimmedText = text.trim();
-            if (trimmedText.startsWith("[") || trimmedText.startsWith("{") || "null".equals(text)) {
-                return VariantText.standard(node);
-            }
-            return text;
+            // A STRING whose content looks like JSON structure or is the text null stays a VARIANT string
+            // (see VariantValue.ofStringMember): never parsed by ::ARRAY, never a JSON null, and its own
+            // unquoted text wherever it is read as a VARCHAR.
+            return VariantValue.ofStringMember(node);
         }
         if (node.isBoolean()) return node.asBoolean();
         if (node.isLong() || node.isInt()) return node.asLong();

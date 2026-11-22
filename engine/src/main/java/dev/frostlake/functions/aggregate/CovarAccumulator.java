@@ -23,21 +23,22 @@ public class CovarAccumulator implements AggregateFunction.Accumulator, PairStat
     private final DecfloatPairStatistics decfloatPairs = new DecfloatPairStatistics();
     private boolean decfloat;
     private final boolean sample;
-    public long n = 0;
-    public double sumX = 0;
-    public double sumY = 0;
-    public double sumXY = 0;
+    /** The pairs as doubles (see PairMoments). */
+    private final PairMoments moments = new PairMoments();
 
     public CovarAccumulator(final boolean sample) { this.sample = sample; }
 
     @Override
     public void accumulate(final Object v) {}
 
-    public void accumulate(final double x, final double y) {
-        n++;
-        sumX += x;
-        sumY += y;
-        sumXY += x * y;
+    /**
+     * Accumulate one non-null pair.
+     *
+     * @param y the first argument's value
+     * @param x the second argument's value
+     */
+    public void accumulate(final double y, final double x) {
+        moments.add(y, x);
     }
 
     @Override
@@ -60,25 +61,23 @@ public class CovarAccumulator implements AggregateFunction.Accumulator, PairStat
         if (decfloat) {
             return decfloatPairs.covariance(sample);
         }
-        final long denom = sample ? n - 1 : n;
-        if (denom <= 0) return null;
-        return (sumXY - sumX * sumY / n) / denom;
+        final long denom = sample ? moments.count() - 1 : moments.count();
+        if (denom <= 0) {
+            return null;
+        }
+        return moments.centeredProducts() / denom;
     }
 
     @Override
     public void reset() {
         decfloatPairs.reset();
-        n = 0;
-        sumX = sumY = sumXY = 0;
+        moments.reset();
     }
 
     @Override
     public void merge(final AggregateFunction.Accumulator other) {
         final CovarAccumulator o = (CovarAccumulator) other;
         decfloatPairs.merge(o.decfloatPairs);
-        n += o.n;
-        sumX += o.sumX;
-        sumY += o.sumY;
-        sumXY += o.sumXY;
+        moments.merge(o.moments);
     }
 }
