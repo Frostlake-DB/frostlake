@@ -18,6 +18,7 @@ package dev.frostlake.functions.aggregate;
 
 import dev.frostlake.executor.AggregateRangeRefusal;
 import dev.frostlake.executor.NumericRangeRefusal;
+import dev.frostlake.executor.expressions.ConstantProductFold;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -39,7 +40,9 @@ import java.math.RoundingMode;
  * {@code (Σx)²} when the statistic is read; a running sum that leaves its carrier is a SUM aggregate's overflow,
  * which a window with an ORDER BY reports in its own words. The difference is then divided: below a scale of twelve
  * by a rounding division whose quotient must fit the carrier at its own scale, and from twelve on by a plain one,
- * whose dividend must fit 38 digits and is refused in its own digits otherwise (live-verified).
+ * whose dividend must fit 38 digits and is refused in its own digits otherwise (live-verified). The square of an
+ * argument the planner reads as a constant is folded before all that, as a product of constants is (see
+ * {@link ConstantProductFold}).
  */
 public final class ExactMoments {
 
@@ -56,6 +59,7 @@ public final class ExactMoments {
     private BigDecimal sum = BigDecimal.ZERO;
     private BigDecimal sumOfSquares = BigDecimal.ZERO;
     private long inexact;
+    private PinnedArgument foldedSquares;
 
     /**
      * Folds one value in: a value of no exact type is counted and leaves the moments inexact.
@@ -68,6 +72,13 @@ public final class ExactMoments {
         if (number == null) {
             inexact++;
             return;
+        }
+        if (foldedSquares != null) {
+            final String refusal = ConstantProductFold.refusal(number, number,
+                productScale(number.scale(), number.scale()));
+            if (refusal != null && foldedSquares.isPinned()) {
+                throw new RuntimeException(refusal);
+            }
         }
         final BigDecimal square = product(number, number);
         sum = sum.add(number);
@@ -102,6 +113,16 @@ public final class ExactMoments {
         sumOfSquares = sumOfSquares.add(other.sumOfSquares);
         inexact += other.inexact;
         requireSumsFit();
+    }
+
+    /**
+     * Says whether the series is a constant to the planner, whose square it folds while the statement compiles
+     * and refuses as a text the product's type cannot hold (see {@link ConstantProductFold}); kept over a reset.
+     *
+     * @param folded says whether the squares are folded, or null where they never are
+     */
+    public void setFoldedSquares(final PinnedArgument folded) {
+        this.foldedSquares = folded;
     }
 
     /** The values folded in. */

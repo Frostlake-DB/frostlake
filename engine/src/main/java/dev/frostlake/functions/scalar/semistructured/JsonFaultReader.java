@@ -60,7 +60,11 @@ import java.util.Set;
  * one another across lines or on one line, a comma may part two of them, and a comma where a record should start
  * is a record of its own, a JSON null. Under STRIP_OUTER_ARRAY every top-level array is stripped; its records need
  * no comma between them, an element a comma leaves empty is a null record, and the file may end before its
- * closing bracket. A keyword reads in any case, and a string may be single-quoted.
+ * closing bracket. A keyword reads in any case, and a string may be single-quoted. A record that is a number or a
+ * keyword ends one character past its last, so a line feed straight after it starts the next record's line.
+ *
+ * <p>CHECK_JSON asks for the point rule too ({@link #checkedFaultOf}): a point with no digit on either side and no
+ * exponent after it is {@code not a number: '.'} unless a minus sign leads it, where PARSE_JSON reads it as zero.
  *
  * <p>THE POSITION IS 1-BASED and falls in one of two places. A fault about a TOKEN that was read
  * reports the index just PAST it — a five-character keyword is pos 6, and a document that simply ran
@@ -89,6 +93,10 @@ final class JsonFaultReader {
     private boolean outerArrayStripped;
     /** Whether a staged file's records are read, which takes a keyword in any case. */
     private boolean readsRecords;
+    /** Whether a point with no digit is refused wherever it stands, as CHECK_JSON reads a document. */
+    private boolean pointsChecked;
+    /** Whether the fault found is the point rule's. */
+    private boolean pointFault;
     /** The objects and arrays open around the value being read. */
     private int depth;
     /** The records read whole, and the line the next one starts on. */
@@ -193,6 +201,10 @@ final class JsonFaultReader {
             if (!stripped) {
                 spans.add(new int[] {start, at});
                 recordRead();
+                if (first != '{' && first != '[' && first != '"' && first != '\'' && !atEnd()) {
+                    // A number or a keyword ends one character past its last.
+                    recordLine = lineOf(at + 1);
+                }
             }
             skipWhitespace();
             if (stripped && !atEnd()) {
@@ -291,6 +303,25 @@ final class JsonFaultReader {
         return next == '{' || next == '[' || next == '"'
             ? "more than one document in the input"
             : "garbage after valid input document";
+    }
+
+    /**
+     * The fault CHECK_JSON names for a point no digit stands beside, or null where the document holds none before
+     * its first other fault: {@code [.]} is {@code not a number: '.', pos 3}, where {@code [-.]} and {@code [.e1]}
+     * read as zero (live-verified).
+     *
+     * @param document the document as written
+     * @return the fault, or null
+     */
+    static String pointFaultOf(final String document) {
+        final JsonFaultReader reader = new JsonFaultReader(document);
+        reader.pointsChecked = true;
+        reader.skipWhitespace();
+        if (reader.atEnd()) {
+            return null;
+        }
+        final String fault = reader.value();
+        return reader.pointFault ? fault : null;
     }
 
     /** One value, leaving the cursor past it. */
@@ -551,11 +582,23 @@ final class JsonFaultReader {
                 return "stray minus sign, " + placed(at);
             }
             if (!isDigit(next) && next != '.' && isWordCharacter(next)) {
-                // A word straight after its sign is one word with it; past a blank it is a word of its own.
+                // A word straight after its sign is one word with it; past a blank a minus still leads the word,
+                // where a plus stands apart from it.
                 if (at == afterSign) {
                     at = start;
+                    return keyword("");
                 }
-                return keyword();
+                if (sign == '+') {
+                    final int wordAt = at;
+                    final String fault = keyword("");
+                    final String word = text.substring(wordAt, at);
+                    if (fault == null && (word.equals("true") || word.equals("false") || word.equals("null"))) {
+                        // A keyword takes no sign.
+                        return "invalid sign before keyword \"" + word + "\", " + placed(at);
+                    }
+                    return fault;
+                }
+                return keyword("-");
             }
             if (!isDigit(next) && next != '.') {
                 // A sign with nothing to sign, reported at what stands after it.
@@ -566,12 +609,19 @@ final class JsonFaultReader {
         if (hex != null) {
             return hex.isEmpty() ? null : hex;
         }
+        final int digitsAt = at;
         skipDigits();
         if (!atEnd() && text.charAt(at) == '.') {
             at++;
             skipDigits();
-            if (at == start + 1 && readsRecords && depth > 0) {
-                // A staged file's reader takes no point without a digit, where a document's reads zero.
+            if (at == digitsAt + 1 && sign != '-' && readsRecords && depth > 0) {
+                // A staged file's reader takes no point without a digit, unless a minus leads it, where a
+                // document's reads zero.
+                return "not a number: '.', " + placed(at);
+            }
+            if (pointsChecked && sign != '-' && at == digitsAt + 1
+                    && (atEnd() || text.charAt(at) != 'e' && text.charAt(at) != 'E')) {
+                pointFault = true;
                 return "not a number: '.', " + placed(at);
             }
         }
@@ -581,7 +631,7 @@ final class JsonFaultReader {
                 at++;
             }
             if (atEnd() || !isDigit(text.charAt(at))) {
-                return "missing decimal exponent digits: '" + text.substring(start, at)
+                return "missing decimal exponent digits: '" + literal(start, digitsAt)
                     + "', " + placed(at);
             }
             skipDigits();
@@ -590,10 +640,22 @@ final class JsonFaultReader {
             while (!atEnd() && continuesANumber(text.charAt(at))) {
                 at++;
             }
-            return "garbage in the numeric literal: " + text.substring(start, at)
+            return "garbage in the numeric literal: " + literal(start, digitsAt)
                 + (atEnd() ? " " : String.valueOf(text.charAt(at))) + ", " + placed(at);
         }
         return null;
+    }
+
+    /**
+     * A numeric literal read up to the cursor as a sentence quotes it: the blanks between its sign and its digits
+     * left out ({@code - 0x10} is quoted {@code -0x10}).
+     *
+     * @param start    where the literal began, its sign included
+     * @param digitsAt where its digits begin
+     */
+    private String literal(final int start, final int digitsAt) {
+        final String digits = text.substring(digitsAt, at);
+        return digitsAt > start ? text.charAt(start) + digits : digits;
     }
 
     /**
@@ -662,6 +724,15 @@ final class JsonFaultReader {
 
     /** A bare word: one of the four JSON keywords, or a fault naming it. */
     private String keyword() {
+        return keyword("");
+    }
+
+    /**
+     * A bare word, a sign parted from it by blanks written before it.
+     *
+     * @param sign the sign that leads the word past a blank, or the empty string
+     */
+    private String keyword(final String sign) {
         final int start = at;
         // ★ A VALUE-position word keeps a LEADING SIGN — {@code -a} is one word, reported whole —
         // where a NAME may not contain one at all. The two positions read different character sets,
@@ -672,7 +743,7 @@ final class JsonFaultReader {
         while (!atEnd() && isWordCharacter(text.charAt(at))) {
             at++;
         }
-        final String word = text.substring(start, at);
+        final String word = sign + text.substring(start, at);
         if (word.equals("true") || word.equals("false") || word.equals("null")
                 || word.equals("undefined") || readsRecords && isLenientKeyword(word)) {
             return null;
@@ -684,8 +755,9 @@ final class JsonFaultReader {
     private static boolean isLenientKeyword(final String word) {
         final String lower = word.toLowerCase(Locale.ROOT);
         final String unsigned = lower.startsWith("-") || lower.startsWith("+") ? lower.substring(1) : lower;
+        // A negative NaN is refused where a positive one is read.
         return lower.equals("true") || lower.equals("false") || lower.equals("null") || lower.equals("undefined")
-            || unsigned.equals("nan") || unsigned.equals("inf") || unsigned.equals("infinity");
+            || lower.equals("nan") || lower.equals("+nan") || unsigned.equals("inf") || unsigned.equals("infinity");
     }
 
     private String incomplete(final String container) {

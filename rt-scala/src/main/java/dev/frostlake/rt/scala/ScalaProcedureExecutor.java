@@ -105,12 +105,14 @@ public final class ScalaProcedureExecutor {
             args[0] = FrostlakeSnowparkBridge.session(session);
         }
         // Each argument as the class the handler declares for it, as a Java handler's are.
-        final Object[] adapted = HandlerArguments.adapt(target.getParameterTypes(), args, procedure.getParameters(),
-            procedure.getName(), procedure.getHandler());
+        final Object[] adapted = ScalaValues.toScala(target.getParameterTypes(),
+            HandlerArguments.adapt(ScalaValues.javaClasses(target.getParameterTypes()), args,
+                procedure.getParameters(), procedure.getName(), procedure.getHandler()));
         UdfConsoleCapture.enter();
         try {
-            // A Scala DataFrame a table procedure hands back is read as the Java API's under it.
-            return FrostlakeSnowparkBridge.javaResult(target.invoke(instance, adapted));
+            // A Scala DataFrame a table procedure hands back is read as the Java API's under it, a Scala Map as a
+            // java.util.Map.
+            return ScalaValues.toJava(FrostlakeSnowparkBridge.javaResult(target.invoke(instance, adapted)));
         } catch (final InvocationTargetException e) {
             // What the handler raised reaches SQL as its report, as a function's handler's does (live-verified),
             // a statement it ran through its session that failed included.

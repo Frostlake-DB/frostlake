@@ -943,7 +943,7 @@ public final class AggregateNumerics {
     private static int compareByOwnType(final Object left, final Object right) {
         if (left instanceof VariantValue && right instanceof VariantValue) {
             // The one VARIANT order: numbers as numbers, text as text, kinds apart — see VariantOrder.
-            return ((VariantValue) left).compareTo((VariantValue) right);
+            return ((VariantValue) left).sortOrder((VariantValue) right);
         }
         return ValueComparisons.compareValues(left, right);
     }

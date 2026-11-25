@@ -30,6 +30,7 @@ import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.ProjectionSlot;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.RecursiveViewChain;
+import dev.frostlake.executor.RowPatternDefinitionReferences;
 import dev.frostlake.executor.RowSelectItemException;
 import dev.frostlake.executor.SelectItemAccessors;
 import dev.frostlake.executor.SqlCompilationError;
@@ -355,6 +356,8 @@ public class CreateRelationalHandler implements CommandHandler {
         // A DEFINITION may carry no bind at all, and the sentence is the definition's own rather than
         // the unset-bind refusal an ordinary statement gives.
         BindsInDefinition.reject(ctx.selectStatement());
+        // A row pattern definition reading a column it may not is refused while the view is created.
+        RowPatternDefinitionReferences.reject(ctx.selectStatement(), queryExecutor.getFunctionRegistry());
         rejectSourcelessCopyGrants(ctx);
 
         // The replaced view's privileges, set aside while its replacement is made: OR ALTER keeps them all, COPY
@@ -471,6 +474,11 @@ public class CreateRelationalHandler implements CommandHandler {
                 // dedicated commentClause can match — read it from there so it is not dropped.
                 for (final FrostlakeParser.ViewPropertyContext property : ctx.viewProperty()) {
                     if ("COMMENT".equalsIgnoreCase(property.propertyName().getText())
+                            && property.parenOptionList() != null) {
+                        // A list of properties is taken, the comment holding the parser's word for it.
+                        comment = ListValues.PROPERTY_LIST;
+                    } else if ("COMMENT".equalsIgnoreCase(property.propertyName().getText())
+                            && property.copyOptionValue() != null
                             && property.copyOptionValue().STRING_LITERAL() != null) {
                         comment = ddl.extractStringLiteral(property.copyOptionValue().STRING_LITERAL());
                     }
@@ -480,7 +488,8 @@ public class CreateRelationalHandler implements CommandHandler {
             // change tracking cannot follow is refused (live-verified, see ChangeTrackedQuery).
             for (final FrostlakeParser.ViewPropertyContext property : ctx.viewProperty()) {
                 if ("CHANGE_TRACKING".equalsIgnoreCase(property.propertyName().getText())) {
-                    final boolean tracked = "TRUE".equalsIgnoreCase(property.copyOptionValue().getText());
+                    final boolean tracked = property.copyOptionValue() != null
+                        && "TRUE".equalsIgnoreCase(property.copyOptionValue().getText());
                     final String untracked = tracked ? ChangeTrackedQuery.refusal(catalog,
                         queryExecutor.getFunctionRegistry(), ctx.selectStatement()) : null;
                     if (untracked != null) {
@@ -1071,7 +1080,9 @@ public class CreateRelationalHandler implements CommandHandler {
                 head.append(" COMMENT = ").append(opt.STRING_LITERAL().getText());
             }
         }
-        dt.setCreateText(head.toString());
+        final int start = ctx.getStart().getStartIndex();
+        dt.setCreateText(head.toString(), ctx.dynamicTableName().getStart().getStartIndex() - start,
+            ctx.dynamicTableName().getStop().getStopIndex() + 1 - start);
         final int query = ctx.children.indexOf(ctx.selectStatement());
         final Token as = ((TerminalNode) ctx.getChild(query - 1)).getSymbol();
         dt.setBodyText(input.getText(Interval.of(as.getStartIndex(), ctx.selectStatement().getStop().getStopIndex())));
@@ -1236,7 +1247,9 @@ public class CreateRelationalHandler implements CommandHandler {
     /**
      * CREATE DYNAMIC TABLE ... CLONE: a new dynamic table with the source's definition, settings and clustering
      * key. The clone starts suspended, and so does its automatic reclustering; a target lag or a warehouse the
-     * statement gives replaces the source's. A point in time is accepted: the clone's rows come from its query.
+     * statement gives replaces the source's. The clone holds the rows of the source's last refresh, so a read of it
+     * answers them until it refreshes itself, and its CREATE re-prints the source's under the clone's name
+     * (live-verified). A point in time is accepted: the clone's rows come from its query.
      */
     private Object cloneDynamicTable(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
         final String qualifiedName = queryExecutor.createdObjectName(ctx);
@@ -1244,6 +1257,10 @@ public class CreateRelationalHandler implements CommandHandler {
         final String[] sourceParts = catalog.withoutAccount(queryExecutor.copySourceParts(ctx), 3);
         final Schema sourceSchema = dynamicTableSchema(sourceParts);
         final String sourceName = sourceParts[sourceParts.length - 1];
+        if (!sourceSchema.hasDynamicTable(sourceName) && sourceSchema.hasTable(sourceName)) {
+            throw new RuntimeException(SqlCompilationError.of(
+                "Invalid operation Cannot clone a dynamic table from a table."));
+        }
         if (!sourceSchema.hasDynamicTable(sourceName)) {
             // A missing source is named as an object: bare when it was written bare, else by its full path.
             throw new RuntimeException(SqlCompilationError.doesNotExist("Object", sourceParts.length == 1
@@ -1265,6 +1282,10 @@ public class CreateRelationalHandler implements CommandHandler {
                 + "' already exists."));
         }
         final DynamicTable clone = source.copyAs(dtName);
+        clone.renameInCreateText(SqlIdentifiers.spellCanonical(dtName));
+        if (ctx.timeTravelClause() == null) {
+            clone.carryRefreshOf(source);
+        }
         for (final FrostlakeParser.DynamicTableCloneOptionContext option : ctx.dynamicTableCloneOption()) {
             if (option.TARGET_LAG() != null) {
                 clone.setTargetLag(option.DOWNSTREAM() != null ? "DOWNSTREAM"

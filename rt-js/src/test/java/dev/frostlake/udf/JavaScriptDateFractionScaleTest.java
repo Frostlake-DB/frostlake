@@ -22,8 +22,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * A JavaScript Date is a TIMESTAMP_LTZ(3): a session output format's FF without a digit count prints three digits of
- * it, in a procedure's VARIANT answer and a function's alike, while a procedure whose answer is declared TIMESTAMP_LTZ
- * prints its type's nine (live-verified).
+ * it, in a procedure's VARIANT answer and a function's alike, a member read back typed as well, while a procedure
+ * whose answer is declared TIMESTAMP_LTZ prints its type's nine (live-verified).
  */
 public class JavaScriptDateFractionScaleTest extends MeasuredCellsTestSupport {
 
@@ -45,6 +45,7 @@ public class JavaScriptDateFractionScaleTest extends MeasuredCellsTestSupport {
                     "006|006\"}"},
                 {"CALL ffd() ->> SELECT SPLIT_PART($1::VARCHAR, '.', 2) FROM $1", "006"},
                 {"SELECT SPLIT_PART(fff()::VARCHAR, '.', 2), SPLIT_PART(TO_JSON(fff()), '.', 2)", "006\"}|006\"}"},
+                {"SELECT SPLIT_PART(fff():t::VARCHAR, '.', 2), SPLIT_PART(TO_VARCHAR(fff():t), '.', 2)", "006|006"},
                 {"CALL ffs() ->> SELECT SPLIT_PART($1::VARCHAR, '.', 2) FROM $1", "006000000"},
             });
         } finally {

@@ -57,6 +57,7 @@ public class SubqueryMemo {
     private final Map<String, ExpressionCollation[]> keyCollations = new HashMap<>();
     private final Set<String> correlated = new HashSet<>();
     private final Set<String> redrawn = new HashSet<>();
+    private final Map<String, Boolean> computedOnceVerdicts = new HashMap<>();
 
     /** The cached result of a proven-uncorrelated subquery, or {@code null} if not (yet) cached. */
     public List<ResultSet> cachedResult(final String subquery) {
@@ -180,5 +181,22 @@ public class SubqueryMemo {
      */
     public void recordKeyCollations(final String subquery, final ExpressionCollation[] collations) {
         keyCollations.put(subquery, collations);
+    }
+
+    /**
+     * @param copy a copy's residual key (see {@link SubqueryEvaluator})
+     * @return whether its rows are computed once for the statement, false where it runs for each row, or null when
+     *         not yet judged in this statement
+     */
+    public Boolean cachedComputedOnceVerdict(final String copy) {
+        return computedOnceVerdicts.get(copy);
+    }
+
+    /**
+     * @param copy         a copy's residual key
+     * @param computedOnce whether its rows are computed once for the statement
+     */
+    public void recordComputedOnceVerdict(final String copy, final boolean computedOnce) {
+        computedOnceVerdicts.put(copy, computedOnce);
     }
 }

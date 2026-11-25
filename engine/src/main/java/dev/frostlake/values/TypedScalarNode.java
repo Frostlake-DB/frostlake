@@ -16,6 +16,9 @@
 
 package dev.frostlake.values;
 
+import dev.frostlake.functions.scalar.FractionScale;
+
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.StringNode;
 
 /**
@@ -44,9 +47,25 @@ public final class TypedScalarNode extends StringNode {
 
     private final transient Object value;
 
+    /** The fraction digits of the time or timestamp's type, or -1 where none is known (see FractionScale). */
+    private final int scale;
+
     public TypedScalarNode(final String text, final Object value) {
+        this(text, value, -1);
+    }
+
+    /**
+     * A member that also keeps the scale of its time or timestamp type, which a bare FF of the session's output format
+     * prints once the member is read back and rendered as text.
+     *
+     * @param text  the member's JSON text
+     * @param value the typed value
+     * @param scale the fraction digits of its type, or -1 where none is known
+     */
+    public TypedScalarNode(final String text, final Object value, final int scale) {
         super(text);
         this.value = value;
+        this.scale = scale;
     }
 
     /** The typed runtime value this member was built from (a BinaryValue, LocalDate, LocalTime, …). */
@@ -64,8 +83,40 @@ public final class TypedScalarNode extends StringNode {
         return this;
     }
 
-    /** The typed value of {@code node} when it carries one, else null. */
+    /**
+     * Whether a typed member sits anywhere in {@code node}: it prints as the string of its text and still
+     * differs from that string, so two variants of the same text are not yet known to be equal.
+     */
+    public static boolean anywhereIn(final JsonNode node) {
+        if (node instanceof TypedScalarNode) {
+            return true;
+        }
+        if (node == null || !node.isContainer()) {
+            return false;
+        }
+        for (final JsonNode member : node) {
+            if (anywhereIn(member)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The fraction digits of the member's time or timestamp type, or -1 where none is known. */
+    public int scale() {
+        return scale;
+    }
+
+    /**
+     * The typed value of {@code node} when it carries one, else null. A time or timestamp read back this way keeps the
+     * scale of its type for its later rendering as text (see FractionScale#carry).
+     */
     public static Object typedValueOf(final Object node) {
-        return node instanceof TypedScalarNode ? ((TypedScalarNode) node).typedValue() : null;
+        if (!(node instanceof TypedScalarNode)) {
+            return null;
+        }
+        final TypedScalarNode typed = (TypedScalarNode) node;
+        FractionScale.carry(typed.value, typed.scale);
+        return typed.value;
     }
 }

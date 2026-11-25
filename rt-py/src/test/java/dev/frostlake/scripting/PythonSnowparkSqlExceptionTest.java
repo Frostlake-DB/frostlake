@@ -85,4 +85,49 @@ public class PythonSnowparkSqlExceptionTest extends MeasuredCellsTestSupport {
             + "|  in function PU960 with handler run",
             refusal.substring(refusal.lastIndexOf("snowflake.snowpark.exceptions.")));
     }
+
+    @Test
+    public void theExceptionCarriesTheRefusalsVendorCodeAndWordings() {
+        engine.execute("USE SCHEMA test_db.test_schema");
+        engine.execute("CREATE OR REPLACE PROCEDURE pa960(q VARCHAR) RETURNS VARCHAR LANGUAGE PYTHON "
+            + "RUNTIME_VERSION = '3.11' PACKAGES = ('snowflake-snowpark-python') HANDLER = 'run' AS $$\n"
+            + "import re\n"
+            + "from snowflake.snowpark.exceptions import SnowparkSQLException\n"
+            + "def run(session, q):\n"
+            + "    try:\n"
+            + "        session.sql(q).collect()\n"
+            + "        return 'ok'\n"
+            + "    except SnowparkSQLException as e:\n"
+            + "        out = []\n"
+            + "        for a in ('error_code', 'sql_error_code', 'sfqid', 'query', 'message', 'raw_message'):\n"
+            + "            v = getattr(e, a, '<none>')\n"
+            + "            out.append(a + '=' + type(v).__name__ + ':' + str(v))\n"
+            + "        out.append('args=' + repr(e.args))\n"
+            + "        out.append('dir=' + ','.join(x for x in dir(e) if not x.startswith('__')))\n"
+            + "        return re.sub('" + QID + "', '<QID>', ' # '.join(out))\n"
+            + "$$");
+        final String dir = " # dir=_pretty_msg,add_note,args,conn_error,debug_context,error_code,message,query,"
+            + "raw_message,sfqid,sql_error_code,telemetry_message,with_traceback";
+        assertAnswer("error_code=str:1304 # sql_error_code=int:100051 # sfqid=str:<QID> # query=str:SELECT 1/0 # "
+            + "message=str:100051 (22012): Division by zero # raw_message=str:Division by zero # "
+            + "args=('100051 (22012): Division by zero',)" + dir, "CALL pa960('SELECT 1/0')");
+        assertAnswer("error_code=str:1304 # sql_error_code=int:2003 # sfqid=str:<QID> # query=str:SELECT * FROM "
+            + "nosuch960 # message=str:002003 (42S02): SQL compilation error: | Object 'NOSUCH960' does not exist or "
+            + "not authorized. This executable runs with owner's rights. The owner role <ROLE> must have at least "
+            + "one privilege granted on TABLE NOSUCH960. # raw_message=str:SQL compilation error: | Object "
+            + "'NOSUCH960' does not exist or not authorized. This executable runs with owner's rights. The owner "
+            + "role <ROLE> must have at least one privilege granted on TABLE NOSUCH960. # args=(\"002003 (42S02): "
+            + "SQL compilation error:\\nObject 'NOSUCH960' does not exist or not authorized. This executable runs "
+            + "with owner's rights. The owner role <ROLE> must have at least one privilege granted on TABLE "
+            + "NOSUCH960.\",)" + dir, "CALL pa960('SELECT * FROM nosuch960')");
+        assertAnswer("error_code=str:1304 # sql_error_code=int:1003 # sfqid=str:<QID> # query=str:SELEC 1 # "
+            + "message=str:001003 (42000): SQL compilation error: | syntax error line 1 at position 0 unexpected "
+            + "'SELEC'. # raw_message=str:SQL compilation error: | syntax error line 1 at position 0 unexpected "
+            + "'SELEC'. # args=(\"001003 (42000): SQL compilation error:\\nsyntax error line 1 at position 0 "
+            + "unexpected 'SELEC'.\",)" + dir, "CALL pa960('SELEC 1')");
+        assertAnswer("error_code=str:1304 # sql_error_code=int:100038 # sfqid=str:<QID> # query=str:SELECT CAST('x' "
+            + "AS INT) # message=str:100038 (22018): Numeric value 'x' is not recognized # raw_message=str:Numeric "
+            + "value 'x' is not recognized # args=(\"100038 (22018): Numeric value 'x' is not recognized\",)" + dir,
+            "CALL pa960('SELECT CAST(''x'' AS INT)')");
+    }
 }

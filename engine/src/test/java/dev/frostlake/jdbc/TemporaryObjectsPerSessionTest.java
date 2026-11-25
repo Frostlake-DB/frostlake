@@ -40,7 +40,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * files their own, and one above a permanent stage hides it from its session alone; a session swaps two of its own
  * temporary tables. INFORMATION_SCHEMA.TABLES lists a temporary table to its own
  * session only, where INFORMATION_SCHEMA.VIEWS and FILE_FORMATS list every session's. A temporary file format is its
- * session's alone too, and ends with it.
+ * session's alone too, and ends with it: two sessions may each hold one of a name, and one above a permanent format
+ * hides it from its session alone, which drops its own first.
  */
 public class TemporaryObjectsPerSessionTest extends BaseJdbcTest {
 
@@ -258,6 +259,82 @@ public class TemporaryObjectsPerSessionTest extends BaseJdbcTest {
         try (Connection later = another(); Statement c = later.createStatement()) {
             assertSteps(c, c, new String[][] {
                 {"A", "SHOW FILE FORMATS LIKE 'TFF2' IN SCHEMA test_db.public", "0 rows"},
+            });
+        }
+    }
+
+    @Test
+    public void twoSessionsEachHoldATemporaryFileFormatOfOneName() throws SQLException {
+        try (Connection first = another(); Connection second = another();
+             Statement a = first.createStatement(); Statement b = second.createStatement()) {
+            final String delimiter = "SELECT \"property_value\" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))"
+                + " WHERE \"property\" = 'FIELD_DELIMITER'";
+            assertSteps(a, b, new String[][] {
+                {"A", "CREATE TEMPORARY FILE FORMAT tff3 TYPE = CSV FIELD_DELIMITER = '|'", "OK"},
+                {"B", "CREATE TEMPORARY FILE FORMAT tff3 TYPE = CSV FIELD_DELIMITER = ';'", "OK"},
+                {"A", "DESCRIBE FILE FORMAT tff3", "OK"},
+                {"A", delimiter, "|"},
+                {"B", "DESCRIBE FILE FORMAT tff3", "OK"},
+                {"B", delimiter, ";"},
+                {"A", "SHOW FILE FORMATS LIKE 'TFF3' IN SCHEMA test_db.public", "1 rows"},
+                {"B", "SELECT COUNT(*) FROM test_db.information_schema.file_formats WHERE file_format_name = 'TFF3'",
+                    "2"},
+                {"B", "DROP FILE FORMAT tff3", "OK"},
+                {"A", "DESCRIBE FILE FORMAT tff3", "OK"},
+                {"A", delimiter, "|"},
+                {"B", "DESCRIBE FILE FORMAT tff3", "REFUSED File format 'TEST_DB.PUBLIC.TFF3' does not exist or not "
+                    + "authorized. Your primary role <ROLE> must have at least one privilege granted on FILE FORMAT "
+                    + "TEST_DB.PUBLIC.TFF3."},
+                {"A", "CREATE TEMPORARY FILE FORMAT tff3 TYPE = CSV", "REFUSED Object 'TFF3' already exists."},
+                {"A", "CREATE TEMPORARY FILE FORMAT IF NOT EXISTS tff3 TYPE = CSV", "OK"},
+                {"B", "CREATE FILE FORMAT kf3 TYPE = CSV", "OK"},
+                {"A", "ALTER FILE FORMAT tff3 RENAME TO kf3", "REFUSED Object 'KF3' already exists."},
+                {"B", "ALTER FILE FORMAT kf3 RENAME TO tff3", "OK"},
+                {"A", "SHOW FILE FORMATS LIKE '%F3' IN SCHEMA test_db.public", "1 rows"},
+                {"B", "SHOW FILE FORMATS LIKE '%F3' IN SCHEMA test_db.public", "1 rows"},
+                {"B", "DROP FILE FORMAT tff3", "OK"},
+            });
+        }
+    }
+
+    @Test
+    public void aTemporaryFileFormatHidesAPermanentOneFromItsOwnSessionAlone() throws SQLException {
+        try (Connection first = another(); Connection second = another();
+             Statement a = first.createStatement(); Statement b = second.createStatement()) {
+            final String delimiter = "SELECT \"property_value\" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))"
+                + " WHERE \"property\" = 'FIELD_DELIMITER'";
+            final String missing = "REFUSED File format 'TEST_DB.PUBLIC.PFF3' does not exist or not authorized. Your "
+                + "primary role <ROLE> must have at least one privilege granted on FILE FORMAT TEST_DB.PUBLIC.PFF3.";
+            assertSteps(a, b, new String[][] {
+                {"A", "CREATE FILE FORMAT pff3 TYPE = CSV", "OK"},
+                {"B", "CREATE TEMPORARY FILE FORMAT pff3 TYPE = CSV FIELD_DELIMITER = ';'", "OK"},
+                {"B", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"B", delimiter, ";"},
+                {"A", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"A", delimiter, ","},
+                {"B", "SHOW FILE FORMATS LIKE 'PFF3' IN SCHEMA test_db.public", "1 rows"},
+                {"B", "SELECT GET_DDL('FILE_FORMAT', 'pff3')",
+                    "CREATE OR REPLACE TEMPORARY FILE FORMAT PFF3\n\tFIELD_DELIMITER = ';'\n;"},
+                {"A", "SELECT GET_DDL('FILE_FORMAT', 'pff3')", "CREATE OR REPLACE FILE FORMAT PFF3\n;"},
+                {"B", "CREATE FILE FORMAT pff3 TYPE = CSV", "REFUSED Object 'PFF3' already exists."},
+                {"B", "CREATE OR REPLACE FILE FORMAT pff3 TYPE = CSV FIELD_DELIMITER = '~'", "OK"},
+                {"B", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"B", delimiter, ";"},
+                {"A", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"A", delimiter, "~"},
+                {"B", "ALTER FILE FORMAT pff3 SET FIELD_DELIMITER = '!'", "OK"},
+                {"A", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"A", delimiter, "~"},
+                {"B", "CREATE OR REPLACE TEMPORARY FILE FORMAT pff3 TYPE = CSV FIELD_DELIMITER = '#'", "OK"},
+                {"B", "DROP FILE FORMAT pff3", "OK"},
+                {"B", "DESCRIBE FILE FORMAT pff3", "OK"},
+                {"B", delimiter, "~"},
+                {"B", "CREATE TEMPORARY FILE FORMAT pff3 TYPE = CSV", "OK"},
+                {"B", "CREATE FILE FORMAT IF NOT EXISTS pff3 TYPE = CSV", "OK"},
+                {"B", "DROP FILE FORMAT pff3", "OK"},
+                {"B", "DROP FILE FORMAT pff3", "OK"},
+                {"A", "DESCRIBE FILE FORMAT pff3", missing},
+                {"B", "DROP FILE FORMAT pff3", missing},
             });
         }
     }

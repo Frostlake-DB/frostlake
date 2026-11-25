@@ -304,7 +304,7 @@ public class StageQueryArgumentsTest extends MeasuredCellsTestSupport {
             "SELECT $1, $2 FROM @ust (\"FILE_FORMAT\" => ffp) ORDER BY 1");
         assertAnswer(
             "p|q|r",
-            "SELECT $1, $2 FROM @ust (PATTERN => '.*a1.*') ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (PATTERN => '.*/a1[.]csv') ORDER BY 1");
         assertAnswer(
             "p|q|r ;; s|t|u",
             "SELECT $1, $2 FROM @ust (PATTERN => 1) ORDER BY 1");
@@ -322,7 +322,7 @@ public class StageQueryArgumentsTest extends MeasuredCellsTestSupport {
             "SELECT $1, $2 FROM @ust (PATTERN => a1) ORDER BY 1");
         assertAnswer(
             "p|q|r",
-            "SELECT $1, $2 FROM @ust (PATTERN => ('.*a1.*')) ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (PATTERN => ('.*/a1[.]csv')) ORDER BY 1");
         assertAnswer(
             "",
             "SELECT $1, $2 FROM @ust (PATTERN => '.*A1.*') ORDER BY 1");
@@ -337,7 +337,7 @@ public class StageQueryArgumentsTest extends MeasuredCellsTestSupport {
             "SELECT $1, $2 FROM @ust (PATTERN => 'a1.csv') ORDER BY 1");
         assertAnswer(
             "s|t|u",
-            "SELECT $1, $2 FROM @ust (pattern => '.*b2.*') ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (pattern => '.*/b2[.]csv') ORDER BY 1");
         assertAnswer(
             "p|q|r ;; s|t|u",
             "SELECT $1, $2 FROM @ust (FILE_FORMAT => ffp, FILE_FORMAT => ff) ORDER BY 1");
@@ -346,13 +346,13 @@ public class StageQueryArgumentsTest extends MeasuredCellsTestSupport {
             "SELECT $1, $2 FROM @ust (FILE_FORMAT => ff, FILE_FORMAT => ffp) ORDER BY 1");
         assertAnswer(
             "s|t|u",
-            "SELECT $1, $2 FROM @ust (PATTERN => '.*a1.*', PATTERN => '.*b2.*') ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (PATTERN => '.*/a1[.]csv', PATTERN => '.*/b2[.]csv') ORDER BY 1");
         assertAnswer(
             "s|t,u",
-            "SELECT $1, $2 FROM @ust (PATTERN => '.*b2.*', FILE_FORMAT => ffp) ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (PATTERN => '.*/b2[.]csv', FILE_FORMAT => ffp) ORDER BY 1");
         assertAnswer(
             "s|t,u",
-            "SELECT $1, $2 FROM @ust (FILE_FORMAT => ffp, PATTERN => '.*b2.*') ORDER BY 1");
+            "SELECT $1, $2 FROM @ust (FILE_FORMAT => ffp, PATTERN => '.*/b2[.]csv') ORDER BY 1");
         assertAnswer(
             "p|q|r ;; s|t|u",
             "SELECT $1, $2 FROM @ust () ORDER BY 1");

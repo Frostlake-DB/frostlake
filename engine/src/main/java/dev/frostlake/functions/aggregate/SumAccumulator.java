@@ -76,7 +76,7 @@ public class SumAccumulator implements AggregateFunction.Accumulator, Approximat
                 anyApproximate = true;
             }
             if (decfloat && value instanceof Number) {
-                // A DECFLOAT sum is exact to 38 significant digits, whatever its magnitude (live-verified).
+                // A DECFLOAT sum adds exactly, whatever the magnitudes, and is held once (live-verified).
                 sum = DecfloatAggregates.added(sum, Decfloats.of((Number) value, "SUM"));
                 hasValue = true;
                 return;
@@ -116,7 +116,7 @@ public class SumAccumulator implements AggregateFunction.Accumulator, Approximat
             return intervals;
         }
         if (decfloat) {
-            return Decfloats.held(sum);
+            return DecfloatAggregates.held(sum);
         }
         return anyVariant || anyApproximate ? Double.valueOf(approximate.correctedValue()) : sum;
     }

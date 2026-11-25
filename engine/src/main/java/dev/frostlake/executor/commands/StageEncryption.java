@@ -146,8 +146,31 @@ final class StageEncryption {
         return new StageEncryption(chosen, !"NONE".equals(chosen));
     }
 
+    /**
+     * Judges what an ALTER STAGE's group names before the stage is looked up (live-verified): a name that is no
+     * option of the group is an invalid parameter, and NULL is no value of any.
+     *
+     * @param group the property list
+     */
+    static void requireNamedValues(final FrostlakeParser.ParenOptionListContext group) {
+        for (final FrostlakeParser.ParenOptionContext option : group.parenOption()) {
+            final String name = option.optionKey().getText().toUpperCase(Locale.ROOT);
+            if (!TYPE.equals(name) && !MASTER_KEY.equals(name) && !KMS_KEY_ID.equals(name)) {
+                throw new RuntimeException(SqlCompilationError.of("invalid parameter '"
+                    + option.optionKey().getText() + "'"));
+            }
+            if (option.NULL() != null) {
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(option.NULL().getText(),
+                    name));
+            }
+        }
+    }
+
     /** A value written as a parenthesized list, as written. */
     private static String listed(final FrostlakeParser.ParenOptionContext option) {
+        if (option.NULL() != null) {
+            return option.NULL().getText();
+        }
         final FrostlakeParser.StringLiteralListContext values = option.stringLiteralList();
         return "(" + (values == null ? "" : ParseTreeText.getOriginalText(values)) + ")";
     }

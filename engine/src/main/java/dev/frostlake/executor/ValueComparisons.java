@@ -323,7 +323,9 @@ public final class ValueComparisons {
             }
             return nf ? 1 : -1;
         }
-        final int cmp = compareValues(v1, v2);
+        // Two variants sort in the variant SORT order, which stays total where a double ties an exact number.
+        final int cmp = v1 instanceof VariantValue && v2 instanceof VariantValue
+            ? ((VariantValue) v1).sortOrder((VariantValue) v2) : compareValues(v1, v2);
         return ascending ? cmp : -cmp;
     }
 

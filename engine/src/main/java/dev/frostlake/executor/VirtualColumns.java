@@ -34,8 +34,12 @@ import java.util.Map;
  * and a virtual one (live-verified). Each virtual column's value is computed from the row as written, in column
  * order, so one reads the virtual columns defined before it.
  *
- * <p>The account computes the value as a query reads the column. The expression it takes calls no function whose
- * answer moves, so the value a write computes is the one a read would.
+ * <p>The account computes the value as a query reads the column, from the expression as it is told back, at that
+ * expression's type (see {@link TableColumn#getVirtualRead()}). A write computes it too, for the statements that
+ * read a table's stored rows; a query's FROM computes it again as it reads the rows (see {@link #read}), so a text of
+ * a TIMESTAMP_LTZ reads in the reading session's time zone and output format (live-verified). A row fault - {@code 1
+ * / a} over a zero - therefore never refuses the write: the cell holds it (see {@link DeferredFault}), and only a
+ * statement that reads the column raises it, while one that reads the row's other columns answers (live-verified).
  */
 public final class VirtualColumns {
 
@@ -155,25 +159,72 @@ public final class VirtualColumns {
      * @param row      the row, its other values already converted to their columns' types
      */
     static void compute(final QueryExecutor executor, final Table table, final Row row) {
+        if (any(table)) {
+            compute(executor, evaluatorFor(executor, table), table, row);
+        }
+    }
+
+    /** The evaluator a table's virtual columns are computed with. */
+    private static ExpressionEvaluator evaluatorFor(final QueryExecutor executor, final Table table) {
+        final ExpressionEvaluator evaluator = new ExpressionEvaluator(table, executor.getFunctionRegistry(),
+            executor.getCatalog(), executor);
+        final Map<String, Table> aliases = new HashMap<>();
+        aliases.put(table.getName().toUpperCase(Locale.ROOT), table);
+        final List<Table> relations = new ArrayList<>();
+        relations.add(table);
+        evaluator.setDeclaredTypeBase(table, aliases, relations);
+        return evaluator;
+    }
+
+    private static void compute(final QueryExecutor executor, final ExpressionEvaluator evaluator, final Table table,
+                                final Row row) {
         final List<TableColumn> columns = table.columnsView();
-        ExpressionEvaluator evaluator = null;
         for (int i = 0; i < columns.size() && i < row.getValues().size(); i++) {
             final TableColumn column = columns.get(i);
             if (!column.isVirtual()) {
                 continue;
             }
-            if (evaluator == null) {
-                evaluator = new ExpressionEvaluator(table, executor.getFunctionRegistry(), executor.getCatalog(),
-                    executor);
-                final Map<String, Table> aliases = new HashMap<>();
-                aliases.put(table.getName().toUpperCase(Locale.ROOT), table);
-                final List<Table> relations = new ArrayList<>();
-                relations.add(table);
-                evaluator.setDeclaredTypeBase(table, aliases, relations);
+            try {
+                row.setValue(i, executor.writtenValue(evaluator.evaluate(column.getVirtualRead(), row),
+                    column.getDataType()));
+            } catch (final RuntimeException fault) {
+                if (!DeferredFault.deferrable(fault)) {
+                    throw fault;
+                }
+                row.setValue(i, new DeferredFault(fault));
             }
-            row.setValue(i, executor.writtenValue(evaluator.evaluate(column.getVirtualExpression(), row),
-                column.getDataType()));
         }
+    }
+
+    /**
+     * A table's rows as a query reads them: each virtual column computed again from the row's other values, in the
+     * reading session.
+     *
+     * @param executor the executor whose functions the expressions call
+     * @param relation the relation the rows are read as: the table, or its changes, whose leading columns are the
+     *                 table's
+     * @param table    the table
+     * @param rows     the rows read
+     * @return the rows, each a copy where the table has a virtual column
+     */
+    static List<Row> read(final QueryExecutor executor, final Table relation, final Table table,
+                          final List<Row> rows) {
+        if (!any(table) || relation.columnCount() < table.columnCount()) {
+            return rows;
+        }
+        for (int i = 0; i < table.columnCount(); i++) {
+            if (!relation.columnAt(i).getName().equals(table.columnAt(i).getName())) {
+                return rows;
+            }
+        }
+        final ExpressionEvaluator evaluator = evaluatorFor(executor, table);
+        final List<Row> computed = new ArrayList<>(rows.size());
+        for (final Row row : rows) {
+            final Row copy = row.copy();
+            compute(executor, evaluator, table, copy);
+            computed.add(copy);
+        }
+        return computed;
     }
 
     /**

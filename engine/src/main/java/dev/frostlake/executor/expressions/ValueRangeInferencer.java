@@ -1908,6 +1908,128 @@ final class ValueRangeInferencer {
         return decide(predicate);
     }
 
+    /**
+     * Whether the statistics prove a filter keeps no row: the condition is FALSE or NULL on every row. A NULL never
+     * satisfies a comparison, so the intervals of the values a column holds besides its NULLs suffice — over a column
+     * holding 1 and a NULL, {@code k > 100}, {@code k <> 1}, {@code NOT (k <= 1)}, {@code k NOT IN (1, 2)} and
+     * {@code k IS NULL AND k > 100} keep no row, while {@code k IS NULL}, {@code k > 100 OR k IS NULL} and
+     * {@code COALESCE(k, 200) > 100} may (live-verified). Unlike {@link #settledCondition}, the answer does not tell
+     * the rows that are FALSE from those that are NULL, so it serves a filter only.
+     *
+     * @param predicate the condition
+     * @return whether no row satisfies it
+     */
+    public boolean filtersEveryRow(final Expression predicate) {
+        return neverHolds(predicate, false);
+    }
+
+    /**
+     * Whether a condition is never TRUE ({@code negated} false) or never FALSE ({@code negated} true) on any row —
+     * NULL counting as neither — over the intervals of the values the operands hold besides their NULLs.
+     */
+    private boolean neverHolds(final Expression predicate, final boolean negated) {
+        final Boolean strict = decide(predicate);
+        if (strict != null) {
+            return strict.booleanValue() == negated;
+        }
+        if (predicate instanceof UnaryOperationExpression) {
+            final UnaryOperationExpression negation = (UnaryOperationExpression) predicate;
+            return negation.getOperator() == UnaryOperator.NOT && neverHolds(negation.getOperand(), !negated);
+        }
+        if (predicate instanceof BetweenExpression) {
+            final BetweenExpression bounds = (BetweenExpression) predicate;
+            final boolean flip = bounds.isNot() != negated;
+            final boolean low = comparisonNever(bounds.getLower(), bounds.getValue(), true, flip);
+            final boolean high = comparisonNever(bounds.getValue(), bounds.getUpper(), true, flip);
+            // Within the bounds is an AND of two comparisons: one never TRUE rules it out, both never FALSE rule its
+            // negation out.
+            return flip ? low && high : low || high;
+        }
+        if (predicate instanceof InExpression) {
+            return memberNever((InExpression) predicate, negated);
+        }
+        if (!(predicate instanceof BinaryOperationExpression)) {
+            return false;
+        }
+        final BinaryOperationExpression comparison = (BinaryOperationExpression) predicate;
+        switch (comparison.getOperator()) {
+            case AND:
+                return negated
+                    ? neverHolds(comparison.getLeft(), true) && neverHolds(comparison.getRight(), true)
+                    : neverHolds(comparison.getLeft(), false) || neverHolds(comparison.getRight(), false);
+            case OR:
+                return negated
+                    ? neverHolds(comparison.getLeft(), true) || neverHolds(comparison.getRight(), true)
+                    : neverHolds(comparison.getLeft(), false) && neverHolds(comparison.getRight(), false);
+            case EQUAL:
+                return equalityNever(comparison.getLeft(), comparison.getRight(), negated);
+            case NOT_EQUAL:
+                return equalityNever(comparison.getLeft(), comparison.getRight(), !negated);
+            case LESS_THAN:
+                return comparisonNever(comparison.getLeft(), comparison.getRight(), false, negated);
+            case LESS_THAN_OR_EQUAL:
+                return comparisonNever(comparison.getLeft(), comparison.getRight(), true, negated);
+            case GREATER_THAN:
+                return comparisonNever(comparison.getRight(), comparison.getLeft(), false, negated);
+            case GREATER_THAN_OR_EQUAL:
+                return comparisonNever(comparison.getRight(), comparison.getLeft(), true, negated);
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Whether an IN list is never TRUE ({@code negated} false) or never FALSE: the membership is an OR of its
+     * equalities, never TRUE when each is and never FALSE when one is.
+     */
+    private boolean memberNever(final InExpression list, final boolean negated) {
+        if (list.hasSubquery() || list.getValues() == null || list.getValues().isEmpty()) {
+            return false;
+        }
+        final boolean flip = list.isNot() != negated;
+        for (final Expression candidate : list.getValues()) {
+            final boolean never = equalityNever(list.getValue(), candidate, flip);
+            if (flip && never) {
+                return true;
+            }
+            if (!flip && !never) {
+                return false;
+            }
+        }
+        return !flip;
+    }
+
+    /** Whether {@code left = right} is never TRUE ({@code negated} false) or never FALSE over the values held. */
+    private boolean equalityNever(final Expression left, final Expression right, final boolean negated) {
+        final ValueRange a = infer(left);
+        final ValueRange b = infer(right);
+        if (!boundsValues(a) || !boundsValues(b)) {
+            return false;
+        }
+        final Boolean equal = a.equalTo(b);
+        return equal != null && equal.booleanValue() == negated;
+    }
+
+    /** Whether {@code left < right} (or {@code <=}) is never TRUE ({@code negated} false) or never FALSE. */
+    private boolean comparisonNever(final Expression left, final Expression right, final boolean orEqual,
+                                    final boolean negated) {
+        final ValueRange a = infer(left);
+        final ValueRange b = infer(right);
+        if (!boundsValues(a) || !boundsValues(b)) {
+            return false;
+        }
+        final Boolean below = a.below(b, orEqual);
+        return below != null && below.booleanValue() == negated;
+    }
+
+    /**
+     * Whether an interval bounds the values an operand holds besides its NULLs: known, holding a value, and not come
+     * through a COALESCE the planner keeps as a call (see {@link ValueRange#isOpaqueToConditions}).
+     */
+    private static boolean boundsValues(final ValueRange range) {
+        return range != null && !range.isEmpty() && !range.isOpaqueToConditions();
+    }
+
     private Boolean decide(final Expression predicate) {
         if (predicate instanceof LiteralExpression) {
             // A constant condition prunes the other branch outright: IFF(FALSE, s, 1.5) over a text

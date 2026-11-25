@@ -20,7 +20,8 @@ import java.util.Locale;
 
 /**
  * The Snowpark package a Python procedure needs (live-verified). A procedure's handler is handed a Snowpark session,
- * which the account builds from {@code snowflake-snowpark-python}, so a procedure whose PACKAGES does not name it fails
+ * which the account builds from {@code snowflake-snowpark-python}, so a procedure whose PACKAGES does not name it - nor
+ * its ARTIFACT_REPOSITORY_PACKAGES - fails
  * on the missing module: "Python Interpreter Error:" and, on the next line, "ModuleNotFoundError: No module named
  * 'snowflake.snowpark' in function P with handler main". A procedure naming no package at all, an empty list
  * included, is refused as it is created - a table procedure and an anonymous one too - and one naming other packages

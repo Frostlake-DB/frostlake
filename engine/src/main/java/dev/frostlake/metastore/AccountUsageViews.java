@@ -19,112 +19,189 @@ package dev.frostlake.metastore;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.metastore.model.View;
+import dev.frostlake.types.ArrayType;
+import dev.frostlake.types.BinaryType;
 import dev.frostlake.types.BooleanType;
+import dev.frostlake.types.ColumnTypeJson;
 import dev.frostlake.types.DataType;
 import dev.frostlake.types.DateTimeType;
 import dev.frostlake.types.NumericType;
+import dev.frostlake.types.ObjectType;
 import dev.frostlake.types.StringType;
+import dev.frostlake.types.StructuredArrayType;
 import dev.frostlake.types.VariantType;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * The views of the SNOWFLAKE database's ACCOUNT_USAGE schema the engine models: QUERY_HISTORY, a secure view no role
- * owns, with the account's columns in the account's order and types (live-verified). The account fills it with up to
- * three quarters of an hour's latency; here it answers no rows.
+ * The views of the SNOWFLAKE database's ACCOUNT_USAGE schema: secure views no role owns, each with the account's
+ * columns in the account's order, types and nullability (live-verified, the list in {@code account-usage-columns.tsv}).
+ * The account fills them with up to a few hours' latency, so an object or a statement just made is not in them yet;
+ * here they answer no rows.
  */
 final class AccountUsageViews {
 
-    /** QUERY_HISTORY's columns and their declared types. */
-    private static final String[][] QUERY_HISTORY = {
-        {"QUERY_ID", "VARCHAR(16777216)"}, {"QUERY_TEXT", "VARCHAR(16777216)"}, {"DATABASE_ID", "NUMBER(38,0)"},
-        {"DATABASE_NAME", "VARCHAR(16777216)"}, {"SCHEMA_ID", "NUMBER(38,0)"}, {"SCHEMA_NAME", "VARCHAR(16777216)"},
-        {"QUERY_TYPE", "VARCHAR(16777216)"}, {"SESSION_ID", "NUMBER(38,0)"}, {"AUTHN_EVENT_ID", "NUMBER(38,0)"},
-        {"USER_NAME", "VARCHAR(16777216)"}, {"ROLE_NAME", "VARCHAR(16777216)"}, {"WAREHOUSE_ID", "NUMBER(38,0)"},
-        {"WAREHOUSE_NAME", "VARCHAR(16777216)"}, {"WAREHOUSE_SIZE", "VARCHAR(16777216)"},
-        {"WAREHOUSE_TYPE", "VARCHAR(16777216)"}, {"CLUSTER_NUMBER", "NUMBER(38,0)"}, {"QUERY_TAG", "VARCHAR(16777216)"},
-        {"EXECUTION_STATUS", "VARCHAR(16777216)"}, {"ERROR_CODE", "VARCHAR(16777216)"},
-        {"ERROR_MESSAGE", "VARCHAR(16777216)"}, {"START_TIME", "TIMESTAMP_LTZ(6)"}, {"END_TIME", "TIMESTAMP_LTZ(6)"},
-        {"TOTAL_ELAPSED_TIME", "NUMBER(38,0)"}, {"BYTES_SCANNED", "NUMBER(38,0)"},
-        {"PERCENTAGE_SCANNED_FROM_CACHE", "FLOAT"}, {"BYTES_WRITTEN", "NUMBER(38,0)"},
-        {"BYTES_WRITTEN_TO_RESULT", "NUMBER(38,0)"}, {"BYTES_READ_FROM_RESULT", "NUMBER(38,0)"},
-        {"ROWS_PRODUCED", "NUMBER(38,0)"}, {"ROWS_INSERTED", "NUMBER(38,0)"}, {"ROWS_UPDATED", "NUMBER(38,0)"},
-        {"ROWS_DELETED", "NUMBER(38,0)"}, {"ROWS_UNLOADED", "NUMBER(38,0)"}, {"BYTES_DELETED", "NUMBER(38,0)"},
-        {"PARTITIONS_SCANNED", "NUMBER(38,0)"}, {"PARTITIONS_TOTAL", "NUMBER(38,0)"},
-        {"BYTES_SPILLED_TO_LOCAL_STORAGE", "NUMBER(38,0)"}, {"BYTES_SPILLED_TO_REMOTE_STORAGE", "NUMBER(38,0)"},
-        {"BYTES_SENT_OVER_THE_NETWORK", "NUMBER(38,0)"}, {"COMPILATION_TIME", "NUMBER(38,0)"},
-        {"EXECUTION_TIME", "NUMBER(38,0)"}, {"QUEUED_PROVISIONING_TIME", "NUMBER(38,0)"},
-        {"QUEUED_REPAIR_TIME", "NUMBER(38,0)"}, {"QUEUED_OVERLOAD_TIME", "NUMBER(38,0)"},
-        {"TRANSACTION_BLOCKED_TIME", "NUMBER(38,0)"}, {"OUTBOUND_DATA_TRANSFER_CLOUD", "VARCHAR(16777216)"},
-        {"OUTBOUND_DATA_TRANSFER_REGION", "VARCHAR(16777216)"}, {"OUTBOUND_DATA_TRANSFER_BYTES", "NUMBER(38,0)"},
-        {"INBOUND_DATA_TRANSFER_CLOUD", "VARCHAR(16777216)"}, {"INBOUND_DATA_TRANSFER_REGION", "VARCHAR(16777216)"},
-        {"INBOUND_DATA_TRANSFER_BYTES", "NUMBER(38,0)"}, {"LIST_EXTERNAL_FILES_TIME", "NUMBER(38,0)"},
-        {"CREDITS_USED_CLOUD_SERVICES", "FLOAT"}, {"RELEASE_VERSION", "VARCHAR(16777216)"},
-        {"EXTERNAL_FUNCTION_TOTAL_INVOCATIONS", "NUMBER(38,0)"}, {"EXTERNAL_FUNCTION_TOTAL_SENT_ROWS", "NUMBER(38,0)"},
-        {"EXTERNAL_FUNCTION_TOTAL_RECEIVED_ROWS", "NUMBER(38,0)"},
-        {"EXTERNAL_FUNCTION_TOTAL_SENT_BYTES", "NUMBER(38,0)"},
-        {"EXTERNAL_FUNCTION_TOTAL_RECEIVED_BYTES", "NUMBER(38,0)"}, {"QUERY_LOAD_PERCENT", "NUMBER(38,0)"},
-        {"IS_CLIENT_GENERATED_STATEMENT", "BOOLEAN"}, {"QUERY_ACCELERATION_BYTES_SCANNED", "NUMBER(38,0)"},
-        {"QUERY_ACCELERATION_PARTITIONS_SCANNED", "NUMBER(38,0)"},
-        {"QUERY_ACCELERATION_UPPER_LIMIT_SCALE_FACTOR", "NUMBER(38,0)"}, {"TRANSACTION_ID", "NUMBER(38,0)"},
-        {"CHILD_QUERIES_WAIT_TIME", "NUMBER(38,0)"}, {"ROLE_TYPE", "VARCHAR(16777216)"},
-        {"QUERY_HASH", "VARCHAR(16777216)"}, {"QUERY_HASH_VERSION", "NUMBER(38,0)"},
-        {"QUERY_PARAMETERIZED_HASH", "VARCHAR(16777216)"}, {"QUERY_PARAMETERIZED_HASH_VERSION", "NUMBER(38,0)"},
-        {"SECONDARY_ROLE_STATS", "VARCHAR(16777216)"}, {"ROWS_WRITTEN_TO_RESULT", "NUMBER(38,0)"},
-        {"QUERY_RETRY_TIME", "NUMBER(38,0)"}, {"QUERY_RETRY_CAUSE", "VARCHAR(16777216)"},
-        {"FAULT_HANDLING_TIME", "NUMBER(38,0)"}, {"USER_TYPE", "VARCHAR(16777216)"},
-        {"USER_DATABASE_NAME", "VARCHAR(16777216)"}, {"USER_DATABASE_ID", "NUMBER(38,0)"},
-        {"USER_SCHEMA_NAME", "VARCHAR(16777216)"}, {"USER_SCHEMA_ID", "NUMBER(38,0)"},
-        {"RESOURCE_CONSTRAINT", "VARCHAR(16777216)"}, {"GENERATION", "VARCHAR(16777216)"}, {"BIND_VALUES", "VARIANT"},
-        {"AGENT_TYPE", "VARCHAR(16777216)"}
-    };
+    private static final String RESOURCE = "/dev/frostlake/metadata/account-usage-columns.tsv";
+
+    /** The declared width of a text column the account declares at the default width. */
+    private static final String DEFAULT_TEXT = "VARCHAR(16777216)";
+
+    /** The type of a text a query answers at the full text width. */
+    private static final String FULL_TEXT = "VARCHAR(134217728)";
+
+    /** The type of a column a query answers as the type of a bare NULL. */
+    private static final String ZERO_WIDTH_TEXT = "VARCHAR(0)";
+
+    /** The descriptor mark of a text whose SHOW COLUMNS byte budget is one byte per character. */
+    private static final String ONE_BYTE_PER_CHARACTER = "B";
+
+    /** The descriptor mark of a VARIANT, OBJECT or ARRAY whose SHOW COLUMNS descriptor carries "fixed":false. */
+    private static final String FIXED_KEY = "F";
+
+    /**
+     * Each view's columns, in order: the column's name, its declared type, Y or N for whether it takes NULL, the
+     * type a query's column answers where that is not the declared one, or null, and the mark of a SHOW COLUMNS
+     * descriptor of the account's own, or null.
+     */
+    private static volatile Map<String, List<String[]>> columns;
 
     private AccountUsageViews() {
     }
 
     /**
-     * Registers the modelled views in the ACCOUNT_USAGE schema: owned by nobody, and secure. A text column is
-     * declared at the default width, as DESCRIBE VIEW reads it, and answers at the full text width, as a query's
-     * columns do (live-verified).
+     * Registers the views in the ACCOUNT_USAGE schema: owned by nobody, and secure. Each column is declared as
+     * DESCRIBE VIEW reads it and described in SHOW COLUMNS as the account describes it, and a query's column answers
+     * as the account's does: a text declared at the default width mostly at the full text width, some as a bare
+     * NULL's {@code VARCHAR(0)}, any other column mostly at its declared type, and every one taking NULL
+     * (live-verified).
      *
      * @param accountUsage the SNOWFLAKE database's ACCOUNT_USAGE schema
      */
     static void seed(final Schema accountUsage) {
-        final StringBuilder definition = new StringBuilder("SELECT ");
-        final List<TableColumn> columns = new ArrayList<>();
-        for (int i = 0; i < QUERY_HISTORY.length; i++) {
-            final String declared = QUERY_HISTORY[i][1];
-            definition.append(i == 0 ? "" : ", ").append("CAST(NULL AS ")
-                .append(declared.startsWith("VARCHAR") ? "VARCHAR" : declared).append(") AS ")
-                .append(QUERY_HISTORY[i][0]);
-            columns.add(new TableColumn(QUERY_HISTORY[i][0], typeOf(declared), true, null, false, false, false));
+        for (final Map.Entry<String, List<String[]>> described : loaded().entrySet()) {
+            final StringBuilder definition = new StringBuilder("SELECT ");
+            final List<TableColumn> resolved = new ArrayList<>();
+            boolean first = true;
+            for (final String[] column : described.getValue()) {
+                definition.append(first ? "" : ", ").append(answered(column)).append(" AS \"").append(column[0])
+                    .append('"');
+                first = false;
+                final DataType type = typeOf(column[1]);
+                final boolean nullable = "Y".equals(column[2]);
+                final TableColumn declared = new TableColumn(column[0], type, nullable, null, false, false, false);
+                if (column[4] != null) {
+                    declared.setDescribedType(ColumnTypeJson.renderSystemViewColumn(type, nullable,
+                        ONE_BYTE_PER_CHARACTER.equals(column[4]), FIXED_KEY.equals(column[4])));
+                }
+                resolved.add(declared);
+            }
+            definition.append(" WHERE FALSE");
+            final View view = new View(described.getKey(), definition.toString());
+            view.setOwner(null);
+            view.setSecure(true);
+            view.setResolvedColumns(resolved);
+            accountUsage.addView(view);
         }
-        definition.append(" WHERE FALSE");
-        final View view = new View("QUERY_HISTORY", definition.toString());
-        view.setOwner(null);
-        view.setSecure(true);
-        view.setResolvedColumns(columns);
-        accountUsage.addView(view);
+    }
+
+    /**
+     * The item of a view's body that answers a column at the type a query reads it at. A column the account answers
+     * as {@code VARCHAR(0)} is a bare NULL, the one item typed that way; quoted names follow, as a column named ROWS
+     * or INCREMENT is no alias otherwise.
+     */
+    private static String answered(final String[] column) {
+        if (ZERO_WIDTH_TEXT.equals(column[3])) {
+            return "NULL";
+        }
+        final String type = column[3] == null ? column[1].replace(DEFAULT_TEXT, "VARCHAR")
+            : column[3].replace(FULL_TEXT, "VARCHAR");
+        return "CAST(NULL AS " + type + ")";
     }
 
     /** The type a declared spelling of the list names. */
     private static DataType typeOf(final String declared) {
-        switch (declared) {
-            case "VARCHAR(16777216)":
-                return new StringType("VARCHAR", 16777216);
-            case "NUMBER(38,0)":
-                return new NumericType("NUMBER", 38, 0);
-            case "TIMESTAMP_LTZ(6)":
-                return new DateTimeType("TIMESTAMP_LTZ", 6, true);
+        final int open = declared.indexOf('(');
+        final String name = open < 0 ? declared : declared.substring(0, open);
+        final String inside = open < 0 ? "" : declared.substring(open + 1, declared.lastIndexOf(')'));
+        switch (name) {
+            case "VARCHAR":
+                return new StringType("VARCHAR", Integer.parseInt(inside));
+            case "NUMBER":
+                final int comma = inside.indexOf(',');
+                return new NumericType("NUMBER", Integer.parseInt(inside.substring(0, comma).trim()),
+                    Integer.parseInt(inside.substring(comma + 1).trim()));
             case "FLOAT":
                 return NumericType.FLOAT;
             case "BOOLEAN":
                 return BooleanType.BOOLEAN;
+            case "DATE":
+                return DateTimeType.DATE;
+            case "TIMESTAMP_LTZ":
+            case "TIMESTAMP_TZ":
+                return new DateTimeType(name, Integer.parseInt(inside), true);
+            case "TIMESTAMP_NTZ":
+                return new DateTimeType(name, Integer.parseInt(inside), false);
+            case "BINARY":
+                return new BinaryType("BINARY", Integer.parseInt(inside));
             case "VARIANT":
                 return VariantType.VARIANT;
+            case "OBJECT":
+                return ObjectType.OBJECT;
+            case "ARRAY":
+                return inside.isEmpty() ? ArrayType.ARRAY : new StructuredArrayType(typeOf(inside));
             default:
                 throw new IllegalStateException("no type for " + declared);
         }
+    }
+
+    /** A list cell that may be left out or empty, null then. */
+    private static String present(final String[] cells, final int at) {
+        return cells.length > at && !cells[at].isEmpty() ? cells[at] : null;
+    }
+
+    private static Map<String, List<String[]>> loaded() {
+        Map<String, List<String[]>> known = columns;
+        if (known == null) {
+            known = load();
+            columns = known;
+        }
+        return known;
+    }
+
+    private static Map<String, List<String[]>> load() {
+        final Map<String, List<String[]>> byView = new LinkedHashMap<>();
+        try (InputStream in = AccountUsageViews.class.getResourceAsStream(RESOURCE)) {
+            if (in == null) {
+                throw new IllegalStateException("missing column list: account usage");
+            }
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                String line = reader.readLine();
+                while (line != null) {
+                    if (!line.isEmpty() && !line.startsWith("#")) {
+                        final String[] cells = line.split("\t", -1);
+                        List<String[]> described = byView.get(cells[0]);
+                        if (described == null) {
+                            described = new ArrayList<>();
+                            byView.put(cells[0], described);
+                        }
+                        described.add(new String[] {cells[1], cells[2], cells[3], present(cells, 4),
+                            present(cells, 5)});
+                    }
+                    line = reader.readLine();
+                }
+            }
+        } catch (final IOException e) {
+            throw new IllegalStateException("cannot load column list: account usage", e);
+        }
+        return Collections.unmodifiableMap(byView);
     }
 }

@@ -512,11 +512,20 @@ public final class RoutineSupport {
         if (repository != null) {
             sql.append(" ARTIFACT_REPOSITORY = ").append(namePath(repository, "artifact_repository"));
         }
-        // A Python routine's packages are written in one list, whichever of the two the body names them in.
-        final List<String> packages = new ArrayList<>();
-        addAll(packages, RestJson.strings(config, "packages"));
-        addAll(packages, RestJson.strings(config, "artifact_repository_packages"));
-        appendList(sql, packages, "PACKAGES");
+        // A Python routine's packages are written in one list, whichever of the two the body names them in -
+        // unless it names both beside a repository, which keeps them apart.
+        final List<String> plain = RestJson.strings(config, "packages");
+        final List<String> fromRepository = RestJson.strings(config, "artifact_repository_packages");
+        if (repository != null && plain != null && !plain.isEmpty() && fromRepository != null
+                && !fromRepository.isEmpty()) {
+            appendList(sql, plain, "PACKAGES");
+            appendList(sql, fromRepository, "ARTIFACT_REPOSITORY_PACKAGES");
+        } else {
+            final List<String> packages = new ArrayList<>();
+            addAll(packages, plain);
+            addAll(packages, fromRepository);
+            appendList(sql, packages, "PACKAGES");
+        }
         appendList(sql, RestJson.strings(config, "imports"), "IMPORTS");
         final String handler = RestJson.text(config, "handler");
         if (handler != null) {

@@ -23,10 +23,10 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * The spatial relations behind ST_INTERSECTS, ST_CONTAINS / ST_WITHIN and ST_DISTANCE / ST_DWITHIN, decided on whole
- * edges rather than vertices alone: an edge is cut where the other value's edges cross or touch it, and every piece
- * is placed against the other value. A GEOMETRY is decided in the plane, a GEOGRAPHY on the sphere with great-circle
- * edges.
+ * The spatial relations behind ST_INTERSECTS, ST_CONTAINS / ST_WITHIN, ST_COVERS / ST_COVEREDBY and ST_DISTANCE /
+ * ST_DWITHIN, decided on whole edges rather than vertices alone: an edge is cut where the other value's edges cross or
+ * touch it, and every piece is placed against the other value. A GEOMETRY is decided in the plane, a GEOGRAPHY on the
+ * sphere with great-circle edges.
  *
  * <p>Containment follows the DE-9IM reading (live-verified): {@code a} contains {@code b} when no part of {@code b}
  * lies outside {@code a} and some part of {@code b} lies in the interior of {@code a} — so a point on a polygon's
@@ -63,8 +63,21 @@ public final class GeoRelation {
      * {@code 'ST_CONTAINS/ST_WITHIN'}).
      */
     public static void requireNoCollection(final GeoValue x, final GeoValue y) {
+        requireNoCollection(x, y, "ST_CONTAINS", "ST_CONTAINS/ST_WITHIN");
+    }
+
+    /**
+     * Refuses a GeometryCollection on either side of ST_COVERS / ST_COVEREDBY (live-verified: GEOGRAPHY names
+     * {@code 'ST_COVERS'} for both functions, GEOMETRY {@code 'ST_COVERS/ST_COVEREDBY'}).
+     */
+    public static void requireNoCollectionForCovers(final GeoValue x, final GeoValue y) {
+        requireNoCollection(x, y, "ST_COVERS", "ST_COVERS/ST_COVEREDBY");
+    }
+
+    private static void requireNoCollection(final GeoValue x, final GeoValue y, final String geographyName,
+                                            final String geometryName) {
         if ("GeometryCollection".equals(x.geoType()) || "GeometryCollection".equals(y.geoType())) {
-            throw new RuntimeException("Operation '" + (x.isGeography() ? "ST_CONTAINS" : "ST_CONTAINS/ST_WITHIN")
+            throw new RuntimeException("Operation '" + (x.isGeography() ? geographyName : geometryName)
                 + "' is not supported for GeometryCollection and FeatureCollection.");
         }
     }
@@ -78,6 +91,21 @@ public final class GeoRelation {
             return false;
         }
         return covers(space, a, b) && interiorsMeet(space, a, b);
+    }
+
+    /**
+     * Whether {@code outer} covers {@code inner}: no part of {@code inner} lies outside {@code outer}, boundary
+     * included. A GEOGRAPHY polygon does not cover a value with a vertex on the inside of one of its edges, as for
+     * containment.
+     */
+    public static boolean covers(final GeoValue outer, final GeoValue inner) {
+        final GeoSpace space = spaceOf(outer);
+        final GeoParts a = new GeoParts(outer.node());
+        final GeoParts b = new GeoParts(inner.node());
+        if (space.spherical() && touchesEdgeInside(space, a, b)) {
+            return false;
+        }
+        return covers(space, a, b);
     }
 
     /** The minimum distance between the two values: meters on the sphere, coordinate units in the plane. */

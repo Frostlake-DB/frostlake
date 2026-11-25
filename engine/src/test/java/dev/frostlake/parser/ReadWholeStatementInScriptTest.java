@@ -48,6 +48,24 @@ public class ReadWholeStatementInScriptTest extends MeasuredCellsTestSupport {
             "SELECT 1; DESCRIBE TABLE t1 (a) x = @s!=x");
     }
 
+    /**
+     * A later statement the account reads whole too, one this parse reads no further after the first one's fault,
+     * never compiles: the request fails at the first, where it stands.
+     */
+    @Test
+    public void theFirstOfTwoIsNamed() {
+        Assumptions.assumeFalse(isLiveSnowflake(), "the live harness sends text this grammar refuses as one statement");
+        assertAnswer(FAILED + "\"DESCRIBE TABLE t1 (a) x = @s!=...\" (at line 1, position 0). | SQL compilation "
+                + "error: | invalid parameter 'x'" + HELPER,
+            "DESCRIBE TABLE t1 (a) x = @s!=x; DESCRIBE TABLE t1 (a) y = @s!=y");
+        assertAnswer(FAILED + "\"DESCRIBE TABLE t1 (a) x = @s!=...\" (at line 1, position 10). | SQL compilation "
+                + "error: | invalid parameter 'x'" + HELPER,
+            "SELECT 1; DESCRIBE TABLE t1 (a) x = @s!=x; DESCRIBE TABLE t1 (a) y = @s!=y");
+        // A fault of another kind after it is still the request's syntax error.
+        assertAnswer("REFUSED SQL compilation error: | syntax error line 1 at position 44 unexpected 'y'.",
+            "DESCRIBE TABLE t1 (a) x = @s!=x; SELECT 1 x y; SELECT 2 p q");
+    }
+
     /** The statement alone is refused as it compiles. */
     @Test
     public void theStatementAloneIsRefused() {

@@ -41,8 +41,11 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -171,12 +174,57 @@ public final class BlockExpressionTypes {
                 compilesAsAQuery(expression, queryExecutor == null ? null
                     : DeclarationTypes.scriptTyper(types, queryExecutor))));
         }
+        final String antiJoin = antiJoinRefusal(expression, types, counters, queryExecutor);
+        if (antiJoin != null) {
+            throw new BlockExpressionTypeError(antiJoin);
+        }
         if (target != null) {
             final String conversion = conversionRefusal(expression, types, target, values, queryExecutor);
             if (conversion != null) {
                 throw new BlockExpressionTypeError(conversion);
             }
         }
+    }
+
+    /**
+     * The refusal of the last anti-join the expression holds that the account cannot evaluate (see
+     * {@link NullableAntiJoins}), placed in the query the expression compiles as: {@code x := 2 NOT IN (SELECT k FROM
+     * wn)} over a column holding a NULL is refused at 25, the SELECT's place after the query's and the assignment's
+     * lead-ins, and {@code RETURN 3 NOT IN (…)} at 17. Of several the one written last is placed. A
+     * variable written before the subquery on its line moves the place as each name of a query expression moves it,
+     * written out as a bind: {@code n NOT IN (…)} over an INT is placed seventeen columns on, {@code n} read as
+     * {@code (:n)::NUMBER(38,0)}, a text three, {@code (:s)} (all live-verified). Null for none.
+     */
+    private static String antiJoinRefusal(final ParserRuleContext expression, final Map<String, DataType> types,
+                                          final Set<String> counters, final QueryExecutor queryExecutor) {
+        if (queryExecutor == null) {
+            return null;
+        }
+        final List<ParserRuleContext> antiJoins = new ArrayList<>();
+        NullableAntiJoins.collect(expression, antiJoins);
+        if (antiJoins.isEmpty()) {
+            return null;
+        }
+        final NullableAntiJoins judge = new NullableAntiJoins(queryExecutor,
+            new CorrelatedSubqueryRule(queryExecutor, new HashSet<String>()), null);
+        Token at = null;
+        for (final ParserRuleContext antiJoin : antiJoins) {
+            if (judge.refuses(antiJoin)) {
+                at = NullableAntiJoins.anchor(antiJoin);
+            }
+        }
+        if (at == null) {
+            return null;
+        }
+        final Token start = expression.getStart();
+        final int line = at.getLine() - start.getLine() + 1;
+        final int shift = writtenOutShift(expression, at.getLine(), at.getCharPositionInLine(), types, counters, true,
+            true);
+        final int position = shift + (line > 1 ? at.getCharPositionInLine()
+            : at.getCharPositionInLine() - start.getCharPositionInLine() + QUERY_LEAD
+                + (assignsAValue(expression) ? ASSIGNED_VALUE_LEAD : 0));
+        return SqlCompilationError.of("Unsupported subquery type cannot be evaluated at line " + line
+            + ", position " + position);
     }
 
     /**
@@ -411,7 +459,8 @@ public final class BlockExpressionTypes {
         final int line = Integer.parseInt(place.group(1));
         final int column = Integer.parseInt(place.group(2));
         final Token start = expression.getStart();
-        int moved = column + writtenOutShift(expression, line, column, types, counters, query || namesBound);
+        int moved = column + writtenOutShift(expression, line, column, types, counters, query || namesBound,
+            false);
         if (line == start.getLine()) {
             moved += -start.getCharPositionInLine() + (query ? QUERY_LEAD : 0)
                 + (assignsAValue(expression) ? ASSIGNED_VALUE_LEAD : 0);
@@ -432,17 +481,22 @@ public final class BlockExpressionTypes {
      */
     public static int boundNamesShift(final ParserRuleContext expression, final int line, final int column,
                                       final Map<String, DataType> types) {
-        return writtenOutShift(expression, line, column, types, Collections.emptySet(), true);
+        return writtenOutShift(expression, line, column, types, Collections.emptySet(), true, false);
     }
 
     private static String placed(final String refusal, final Matcher place, final int line, final int column) {
         return "SQL compilation error: error line " + line + " at position " + column + refusal.substring(place.end());
     }
 
-    /** The columns the variables written out ahead of the place, on its line, add to it. */
+    /**
+     * The columns the variables written out ahead of the place, on its line, add to it.
+     *
+     * @param bindsNamed whether a bind keeps its name where it is written out, {@code :x::TYPE}, as an anti-join's
+     *                   query reads it, rather than reading {@code ?::TYPE}
+     */
     private static int writtenOutShift(final ParseTree node, final int line, final int column,
                                        final Map<String, DataType> types, final Set<String> counters,
-                                       final boolean namesBound) {
+                                       final boolean namesBound, final boolean bindsNamed) {
         if (node instanceof FrostlakeParser.SelectStatementContext) {
             return 0;
         }
@@ -464,11 +518,11 @@ public final class BlockExpressionTypes {
             }
             final String written = bind.variableName().getText();
             return shiftOf(bind.getStart(), line, column, types.get(SqlIdentifiers.canonicalText(written)),
-                written.length() + 1, "?");
+                written.length() + 1, bindsNamed ? ":" + written : "?");
         }
         int shift = 0;
         for (int i = 0; i < node.getChildCount(); i++) {
-            shift += writtenOutShift(node.getChild(i), line, column, types, counters, namesBound);
+            shift += writtenOutShift(node.getChild(i), line, column, types, counters, namesBound, bindsNamed);
         }
         return shift;
     }

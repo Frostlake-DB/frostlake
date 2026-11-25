@@ -18,6 +18,7 @@ package dev.frostlake.executor;
 
 import dev.frostlake.storage.Row;
 
+import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -29,9 +30,12 @@ import java.util.WeakHashMap;
  * drops, a branch that is not taken, a column that is not read, one row that is never compared are not
  * computed, and their faults never raise (live-verified). The relation therefore keeps the fault in the cell,
  * and whatever reads the cell - a column reference, a join or grouping key, a sort key, a write, the result
- * handed out - raises it, the original exception unchanged.
+ * handed out - raises it, the original exception unchanged. A table's virtual column keeps its row fault the
+ * same way (see {@link VirtualColumns}).
  */
-public final class DeferredFault {
+public final class DeferredFault implements Serializable {
+    private static final long serialVersionUID = 1L;
+
     /**
      * The faults cells hold, by identity, so a catch that turns a failure into something else - a NULL key,
      * an invalid identifier - can let a deferred one through unchanged.
@@ -176,6 +180,16 @@ public final class DeferredFault {
      */
     public static boolean deferrable(final RuntimeException failure) {
         return !(failure instanceof SecurityException) && !SqlCompilationError.isCompilationError(failure.getMessage());
+    }
+
+    /**
+     * A cell read back from a snapshot: its fault is held again, as the cell that was written held it.
+     *
+     * @return this cell
+     */
+    private Object readResolve() {
+        HELD.put(fault, Boolean.TRUE);
+        return this;
     }
 
     @Override

@@ -405,7 +405,9 @@ final class ShowRelationalExecutor {
                           final Instant droppedOn) {
         // A schema of the SNOWFLAKE database is its application's where it has an owner at all.
         final SystemSchema system = SystemSchema.of(dbName, schema.getName());
-        final String owner = system != null ? system.owner() : schema.getOwner();
+        final String owner = system != null ? system.owner()
+            : SystemDatabase.ownedByNoRole("SCHEMA", QualifiedName.join(dbName, schema.getName())) ? null
+            : schema.getOwner();
         final List<Object> cells = new ArrayList<>(Arrays.asList(
                 ShowResultHelpers.createdOn(schema.getCreatedTime()),
                 schema.getName(),
@@ -1220,7 +1222,7 @@ final class ShowRelationalExecutor {
                 col.getName(),
                 // The data_type cell is a JSON descriptor in Snowflake's internal vocabulary,
                 // never a type name — see ColumnTypeJson. A table's column keeps its declared length.
-                ColumnTypeJson.renderDeclared(col.getDataType(), col.isNullable(), col.getCollation()),
+                ColumnTypeJson.renderDeclared(col.getDefinedType(), col.isNullable(), col.getCollation()),
                 // Snowflake reports NOT_NULL for a non-nullable column and the text "true" for a
                 // nullable one (live-captured), not Y/N.
                 col.isNullable() ? "true" : "NOT_NULL",
@@ -1257,9 +1259,10 @@ final class ShowRelationalExecutor {
         final List<Row> rows = new ArrayList<>();
         if (resolved != null && !resolved.isEmpty()) {
             for (final TableColumn col : resolved) {
-                rows.add(viewColumnRow(relationName, databaseName, schemaName, col.getName(),
-                    ColumnTypeJson.render(col.getDataType(), col.isNullable(), col.getCollation()), col.isNullable(),
-                    col.getComment()));
+                final String described = col.getDescribedType() != null ? col.getDescribedType()
+                    : ColumnTypeJson.render(col.getDataType(), col.isNullable(), col.getCollation());
+                rows.add(viewColumnRow(relationName, databaseName, schemaName, col.getName(), described,
+                    col.isNullable(), col.getComment()));
             }
             return rows;
         }
@@ -1702,7 +1705,7 @@ final class ShowRelationalExecutor {
             // A collated column carries its collation inside the type cell — VARCHAR … COLLATE 'spec'.
             // The type is spelled CANONICALLY, never as the alias the column was declared with:
             // INT and BIGINT both read NUMBER(38,0), STRING reads VARCHAR(16777216) (live-verified).
-            final String canonicalType = SqlTypeNames.tableColumnMetadata(col.getDataType());
+            final String canonicalType = SqlTypeNames.tableColumnMetadata(col.getDefinedType());
             final String typeText = col.getCollation() != null
                 ? canonicalType + " COLLATE '" + col.getCollation() + "'"
                 : canonicalType;

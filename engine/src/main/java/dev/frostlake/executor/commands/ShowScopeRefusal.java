@@ -117,9 +117,9 @@ final class ShowScopeRefusal {
         if (ctx.TABLES() != null && ctx.ICEBERG() == null && ctx.EVENT() == null && ctx.DYNAMIC() == null && ctx.HYBRID() == null
                 || ctx.SCHEMAS() != null || ctx.STAGES() != null) {
             if (name.identifierArgument() != null) {
-                throw new RuntimeException(syntaxErrorAt(name.identifierArgument().getStart(), "TOK_OBJECT_LITERAL"));
+                throw new ShowScopeClassRefusal(syntaxErrorAt(name.identifierArgument().getStart(), "TOK_OBJECT_LITERAL"));
             }
-            throw new RuntimeException(syntaxErrorAt(name.getStart(), writtenClassName(name)));
+            throw new ShowScopeClassRefusal(syntaxErrorAt(name.getStart(), writtenClassName(name)));
         }
         if (looksUpClass(ctx, listing)) {
             return;

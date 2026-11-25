@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.executor.AnonymousCallValues;
 import dev.frostlake.executor.AssignedStatement;
 import dev.frostlake.executor.CallNamedShape;
 import dev.frostlake.executor.ParseTreeText;
@@ -239,6 +240,8 @@ final class ScriptingNameValidator {
                         (FrostlakeParser.UntypedDeclarationItemContext) item;
                     rejectUntypableInitialiser(inferred.booleanExpr(), inferred.identifier(),
                         inferred.identifier().getStart(), scope, records, compiler);
+                    rejectUntypedCallValue(inferred.anonymousCallValue(), inferred.identifier(),
+                        inferred.identifier().getStart());
                 }
                 // The initializer is checked BEFORE the name is added: a declaration cannot see itself.
                 if (item instanceof FrostlakeParser.DeclarationItemContext
@@ -423,6 +426,7 @@ final class ScriptingNameValidator {
             if (let.dataTypeName() == null && let.CURSOR() == null && let.RESULTSET() == null) {
                 rejectUntypableInitialiser(let.booleanExpr(), let.variableName(), let.getStart(), scope, records,
                     compiler);
+                rejectUntypedCallValue(let.anonymousCallValue(), let.variableName(), let.getStart());
             }
             if (let.resultSetSource() != null) {
                 checkResultSetSource(let.resultSetSource(), scope);
@@ -1692,6 +1696,26 @@ final class ScriptingNameValidator {
     }
 
     /** Whether a named {@code :bind} stands anywhere under {@code node}. */
+    /**
+     * A CALL of a procedure the CALL defines for itself, given to a variable declared without a type, compiles with
+     * the block: a CALL naming another routine is refused as the function no one defined, {@code Unknown function Q.},
+     * and an argument reading a bind leaves the variable's type to no inference (both live-verified).
+     */
+    private static void rejectUntypedCallValue(final FrostlakeParser.AnonymousCallValueContext value,
+                                               final ParserRuleContext name, final Token at) {
+        if (value == null) {
+            return;
+        }
+        final String unknown = AnonymousCallValues.unknownRoutine(value.anonymousProcedure(), value.qualifiedName());
+        if (unknown != null) {
+            throw new RuntimeException(unknown);
+        }
+        if (value.callArguments() != null && holdsABind(value.callArguments())) {
+            throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
+                " variable '" + canonical(text(name)) + "' cannot have its type inferred from initializer"));
+        }
+    }
+
     private static boolean holdsABind(final ParseTree node) {
         if (node instanceof FrostlakeParser.BindVarExprContext) {
             return ((FrostlakeParser.BindVarExprContext) node).variableName() != null;

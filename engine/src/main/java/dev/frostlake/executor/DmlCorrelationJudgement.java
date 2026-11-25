@@ -17,12 +17,17 @@
 package dev.frostlake.executor;
 
 import dev.frostlake.metastore.model.Table;
+import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.SyntaxErrorListener;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import org.antlr.v4.runtime.CharStream;
 import org.antlr.v4.runtime.ParserRuleContext;
@@ -72,10 +77,119 @@ final class DmlCorrelationJudgement {
             table);
         final CorrelationPlanJudgement judgement = CorrelationPlanJudgement.of(executor, query,
             query.selectOperand(0).selectClause(), table, relations, null);
-        final RuntimeException refused = judgement == null ? null : judgement.refusal();
+        final RuntimeException refused = judgement == null ? null : judgement.forDml().refusal();
         if (refused != null) {
             throw refused;
         }
+    }
+
+    /**
+     * Refuses an UPDATE for the first anti-join of its SET values the account cannot evaluate (see
+     * {@link NullableAntiJoins}): {@code UPDATE t SET b = (k NOT IN (SELECT k FROM i))} over a column holding a NULL
+     * is refused at the query's SELECT, whether or not the target holds a row, and so is a keyed one over a query
+     * that may answer NULL (see {@link NullableAntiJoins#keyedValueRefusal}) (live-verified).
+     *
+     * @param executor    the executor
+     * @param table       the statement's target
+     * @param alias       the target's alias as written, or null
+     * @param assignments the SET list
+     */
+    static void requireAntiJoins(final QueryExecutor executor, final Table table,
+                                 final FrostlakeParser.IdentifierContext alias,
+                                 final List<FrostlakeParser.AssignmentContext> assignments) {
+        final List<ParserRuleContext> values = new ArrayList<>();
+        for (final FrostlakeParser.AssignmentContext assignment : assignments) {
+            values.add(assignment.expression());
+        }
+        final String name = (alias != null ? ParseTreeText.getIdentifier(alias) : table.getName())
+            .toUpperCase(Locale.ROOT);
+        final Set<String> outerNames = new HashSet<>();
+        for (final TableColumn column : table.getColumns()) {
+            final String upper = column.getName().toUpperCase(Locale.ROOT);
+            outerNames.add(upper);
+            outerNames.add(name + "." + upper);
+        }
+        final Map<String, Table> relations = new HashMap<>();
+        relations.put(name, table);
+        final NullableAntiJoins judged = new NullableAntiJoins(executor,
+            new CorrelatedSubqueryRule(executor, outerNames, relations, null), relations);
+        RuntimeException refused = judged.refusal(values);
+        if (refused == null) {
+            refused = judged.keyedValueRefusal(values);
+        }
+        if (refused != null) {
+            throw refused;
+        }
+    }
+
+    /**
+     * Refuses a DELETE or an UPDATE for the first NOT IN or {@code <> ALL} of its WHERE that the account cannot
+     * evaluate over a target of more than one row (see {@link NullableAntiJoins#refusesKeyedInDml}): {@code UPDATE t
+     * SET k = -1 WHERE t.id NOT IN (SELECT val FROM i WHERE i.k = t.k)} over a {@code val} holding a NULL is refused
+     * at the query's SELECT, with or without a FROM or a USING, where the same filter of a query is answered
+     * (live-verified).
+     *
+     * @param executor the executor
+     * @param table    the statement's target
+     * @param alias    the target's alias as written, or null
+     * @param where    the statement's WHERE, or null
+     */
+    static void requireKeyedAntiJoins(final QueryExecutor executor, final Table table,
+                                      final FrostlakeParser.IdentifierContext alias,
+                                      final FrostlakeParser.WhereClauseContext where) {
+        if (where == null || !holdsSubquery(where)) {
+            return;
+        }
+        final long rows = executor.storedRowCount(table.getQualifiedName());
+        if (rows >= 0 && rows <= 1) {
+            return;   // a target of one row at most is read row by row
+        }
+        final List<ParserRuleContext> antiJoins = new ArrayList<>();
+        NullableAntiJoins.collect(where.booleanExpr(), antiJoins);
+        if (antiJoins.isEmpty()) {
+            return;
+        }
+        final String name = (alias != null ? ParseTreeText.getIdentifier(alias) : table.getName())
+            .toUpperCase(Locale.ROOT);
+        final Set<String> outerNames = new HashSet<>();
+        for (final TableColumn column : table.getColumns()) {
+            final String upper = column.getName().toUpperCase(Locale.ROOT);
+            outerNames.add(upper);
+            outerNames.add(name + "." + upper);
+        }
+        final Map<String, Table> relations = new HashMap<>();
+        relations.put(name, table);
+        final NullableAntiJoins judged = new NullableAntiJoins(executor,
+            new CorrelatedSubqueryRule(executor, outerNames, relations, null), relations);
+        if (neverTrue(where.booleanExpr(), judged)) {
+            return;   // the WHERE folds to FALSE, and nothing of it is planned
+        }
+        for (final ParserRuleContext antiJoin : antiJoins) {
+            if (judged.refusesKeyedInDml(antiJoin)) {
+                throw NullableAntiJoins.placed(NullableAntiJoins.anchor(antiJoin));
+            }
+        }
+    }
+
+    /**
+     * Whether a conjunct of the WHERE, through AND and parentheses, is an anti-join no row passes (see
+     * {@link NullableAntiJoins#neverTrue}): beside {@code AND t.id NOT IN (SELECT val FROM i)} over a {@code val}
+     * holding a NULL, a keyed NOT IN is answered (live-verified).
+     */
+    private static boolean neverTrue(final FrostlakeParser.BooleanExprContext condition,
+                                     final NullableAntiJoins judged) {
+        if (condition instanceof FrostlakeParser.AndExprContext) {
+            final FrostlakeParser.AndExprContext and = (FrostlakeParser.AndExprContext) condition;
+            return neverTrue(and.booleanExpr(0), judged) || neverTrue(and.booleanExpr(1), judged);
+        }
+        if (!(condition instanceof FrostlakeParser.ValueExprContext)) {
+            return false;
+        }
+        final FrostlakeParser.ExpressionContext value = ((FrostlakeParser.ValueExprContext) condition).expression();
+        if (value instanceof FrostlakeParser.ParenExprContext) {
+            return neverTrue(((FrostlakeParser.ParenExprContext) value).booleanExpr(), judged);
+        }
+        return judged.neverTrue(value);
     }
 
     /** Whether the WHERE holds a query at all, the only thing the judgement reads. */

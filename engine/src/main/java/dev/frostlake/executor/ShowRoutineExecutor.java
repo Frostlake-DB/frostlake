@@ -16,9 +16,8 @@
 
 package dev.frostlake.executor;
 
-import dev.frostlake.functions.BuiltInFunction;
+import dev.frostlake.functions.BuiltinFunctionRows;
 import dev.frostlake.functions.FunctionRegistry;
-import dev.frostlake.functions.OperatorFunctionNames;
 import dev.frostlake.functions.UnlistedFunctionNames;
 import dev.frostlake.functions.scalar.context.DefinitionOwnership;
 import dev.frostlake.metastore.Catalog;
@@ -59,6 +58,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * SHOW / DESCRIBE handlers for routines and metadata objects: functions, procedures, tags, file formats,
@@ -366,20 +366,21 @@ final class ShowRoutineExecutor {
     }
 
     /**
-     * One row per name the engine can dispatch, taken from {@code FunctionRegistry.allDispatchableNames()}
-     * — the single source shared with the dispatchers themselves.
+     * The account's built-in rows ({@link BuiltinFunctionRows}) of every name the engine can dispatch, taken from
+     * {@code FunctionRegistry.allDispatchableNames()} — the single source shared with the dispatchers themselves, so
+     * a function of an optional module is listed exactly when that module is on the classpath.
      *
-     * <p>This replaced three loops over the registry's function/aggregate/table-function <em>values</em>,
-     * which listed 396 distinct names out of the 552 the engine can run: those loops read
-     * {@code BuiltInFunction.getName()}, so every alias reported its canonical name instead (SUBSTR showed
-     * as a second SUBSTRING row, and ARRAYAGG, RLIKE, DAYOFMONTH, BIT_OR_AGG, … never appeared at all),
-     * and the window, higher-order, SYSTEM$ and operator families are not in those maps to begin with.
-     * The built-ins the account itself leaves out of the listing ({@link UnlistedFunctionNames}) stay out.
+     * <p>A name is listed as the account lists it (live-verified): under the name it is called by, an alias
+     * included, with the account's flags, counts of arguments, signatures and description, one row or several as
+     * the account has them. A name the account itself leaves out of the listing stays out although the engine runs
+     * it — the table functions (FLATTEN, RESULT_SCAN, ...), CURRENT_ACCOUNT, GROUPING and the
+     * {@link UnlistedFunctionNames}.
      */
     private void appendBuiltinFunctionRows(final List<Row> rows) {
-        for (final String name : functionRegistry.allDispatchableNames()) {
-            if (!UnlistedFunctionNames.contains(name)) {
-                rows.add(builtinRow(name));
+        final Set<String> dispatchable = functionRegistry.allDispatchableNames();
+        for (final String[] cells : BuiltinFunctionRows.rows()) {
+            if (dispatchable.contains(cells[0]) && !UnlistedFunctionNames.contains(cells[0])) {
+                rows.add(builtinRow(cells));
             }
         }
     }
@@ -495,8 +496,7 @@ final class ShowRoutineExecutor {
      * The SHOW FUNCTIONS / SHOW BUILTIN FUNCTIONS column shape, matched against a real account
      * (both commands, and SHOW USER FUNCTIONS, return the same 21 columns in
      * this order). {@code secrets}, {@code external_access_integrations}, {@code is_memoizable} and
-     * {@code is_data_metric} were missing here; {@code is_ai_function} is the final column and
-     * answers N on every builtin of a real account, so it is a constant here.
+     * {@code is_data_metric} were missing here; {@code is_ai_function} is the final column.
      */
     private List<ResultSetColumn> functionColumns() {
         return Arrays.asList(
@@ -525,54 +525,33 @@ final class ShowRoutineExecutor {
     }
 
     /**
-     * A SHOW FUNCTIONS row for one dispatchable built-in name (is_builtin = 'Y').
-     *
-     * <p>The name is the registry <em>key</em>, so an alias is listed under the name it is called by, and
-     * the arity / return type come from whichever map holds it. The window, higher-order, SYSTEM$ and
-     * operator families have no function object at all, so their arity is left unmodelled (null) — a real
-     * account fills those in and reports variadic maxima as -1 (
-     * {@code COUNT} is {@code min_num_arguments = 1, max_num_arguments = -1}), which is why a variadic
-     * registry function reports -1 here rather than null.
+     * A SHOW FUNCTIONS row for one of the account's built-in rows: its own cells, and the ones every built-in row
+     * shares — created at the account's epoch, in no schema or catalog (both cells empty), {@code is_secure} NULL,
+     * no secrets, no integrations, not external (live-verified).
      */
-    private Row builtinRow(final String name) {
-        final boolean isAggregate = functionRegistry.hasAggregateFunction(name);
-        final BuiltInFunction fn = isAggregate
-            ? functionRegistry.getAggregateFunction(name) : functionRegistry.getFunction(name);
-        final Object minArgs = fn != null ? Integer.valueOf(fn.getMinArgCount()) : null;
-        final Object maxArgs = fn == null ? null
-            : Integer.valueOf(fn.isVariadic() || fn.getMaxArgCount() < 0 ? -1 : fn.getMaxArgCount());
-        final String args;
-        if (fn != null) {
-            args = name + (fn.getMaxArgCount() == 0 ? "()" : "(...)")
-                + " RETURN " + fn.getReturnType().getName();
-        } else if (OperatorFunctionNames.contains(name)) {
-            // An operator name is not call-shaped — "IS NULL(...)" or "COUNT(*)(...)" would be nonsense.
-            args = null;
-        } else {
-            args = name + "(...)";
-        }
+    private static Row builtinRow(final String[] cells) {
         return new Row(Arrays.asList(
-            null,                    // created_on
-            name,                    // name
-            "",                      // schema_name: empty, built-ins are in no schema (live-verified)
+            ShowResultHelpers.createdOn(BUILTIN_CREATED),
+            cells[0],                // name
+            "",                      // schema_name
             "Y",                     // is_builtin
-            isAggregate ? "Y" : "N", // is_aggregate
-            "N",                     // is_ansi
-            minArgs,                 // min_num_arguments
-            maxArgs,                 // max_num_arguments (-1 when variadic)
-            args,                    // arguments
-            null,                    // description
-            "",                      // catalog_name: empty, as schema_name
-            functionRegistry.hasTableFunction(name) ? "Y" : "N", // is_table_function
-            "N",                     // valid_for_clustering
-            null,                    // is_secure: NULL on every built-in (live-verified)
+            cells[1],                // is_aggregate
+            cells[2],                // is_ansi
+            Integer.valueOf(cells[3]), // min_num_arguments
+            Integer.valueOf(cells[4]), // max_num_arguments (-1 when variadic)
+            cells[5],                // arguments
+            cells[6],                // description
+            "",                      // catalog_name
+            cells[7],                // is_table_function
+            cells[8],                // valid_for_clustering
+            null,                    // is_secure
             "",                      // secrets
             "",                      // external_access_integrations
             "N",                     // is_external_function
-            "SQL",                   // language
-            "N",                     // is_memoizable
-            "N",                     // is_data_metric
-            "N"                      // is_ai_function
+            cells[9],                // language
+            cells[10],               // is_memoizable
+            cells[11],               // is_data_metric
+            cells[12]                // is_ai_function
         ));
     }
 
@@ -585,10 +564,6 @@ final class ShowRoutineExecutor {
      * {@code 'user-defined procedure'}; creating either {@code WITH COMMENT = 'my fn comment'} puts that
      * comment in the same cell instead. The column is therefore never null for a user routine — it was
      * here, because Frostlake passed the raw (null) comment straight through.
-     *
-     * <p>Built-in rows are a different matter and stay null: a real account fills them with per-function
-     * prose ({@code ABS} reads "returns absolute value of numeric"), which only a hand-maintained
-     * catalogue of ~1000 strings could reproduce.
      */
     private String routineDescription(final String comment, final String placeholder) {
         return comment == null || comment.isEmpty() ? placeholder : comment;

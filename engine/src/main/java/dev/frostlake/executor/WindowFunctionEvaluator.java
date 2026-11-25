@@ -25,6 +25,7 @@ import dev.frostlake.executor.expressions.CastExpression;
 import dev.frostlake.executor.expressions.CollatedKey;
 import dev.frostlake.executor.expressions.CollationSpec;
 import dev.frostlake.executor.expressions.ColumnReferenceExpression;
+import dev.frostlake.executor.expressions.ConstantProductFold;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FoldedValues;
@@ -61,6 +62,8 @@ import dev.frostlake.functions.aggregate.ObjectAggAccumulator;
 import dev.frostlake.functions.aggregate.PairStatisticAccumulator;
 import dev.frostlake.functions.aggregate.PercentileContAccumulator;
 import dev.frostlake.functions.aggregate.PercentileDiscAccumulator;
+import dev.frostlake.functions.aggregate.PinnedArgument;
+import dev.frostlake.functions.aggregate.PinnedArgumentAccumulator;
 import dev.frostlake.functions.aggregate.RegrAccumulator;
 import dev.frostlake.functions.aggregate.SumAccumulator;
 import dev.frostlake.functions.scalar.conversion.BooleanWords;
@@ -85,6 +88,7 @@ import dev.frostlake.types.DecimalText;
 import dev.frostlake.types.NumericType;
 import dev.frostlake.types.StringType;
 import dev.frostlake.types.VariantType;
+import dev.frostlake.values.FloatOriginNode;
 import dev.frostlake.values.VariantBooleans;
 import dev.frostlake.values.VariantJsonNulls;
 import dev.frostlake.values.VariantValue;
@@ -791,6 +795,20 @@ final class WindowFunctionEvaluator {
                 (FrostlakeParser.FunctionCallExprContext) node;
             final String name = aggregateLookupKey(call.functionName().getText());
             final FrostlakeParser.OverClauseContext over = call.overClause();
+            // ★ DISTINCT CANNOT BE ORDERED OR FRAMED — except under COUNT, which answers every frame,
+            // and except the whole-partition ROWS frame, which re-states the partition (both
+            // live-verified). Refused at the OVER keyword, ahead of the frame a whole-partition aggregate does not
+            // take: LISTAGG(DISTINCT x) OVER (ORDER BY y) and MEDIAN(DISTINCT y) OVER (… ROWS BETWEEN 1 PRECEDING
+            // AND 1 FOLLOWING) are refused for their DISTINCT. A DISTINCT with no argument after it is the
+            // invalid function it is first: DENSE_RANK(DISTINCT) OVER (ORDER BY n) (see CallShapeRules).
+            if (over != null && call.DISTINCT() != null && call.functionArgList() != null && !"COUNT".equals(name)
+                    && (over.orderByClause() != null || over.windowFrame() != null)
+                    && !(over.windowFrame() != null && !WindowFrameShape.isRange(over.windowFrame())
+                        && WindowFrameShape.spansWholePartition(over.windowFrame()))) {
+                throw new RuntimeException(SqlCompilationError.at(over.getStart().getLine(),
+                    over.getStart().getCharPositionInLine(),
+                    "distinct cannot be used with a window frame or an order."));
+            }
             if (over != null && WholePartitionAggregates.coversWholePartitionOnly(name)
                     && (over.orderByClause() != null || over.windowFrame() != null)
                     && !WindowFrameShape.spansWholePartition(over.windowFrame())) {
@@ -809,18 +827,6 @@ final class WindowFunctionEvaluator {
                     ? over : over.windowFrame();
                 throw new RuntimeException(SqlCompilationError.at(anchor.getStart().getLine(),
                     anchor.getStart().getCharPositionInLine(), rankingFrame));
-            }
-            // ★ DISTINCT CANNOT BE ORDERED OR FRAMED — except under COUNT, which answers every frame,
-            // and except the whole-partition ROWS frame, which re-states the partition (both
-            // live-verified). Refused at the OVER keyword. A DISTINCT with no argument after it is the
-            // invalid function it is first: DENSE_RANK(DISTINCT) OVER (ORDER BY n) (see CallShapeRules).
-            if (over != null && call.DISTINCT() != null && call.functionArgList() != null && !"COUNT".equals(name)
-                    && (over.orderByClause() != null || over.windowFrame() != null)
-                    && !(over.windowFrame() != null && !WindowFrameShape.isRange(over.windowFrame())
-                        && WindowFrameShape.spansWholePartition(over.windowFrame()))) {
-                throw new RuntimeException(SqlCompilationError.at(over.getStart().getLine(),
-                    over.getStart().getCharPositionInLine(),
-                    "distinct cannot be used with a window frame or an order."));
             }
             // ★ A WITHIN GROUP ORDERING CANNOT MEET AN OVER ORDERING: ARRAY_AGG(n) WITHIN GROUP (ORDER
             // BY n) OVER (ORDER BY n) is refused at the OVER keyword, with a one-edge, a two-edge or the
@@ -1228,6 +1234,28 @@ final class WindowFunctionEvaluator {
         final WhereAliasValues saved = state().aliasValues;
         state().aliasValues = values;
         return saved;
+    }
+
+    /**
+     * Install the outer row of a correlated query, which an item reads beside its windows: {@code SUM(val) OVER () +
+     * o.id} in a subquery over the row of o (live-verified).
+     *
+     * @param outer the outer row's values by name, or null for a query of its own
+     * @return the row installed before, for {@link #endOuterRow}
+     */
+    Map<String, Object> beginOuterRow(final Map<String, Object> outer) {
+        final Map<String, Object> saved = state().outerRow;
+        state().outerRow = outer;
+        return saved;
+    }
+
+    /**
+     * Restore the row saved by {@link #beginOuterRow}.
+     *
+     * @param saved the row to put back
+     */
+    void endOuterRow(final Map<String, Object> saved) {
+        state().outerRow = saved;
     }
 
     /**
@@ -1695,10 +1723,14 @@ final class WindowFunctionEvaluator {
                     ? computeRank(sortedPartition, currentRowIndex, overClause, allRows, table)
                     : computeDenseRank(sortedPartition, currentRowIndex, overClause, allRows, table);
             }
+            // LAG and LEAD hand a folded FLOAT in a VARIANT on as a computed double, where FIRST_VALUE and
+            // LAST_VALUE keep its origin (live-verified).
             case "LAG":
-                return computeLag(funcCtx, sortedPartition, position, allRows.get(currentRowIndex), table);
+                return FloatOriginNode.withoutOrigin(
+                    computeLag(funcCtx, sortedPartition, position, allRows.get(currentRowIndex), table));
             case "LEAD":
-                return computeLead(funcCtx, sortedPartition, position, allRows.get(currentRowIndex), table);
+                return FloatOriginNode.withoutOrigin(
+                    computeLead(funcCtx, sortedPartition, position, allRows.get(currentRowIndex), table));
             case "COUNT": {
                 final int[] frame = frameBounds(overClause, sortedPartition, position, table);
                 return computeWindowCount(funcCtx, sortedPartition, frame[0], frame[1], table);
@@ -1707,9 +1739,10 @@ final class WindowFunctionEvaluator {
             case "AVG":
             case "MIN":
             case "MAX": {
+                // A window MIN or MAX hands a folded FLOAT in a VARIANT on as a computed double, as LAG does.
                 final int[] frame = frameBounds(overClause, sortedPartition, position, table);
-                return computeWindowAggregate(functionName, funcCtx, sortedPartition, frame[0], frame[1], table,
-                    allRows, position);
+                return FloatOriginNode.withoutOrigin(computeWindowAggregate(functionName, funcCtx, sortedPartition,
+                    frame[0], frame[1], table, allRows, position));
             }
             case "NTILE":
                 return computeNtile(funcCtx, sortedPartition, position, allRows.get(currentRowIndex), table);
@@ -1729,7 +1762,9 @@ final class WindowFunctionEvaluator {
             }
             case "NTH_VALUE": {
                 final int[] frame = valueFrameBounds(functionName, overClause, sortedPartition, position, table);
-                return computeNthValue(funcCtx, sortedPartition, frame[0], frame[1], table);
+                // NTH_VALUE hands a folded FLOAT in a VARIANT on as a computed double, as LAG does.
+                return FloatOriginNode.withoutOrigin(
+                    computeNthValue(funcCtx, sortedPartition, frame[0], frame[1], table));
             }
             case "CONDITIONAL_TRUE_EVENT":
                 return computeConditionalTrueEvent(funcCtx, sortedPartition, position, overClause, table);
@@ -1807,6 +1842,7 @@ final class WindowFunctionEvaluator {
             ev.setMultiTableContext(winAliasToTable, executor.currentWindowAllTables());
         }
         ev.setResultContext(resultContext);
+        ev.setOuterLateralContext(state().outerRow);
         return ev.evaluate(exprText, allRows.get(currentRowIndex));
     }
 
@@ -2023,6 +2059,18 @@ final class WindowFunctionEvaluator {
         // A window argument may reference a SELECT alias (SUM(w) OVER () beside v AS w works
         // live), so the output aliases are exempt from the walk's scope rejection.
         checker.setScopeExemptNames(outputAliasNames);
+        rejectWindowArguments(windowCalls, checker);
+    }
+
+    /**
+     * {@link #rejectFileWindowArguments} with the evaluator the calls are judged by given: an aggregate query's
+     * select list judges them over the relations it reads, before its grouping is checked.
+     *
+     * @param windowCalls the window calls
+     * @param checker     the evaluator their arguments are walked by
+     */
+    void rejectWindowArguments(final List<FrostlakeParser.FunctionCallExprContext> windowCalls,
+                               final ExpressionEvaluator checker) {
         for (final FrostlakeParser.FunctionCallExprContext call : windowCalls) {
             // The call's DECLARED type is asked for before any row is computed, because the type can
             // itself be the refusal: AVG(x) OVER () over a NUMBER(38,37) is "Invalid intermediate
@@ -2232,11 +2280,17 @@ final class WindowFunctionEvaluator {
      * @return one entry per key, null where the key carries no collation
      */
     private CollationSpec[] keyCollations(final List<String> keyTexts, final Table table) {
-        if (!KeyCollations.reachable(keyTexts, table, null, null)) {
+        // Over a join a qualified key takes the collation of the relation its qualifier names.
+        final Map<String, Table> aliasToTable = executor.currentWindowAliasToTable();
+        final List<Table> allTables = executor.currentWindowAllTables();
+        if (!KeyCollations.reachable(keyTexts, table, aliasToTable, allTables)) {
             return new CollationSpec[keyTexts.size()];
         }
         final ExpressionEvaluator evaluator = new ExpressionEvaluator(table,
             executor.getFunctionRegistry(), executor.getCatalog(), executor);
+        if (aliasToTable != null && allTables != null) {
+            evaluator.setMultiTableContext(aliasToTable, allTables);
+        }
         return KeyCollations.resolve(keyTexts, evaluator);
     }
 
@@ -2484,7 +2538,8 @@ final class WindowFunctionEvaluator {
         };
 
     // Per-batch, per-thread: each sorted partition's argument cells for the value functions (FIRST_VALUE,
-    // LAST_VALUE, NTH_VALUE, LAG, LEAD), keyed by the partition list's identity and then by the argument's text.
+    // LAST_VALUE, NTH_VALUE, LAG, LEAD) and RATIO_TO_REPORT, keyed by the partition list's identity and then by
+    // the argument's text.
     private final ThreadLocal<Map<List<Row>, Map<String, WindowValueCells>>> valueArgCells =
         new ThreadLocal<Map<List<Row>, Map<String, WindowValueCells>>>() {
             @Override
@@ -3039,6 +3094,19 @@ final class WindowFunctionEvaluator {
         final String colExpr = !windowArgs(funcCtx).isEmpty()
             ? ParseTreeText.getOriginalText(windowArgs(funcCtx).get(0)) : null;
         final Object curVal = extractColumnValue(currentRow, colExpr, table);
+        final WindowValueCells cells = valueCellsFor(sortedPartition, colExpr, table);
+        if (cells != null) {
+            if (ratioScale(funcCtx, table) == DECFLOAT_RATIO) {
+                return curVal instanceof Number
+                    ? WindowFunctionHelper.decfloatRatioOfTotal(curVal, cells.decfloatRatioTotal()) : null;
+            }
+            if (curVal == null) {
+                return null;
+            }
+            final double current = WindowFunctionHelper.ratioNumber(curVal);
+            return ratioAtDeclaredScale(funcCtx,
+                WindowFunctionHelper.ratioOfTotal(current, cells.ratioTotal()), table);
+        }
         final List<Object> allVals = frameValues(sortedPartition, 0, sortedPartition.size() - 1, colExpr, table);
         if (ratioScale(funcCtx, table) == DECFLOAT_RATIO) {
             return WindowFunctionHelper.decfloatRatioToReport(curVal, allVals);
@@ -3989,7 +4057,8 @@ final class WindowFunctionEvaluator {
                 lows[i] = bounds[0];
                 highs[i] = bounds[1];
             }
-            return new ExactFrameMoments(values, lows, highs, MomentStatistic.named(functionName));
+            return new ExactFrameMoments(values, lows, highs, MomentStatistic.named(functionName),
+                pinnedArgument(argExpr, table));
         }
         final Double[] terms = new Double[values.length];
         try {
@@ -4410,6 +4479,9 @@ final class WindowFunctionEvaluator {
         if (acc instanceof DeclaredArgumentAccumulator) {
             ((DeclaredArgumentAccumulator) acc).setDeclaredArgumentType(declaredArgumentType(argExpr, table));
         }
+        if (acc instanceof PinnedArgumentAccumulator && secondExpr == null) {
+            ((PinnedArgumentAccumulator) acc).setPinnedArgument(pinnedArgument(argExpr, table));
+        }
         if (acc instanceof DecfloatAwareAccumulator) {
             // A statistic of pairs is a DECFLOAT when either of its arguments is one.
             final boolean decfloat = NumericType.isDecfloat(declaredArgumentType(argExpr, table))
@@ -4604,6 +4676,36 @@ final class WindowFunctionEvaluator {
             return evaluatorOver(table).inferStaticType(ExpressionEvaluator.parse(expressionText));
         } catch (final RuntimeException undetermined) {
             return null;
+        }
+    }
+
+    /**
+     * Whether a window aggregate's argument is a constant to the planner: one value, never NULL, by its interval
+     * (see {@link ConstantProductFold#pins}).
+     */
+    private PinnedArgument pinnedArgument(final String expressionText, final Table table) {
+        return new PinnedArgument() {
+            private Boolean pinned;
+
+            @Override
+            public boolean isPinned() {
+                if (pinned == null) {
+                    pinned = Boolean.valueOf(pinnedOver(expressionText, table));
+                }
+                return pinned.booleanValue();
+            }
+        };
+    }
+
+    private boolean pinnedOver(final String expressionText, final Table table) {
+        if (expressionText == null || table == null) {
+            return false;
+        }
+        try {
+            return ConstantProductFold.pins(evaluatorOver(table).inferStaticRange(
+                ExpressionEvaluator.parse(expressionText)));
+        } catch (final RuntimeException undetermined) {
+            return false;
         }
     }
 

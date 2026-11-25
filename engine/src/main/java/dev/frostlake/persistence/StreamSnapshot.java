@@ -47,6 +47,9 @@ public class StreamSnapshot implements Serializable {
     // The tables a re-bind that kept the stream's changes lists it as reading, each as its database, schema and
     // table (StreamSources#shownTablePlaces). Null when there was no such re-bind, and on older snapshots.
     public List<List<String>> shownTables;
+    // The tables the stream is bound to, each by its table ID (StreamSources#boundTableIds), a dropped one UNDROP can
+    // restore included. Null when it was bound to none, and on older snapshots, which bind it by its names.
+    public List<Long> boundTableIds;
     public String comment;
     public String owner;
     public List<StreamRecordSnapshot> records = new ArrayList<>();

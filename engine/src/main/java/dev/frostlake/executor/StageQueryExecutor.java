@@ -25,6 +25,7 @@ import dev.frostlake.executor.copy.StageReaderFactory;
 import dev.frostlake.executor.copy.StagedFileIo;
 import dev.frostlake.executor.operators.RowsProvider;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.file.StoredStageObject;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.FileFormat;
 import dev.frostlake.metastore.model.Stage;
@@ -51,25 +52,20 @@ import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.StringReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.UUID;
 
 /**
  * Query staged files directly — {@code SELECT $1, $2, metadata$filename FROM @stage[/path]
@@ -167,7 +163,7 @@ final class StageQueryExecutor {
                 break;
             }
             final String relativeName = staged.metadataFileName(file);
-            final StagedFileMetadata metadata = StagedFileMetadata.of(file, relativeName);
+            final StagedFileMetadata metadata = StagedFileMetadata.of(file, relativeName, staged.isClientEncrypted());
             long rowNumber = 0;
             try {
                 if (recordReader != null) {
@@ -175,9 +171,9 @@ final class StageQueryExecutor {
                     // every format reads under its own options.
                     final List<JsonNode> records = recordReader instanceof JsonStageReader
                         ? ((JsonStageReader) recordReader).readRecords(file, options.stripsOuterArray(),
-                            options.replacesInvalidCharacters(), storedName(staged, relativeName), readsPositions,
+                            options.replacesInvalidCharacters(), storedName(staged, file), readsPositions,
                             options.allowsDuplicate(), options.getCompression())
-                        : recordReader.readRecords(file, options, storedName(staged, relativeName));
+                        : recordReader.readRecords(file, options, storedName(staged, file));
                     for (final JsonNode record : records) {
                         if (options.stripsNullValues()) {
                             JsonNullStripping.strip(record);
@@ -356,11 +352,12 @@ final class StageQueryExecutor {
 
     /**
      * What a refresh would register for a stage location: every file of the stage, at any depth, as it is now.
-     * MD5 and ETAG are the digest of the file's bytes.
+     * SIZE, MD5 and ETAG are the stored object's (see StoredStageObject).
      */
     List<Row> directoryListing(final String location) {
         // A directory table lists every file of the stage, at any depth, by its stage-relative path.
         final StagePrefix staged = requireRoot(executor.resolveStagePrefix(location), location);
+        final boolean clientEncrypted = staged.isClientEncrypted();
         final List<Row> rows = new ArrayList<>();
         for (final Path file : staged.files(null)) {
             final String relative = staged.relative(file);
@@ -368,10 +365,10 @@ final class StageQueryExecutor {
             ZonedDateTime modified = null;
             String digest = null;
             try {
-                size = Files.size(file);
+                size = StoredStageObject.size(Files.size(file), clientEncrypted);
                 modified = Instant.ofEpochMilli(Files.getLastModifiedTime(file).toMillis())
                     .atZone(SessionZone.current()).withFixedOffsetZone();
-                digest = md5Of(file);
+                digest = StoredStageObject.digest(file, clientEncrypted);
             } catch (final IOException e) {
                 logger.warn("DIRECTORY(@stage): cannot stat {}: {}", file, e.getMessage());
             }
@@ -380,25 +377,6 @@ final class StageQueryExecutor {
                 executor.stageFileUrl(location, relative))));
         }
         return rows;
-    }
-
-    /** The MD5 of a file's bytes, in lower-case hex. */
-    static String md5Of(final Path file) throws IOException {
-        final MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("MD5");
-        } catch (final NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 is unavailable", e);
-        }
-        final byte[] buffer = new byte[8192];
-        try (InputStream in = Files.newInputStream(file)) {
-            int read = in.read(buffer);
-            while (read >= 0) {
-                digest.update(buffer, 0, read);
-                read = in.read(buffer);
-            }
-        }
-        return HexFormat.of().formatHex(digest.digest());
     }
 
     /** A DIRECTORY listing's column, its type as the account declares it. */
@@ -415,12 +393,11 @@ final class StageQueryExecutor {
     }
 
     /**
-     * A staged file as a refusal names it from the stage's storage: {@code stages/<the stage's id>/<file>}, the id
-     * fixed for the stage's directory (live-verified shape).
+     * A staged file as a refusal names it from the stage's storage: {@code stages/<the stage's id>/<file>} for a
+     * named stage (live-verified shape), the folder a PATTERN matches the file's path under.
      */
-    private static String storedName(final StagePrefix staged, final String relativeName) {
-        final String root = String.valueOf(staged.getRoot());
-        return "stages/" + UUID.nameUUIDFromBytes(root.getBytes(StandardCharsets.UTF_8)) + "/" + relativeName;
+    private static String storedName(final StagePrefix staged, final Path file) {
+        return staged.getPatternFolder() + staged.relative(file);
     }
 
     /** A stage reference whose stage has a local directory behind it; any other cannot be read. */

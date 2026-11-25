@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,7 +100,8 @@ final class AlterStageHandler {
         if (action.REFRESH() != null) {
             requireOptionValues(action);
         }
-        requireWellFormedCredentials(action.stageSetting());
+        requireCredentials(action.stageSetting(), null);
+        judgeListsBeforeLookup(action.stageSetting());
         if (ifExists && action.REFRESH() == null && !exists(stageName)) {
             logger.debug("Stage does not exist (IF EXISTS): {}", stageName);
             return null;
@@ -148,6 +150,9 @@ final class AlterStageHandler {
             // group is judged first, at the location the statement leaves the stage: an internal stage refuses a
             // URL only once the group passed (live-verified).
             final String location = locationAfter(stage, action.stageSetting());
+            if (stage.getUrl() != null) {
+                requireCredentials(action.stageSetting(), location);
+            }
             for (final FrostlakeParser.StageSettingContext setting : action.stageSetting()) {
                 if (isEncryption(setting)) {
                     encryption(stage, setting, location);
@@ -165,18 +170,63 @@ final class AlterStageHandler {
         return null;
     }
 
-    /** A key of the CREDENTIALS is judged by its shape before the stage is looked up (see StageCredentials). */
-    private static void requireWellFormedCredentials(final List<FrostlakeParser.StageSettingContext> settings) {
-        final List<FrostlakeParser.ParenOptionListContext> credentials = new ArrayList<>();
-        final List<FrostlakeParser.ParenOptionListContext> formats = new ArrayList<>();
+    /**
+     * The statement's CREDENTIALS judged, once its FILE_FORMAT, DIRECTORY and ENCRYPTION lists are judged by their own
+     * shape (see StageCredentials): as written before the stage is looked up, at its location once it is.
+     *
+     * @param settings the statement's settings
+     * @param location the location the statement leaves the stage at, or null to judge the values as written alone
+     */
+    private static void requireCredentials(final List<FrostlakeParser.StageSettingContext> settings,
+                                           final String location) {
+        final List<ParserRuleContext> credentials = new ArrayList<>();
         for (final FrostlakeParser.StageSettingContext setting : settings) {
-            if (setting.parenOptionList() != null && StageCredentials.names(setting.identifier())) {
-                credentials.add(setting.parenOptionList());
-            } else if (setting.parenOptionList() != null && setting.FILE_FORMAT() != null) {
-                formats.add(setting.parenOptionList());
+            if (StageCredentials.names(setting.identifier())) {
+                credentials.add(setting.parenOptionList() != null ? setting.parenOptionList()
+                    : setting.copyOptionValue());
             }
         }
-        StageCredentials.requireWellFormed(credentials, formats);
+        final RuntimeException refusal = StageCredentials.refusal(credentials, location);
+        if (refusal == null) {
+            return;
+        }
+        for (final FrostlakeParser.StageSettingContext setting : settings) {
+            if (setting.parenOptionList() != null && setting.FILE_FORMAT() != null) {
+                FileFormatClause.read(setting.parenOptionList(), new FileFormat("WRITTEN", "CSV"), true);
+            } else if (setting.ENCRYPTION() != null) {
+                StageEncryption.judge(setting.constantList() != null ? ListValues.CONSTANT_LIST : null,
+                    setting.parenOptionList(), null, false, false);
+            } else if (setting.parenOptionList() != null && setting.identifier() != null
+                    && "DIRECTORY".equalsIgnoreCase(setting.identifier().getText())) {
+                StageDirectoryOptions.read(setting.parenOptionList(), false);
+            }
+        }
+        throw refusal;
+    }
+
+    /**
+     * What a SET's lists hold is judged before the stage is looked up (live-verified): a FILE_FORMAT list as every
+     * one is, a list of constants for it naming no format, the DIRECTORY's switches, an ENCRYPTION's names and NULL
+     * values or a list of constants for it, which is no property list, and a list of constants for the COMMENT.
+     */
+    private static void judgeListsBeforeLookup(final List<FrostlakeParser.StageSettingContext> settings) {
+        for (final FrostlakeParser.StageSettingContext setting : settings) {
+            if (setting.FILE_FORMAT() != null && setting.parenOptionList() != null) {
+                FileFormatClause.read(setting.parenOptionList(), new FileFormat("WRITTEN", "CSV"), true);
+            } else if (setting.FILE_FORMAT() != null && setting.constantList() != null) {
+                throw new RuntimeException(SqlCompilationError.doesNotExist("File format", ListValues.CONSTANT_LIST));
+            } else if (setting.COMMENT() != null && setting.constantList() != null) {
+                throw CreatedObjectProperties.listedTextValue("COMMENT",
+                    setting.constantList().propertyListConstant());
+            } else if (setting.parenOptionList() != null && isEncryption(setting)) {
+                StageEncryption.requireNamedValues(setting.parenOptionList());
+            } else if (setting.constantList() != null && isEncryption(setting)) {
+                StageEncryption.judge(ListValues.CONSTANT_LIST, null, null, false, false);
+            } else if (setting.parenOptionList() != null && setting.identifier() != null
+                    && "DIRECTORY".equalsIgnoreCase(setting.identifier().getText())) {
+                StageDirectoryOptions.read(setting.parenOptionList(), false);
+            }
+        }
     }
 
     private boolean exists(final String stageName) {
@@ -208,7 +258,8 @@ final class AlterStageHandler {
     private static StageEncryption encryption(final Stage stage, final FrostlakeParser.StageSettingContext setting,
                                               final String location) {
         final FrostlakeParser.CopyOptionValueContext value = setting.copyOptionValue();
-        final String written = value == null ? null : value.booleanValue() != null
+        final String written = setting.constantList() != null ? ListValues.CONSTANT_LIST
+            : value == null ? null : value.booleanValue() != null
             ? value.booleanValue().getText().toUpperCase(Locale.ROOT) : ParseTreeText.getOriginalText(value);
         return StageEncryption.judge(written, setting.parenOptionList(), location, stage.getUrl() == null, false);
     }
@@ -224,6 +275,17 @@ final class AlterStageHandler {
             }
         } else if (setting.FILE_FORMAT() != null) {
             setFileFormat(stage, setting, apply);
+        } else if (setting.COMMENT() != null && setting.parenOptionList() != null
+                && setting.parenOptionList().parenOption().isEmpty()) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.CONSTANT_LIST,
+                "COMMENT"));
+        } else if (setting.COMMENT() != null && setting.parenOptionList() != null) {
+            // A list of properties is taken, the comment holding the parser's word for it (live-verified).
+            if (apply) {
+                stage.setComment(ListValues.PROPERTY_LIST);
+            }
+        } else if (setting.COMMENT() != null && setting.constantList() != null) {
+            throw CreatedObjectProperties.listedTextValue("COMMENT", setting.constantList().propertyListConstant());
         } else if (setting.COMMENT() != null) {
             // A session variable is read into the value's place: a text, or NULL for no comment (see
             // PropertyVariables).
@@ -314,7 +376,6 @@ final class AlterStageHandler {
         }
         if ("CREDENTIALS".equals(key)) {
             refuseOnInternalStage(stage);
-            StageCredentials.requireFilled(setting.parenOptionList(), location);
         } else if ("STORAGE_INTEGRATION".equals(key)) {
             final Integration integration = requireIntegration(setting);
             if (apply) {

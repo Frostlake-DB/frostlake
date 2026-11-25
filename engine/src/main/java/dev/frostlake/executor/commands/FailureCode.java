@@ -18,8 +18,11 @@ package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.BlockExpressionTypeError;
 import dev.frostlake.executor.GetDdlMissingObject;
+import dev.frostlake.executor.MissingColumnObject;
+import dev.frostlake.executor.MultiStatementFailure;
 import dev.frostlake.executor.StatementCanceledException;
 import dev.frostlake.executor.StatementCountMismatch;
+import dev.frostlake.executor.UncaughtStatementFailure;
 import dev.frostlake.executor.procedural.ProceduralException;
 import dev.frostlake.parser.SqlSyntaxException;
 
@@ -29,8 +32,10 @@ import dev.frostlake.parser.SqlSyntaxException;
  * user-defined exception carries its declared code and the state P0001; a syntax error is 1003 / 42000, and a
  * refusal the parser raises of another family that family's pair; argument
  * types an operator or a call does not take are 1044 / 42P13, a parameter that cannot be converted to the type it
- * is compared with 1038 / 22023 and a cast the matrix refuses 1007 / 22023, and an object GET_DDL does not find
- * 2003 / 02000; every other refusal reads the code and the state of its sentence (see {@link HandlerErrorCode}).
+ * is compared with 1038 / 22023, a cast the matrix refuses 1007 / 22023 and a block expression's call of too few or
+ * too many arguments 938 or 939 / 22023, an object GET_DDL does not find
+ * 2003 / 02000, a SHOW listing's scope refused at its class name 1002 / 42601 and a column a RENAME COLUMN or a COMMENT ON COLUMN does not find 2001 / 02000 and a statement that failed among several
+ * 100132 / P0000 whatever its own failure, also when a block lets it out uncaught; every other refusal reads the code and the state of its sentence (see {@link HandlerErrorCode}).
  */
 public final class FailureCode {
 
@@ -92,6 +97,10 @@ public final class FailureCode {
     /** The pair a failure's kind carries whatever its sentence, or null. */
     private static FailureCode typed(final Throwable failure) {
         final String message = messageOf(failure);
+        if (failure instanceof MultiStatementFailure || failure instanceof UncaughtStatementFailure
+                && failure.getCause() instanceof MultiStatementFailure) {
+            return new FailureCode(MultiStatementFailure.CODE, MultiStatementFailure.STATE);
+        }
         if (failure instanceof ProceduralException) {
             return new FailureCode(((ProceduralException) failure).getErrorCode(), "P0001");
         }
@@ -108,13 +117,26 @@ public final class FailureCode {
             if (message.contains("invalid type [CAST(")) {
                 return new FailureCode(1007, "22023");
             }
+            // A call given fewer or more arguments than it takes is counted, not typed (live-verified).
+            if (message.contains("not enough arguments for function [")) {
+                return new FailureCode(938, "22023");
+            }
+            if (message.contains("too many arguments for function [")) {
+                return new FailureCode(939, "22023");
+            }
             return new FailureCode(1044, "42P13");
+        }
+        if (failure instanceof ShowScopeClassRefusal) {
+            return new FailureCode(ShowScopeClassRefusal.CODE, ShowScopeClassRefusal.STATE);
         }
         if (failure instanceof StatementCountMismatch) {
             return new FailureCode(StatementCountMismatch.CODE, StatementCountMismatch.STATE);
         }
         if (failure instanceof GetDdlMissingObject) {
             return new FailureCode(GetDdlMissingObject.CODE, GetDdlMissingObject.STATE);
+        }
+        if (failure instanceof MissingColumnObject) {
+            return new FailureCode(MissingColumnObject.CODE, MissingColumnObject.STATE);
         }
         return null;
     }

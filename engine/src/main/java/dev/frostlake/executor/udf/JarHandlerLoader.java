@@ -453,6 +453,10 @@ public final class JarHandlerLoader {
             if (s3Resolver == null) {
                 return null;
             }
+            if (s3Resolver.fetches() && !relative.isEmpty()) {
+                // One object, fetched on its own rather than through a sync of the stage's whole prefix.
+                return s3Resolver.toLocalPath(url + (url.endsWith("/") ? "" : "/") + relative).toString();
+            }
             base = s3Resolver.toLocalPath(url);
         } else if (stage.getLocalPath() != null) {
             base = stage.getLocalPath();   // file:// (or otherwise local) stage

@@ -115,6 +115,64 @@ final class UnsupportedLateralSubquery {
             alias == null ? null : alias.toUpperCase(Locale.ROOT), columns);
     }
 
+    /**
+     * The columns of the derived table {@code source} the query names outside it, upper-cased: bare, or qualified by
+     * its alias, in the select, its ON conditions and its statement's ORDER BY; null where a star reads them all.
+     *
+     * @param select the query
+     * @param source the derived table
+     * @return the names read, or null
+     */
+    static Set<String> namesReadOutside(final FrostlakeParser.SelectClauseContext select,
+                                        final FrostlakeParser.TableReferenceContext source) {
+        if (select == null) {
+            return null;
+        }
+        final String alias = source.aliasName() != null ? ParseTreeText.getIdentifier(source.aliasName())
+            : source.nonJoinKeywordIdentifier() != null ? source.nonJoinKeywordIdentifier().getText() : null;
+        final String named = alias == null ? null : alias.toUpperCase(Locale.ROOT);
+        final Set<String> names = new HashSet<>();
+        if (!collectNames(select, source, named, names)) {
+            return null;
+        }
+        ParseTree statement = select.getParent();
+        while (statement != null && !(statement instanceof FrostlakeParser.SelectStatementContext)) {
+            statement = statement.getParent();
+        }
+        final FrostlakeParser.OrderByClauseContext orderBy = statement == null ? null
+            : ((FrostlakeParser.SelectStatementContext) statement).orderByClause();
+        return orderBy == null || collectNames(orderBy, source, named, names) ? names : null;
+    }
+
+    private static boolean collectNames(final ParseTree node, final FrostlakeParser.TableReferenceContext source,
+                                        final String alias, final Set<String> into) {
+        if (node == source) {
+            return true;
+        }
+        if (node instanceof FrostlakeParser.SelectItemContext
+                && (SelectItemAccessors.isStarItem((FrostlakeParser.SelectItemContext) node)
+                    || SelectItemAccessors.isQualifiedStarItem((FrostlakeParser.SelectItemContext) node))) {
+            return false;
+        }
+        if (node instanceof FrostlakeParser.QualifiedNameContext) {
+            final FrostlakeParser.QualifiedNameContext name = (FrostlakeParser.QualifiedNameContext) node;
+            if (name.nameStartPart() != null) {
+                final String first = ParseTreeText.namePartText(name.nameStartPart()).toUpperCase(Locale.ROOT);
+                if (name.namePart().isEmpty()) {
+                    into.add(first);
+                } else if (name.namePart().size() == 1 && first.equals(alias)) {
+                    into.add(ParseTreeText.namePartText(name.namePart(0)).toUpperCase(Locale.ROOT));
+                }
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (!collectNames(node.getChild(i), source, alias, into)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static boolean reads(final ParseTree node, final FrostlakeParser.TableReferenceContext source,
                                  final ParseTree on, final String alias, final Set<String> columns) {
         if (node == source || node == on) {

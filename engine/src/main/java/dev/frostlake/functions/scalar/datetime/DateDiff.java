@@ -19,6 +19,7 @@ package dev.frostlake.functions.scalar.datetime;
 import dev.frostlake.executor.SessionWeek;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 import dev.frostlake.types.IntegerResultWidths;
 
 import java.math.BigDecimal;
@@ -67,7 +68,7 @@ public class DateDiff extends BuiltInFunction {
      */
     private static LocalDateTime atUtc(final Object source, final LocalDateTime wall) {
         if (source instanceof ZonedDateTime) {
-            return wall.minusSeconds(((ZonedDateTime) source).getOffset().getTotalSeconds());
+            return wall.minusSeconds(WideOffsetZone.offsetSeconds((ZonedDateTime) source));
         }
         if (source instanceof OffsetDateTime) {
             return wall.minusSeconds(((OffsetDateTime) source).getOffset().getTotalSeconds());

@@ -53,6 +53,7 @@ import dev.frostlake.persistence.CheckpointDebt;
 import dev.frostlake.persistence.CounterMark;
 import dev.frostlake.persistence.MemoryTableDataStore;
 import dev.frostlake.persistence.PersistenceManager;
+import dev.frostlake.persistence.PurgedFileHold;
 import dev.frostlake.persistence.QueryPointLog;
 import dev.frostlake.persistence.QueryPointSnapshot;
 import dev.frostlake.persistence.WalRecord;
@@ -111,6 +112,10 @@ public class DatabaseEngine {
 
     private static final Logger logger = LoggerFactory.getLogger(DatabaseEngine.class);
 
+    /** The refusal of a statement that writes while applied work is missing from the write-ahead log. */
+    private static final String LOG_BEHIND_REFUSAL = "The write-ahead log could not record work already applied, and"
+        + " no checkpoint could be written since; no statement that writes runs until one is";
+
     private final EngineConfig config;
     private final Catalog catalog;
     private final StorageEngine storageEngine;
@@ -136,6 +141,12 @@ public class DatabaseEngine {
     /** How many transaction records this engine appended to the WAL: what places a logged statement on replay. */
     private final AtomicLong walAppends = new AtomicLong();
     private long checkpointSeq = 0;       // monotonic sequence for naming checkpoint snapshot directories
+
+    /** Where a load's purge keeps its files until a checkpoint holds the load; null without a write-ahead log. */
+    private PurgedFileHold purgedFileHold;
+
+    /** How many purged files the recovery put back for the replayed loads to read. */
+    private int restoredPurgedFiles;
     /** When this engine started: the instant its built-in objects are created at (see BuiltInObjects). */
     private final Instant started;
 
@@ -330,6 +341,9 @@ public class DatabaseEngine {
         if (wal != null) {
             wireWalSink();
             checkpointSeq = scanMaxCheckpointSeq();
+            purgedFileHold = new PurgedFileHold(walDataDir().resolve("wal-purged"));
+            purgedFileHold.setGeneration(checkpointSeq);
+            queryExecutor.setPurgedFileHold(purgedFileHold);
             replayWal();
             if (!walReplayFailures.isEmpty() && config.isWalReplayStrict()) {
                 // Nothing has started yet but the log, which recovery only read: closing it leaves the log
@@ -346,6 +360,11 @@ public class DatabaseEngine {
         // restored or the log replayed exists any more: whatever they created TEMPORARY is gone.
         TemporaryObjects.drop(catalog, storageEngine, null);
         queryExecutor.discardTemporaryStageFiles(null);
+        if (restoredPurgedFiles > 0) {
+            // The replay loaded files a purge had taken off their stages, which the hold keeps only until a checkpoint
+            // holds those loads.
+            checkpoint();
+        }
 
         // After every restore path, so an existing database survives untouched and the
         // exists-check sees the restored world.
@@ -451,6 +470,10 @@ public class DatabaseEngine {
                     lastCheckpoint = i;
                 }
             }
+            // The files a purge took off their stages since the checkpoint the recovery starts from go back for the
+            // replayed loads to read.
+            restoredPurgedFiles = purgedFileHold.restore(lastCheckpoint < 0 ? 0L
+                : checkpointSequence(records.get(lastCheckpoint).getCheckpointRef()));
             if (lastCheckpoint < 0) {
                 // No checkpoint keeps the built-in objects' creation: they were created when the engine that began
                 // the log first started, which the log keeps.
@@ -541,6 +564,19 @@ public class DatabaseEngine {
                 }
             }
             replaying = false;
+            purgedFileHold.replayEnded();
+        }
+    }
+
+    /** The sequence a checkpoint's reference names, or 0 for one that names none. */
+    private static long checkpointSequence(final String ref) {
+        if (ref == null || !ref.startsWith("cp-")) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(ref.substring("cp-".length()));
+        } catch (final NumberFormatException e) {
+            return 0L;
         }
     }
 
@@ -830,6 +866,17 @@ public class DatabaseEngine {
         }
     };
 
+    /**
+     * How many statements the calling thread issues on behalf of a statement another thread runs and holds the engine
+     * for (see {@link #beginLentStatement}).
+     */
+    private final ThreadLocal<Integer> lentDepth = new ThreadLocal<Integer>() {
+        @Override
+        protected Integer initialValue() {
+            return Integer.valueOf(0);
+        }
+    };
+
     /** How many task, alert or pipe runs the calling thread has open, a graph's child inside its parent. */
     private final ThreadLocal<Integer> ownSessionDepth = new ThreadLocal<Integer>() {
         @Override
@@ -848,6 +895,13 @@ public class DatabaseEngine {
      * written once none is.
      */
     private final AtomicBoolean checkpointOwed = new AtomicBoolean();
+
+    /**
+     * Whether work is applied that the write-ahead log does not hold: a statement that ran outside any transaction
+     * applies before it is logged, and its append failed. A restart would come back without that work, so no statement
+     * that writes runs until a checkpoint, which holds all that is applied, has been written.
+     */
+    private final AtomicBoolean logBehind = new AtomicBoolean();
 
     /**
      * The transactions a statement that owes a checkpoint ran in, which the checkpoint waits for: their own writes are
@@ -877,9 +931,15 @@ public class DatabaseEngine {
      * handler left in a runtime's thread state is put back, so the scheduler thread's next statement starts clean. A
      * run inside a statement — EXECUTE TASK — leaves that to the statement's own end.
      */
+    /** The transaction that outlives the running statement, or null where the statement commits alone. */
+    private Transaction lastingTransaction() {
+        return transactionManager.isLastingTransaction() ? transactionManager.getCurrentTransaction() : null;
+    }
+
     private void scheduledStatementEnded() {
         if (statementDepth.get().intValue() == 0) {
             UdfRuntimes.statementEnded();
+            streamManager.endImmediateStatement(storageEngine, lastingTransaction());
         }
     }
 
@@ -1061,7 +1121,7 @@ public class DatabaseEngine {
         }
         walStatementStart.set(new WalStatementContext(lifetime + ":" + sessionContext.getSessionNumber(),
             sessionContext.getCurrentUser(), sessionContext.getCurrentRole(),
-            new ArrayList<String>(sessionContext.getActiveRoles()), catalog.getCurrentDatabase(),
+            new ArrayList<String>(sessionContext.getActiveRoles()), catalog.heldDatabaseName(),
             catalog.heldSchemaName(), null, Collections.<CounterDraw>emptyList(),
             sessionContext.getAllSessionVariables(), sessionContext.getAllSessionParameters(),
             Collections.<String>emptySet(), Collections.<String>emptySet(), Collections.<RecordedResult>emptyList(),
@@ -1099,13 +1159,13 @@ public class DatabaseEngine {
         final WalStatementContext context = new WalStatementContext(
             lifetime + ":" + sessionContext.getSessionNumber(), sessionContext.getCurrentUser(),
             sessionContext.getCurrentRole(), new ArrayList<String>(sessionContext.getActiveRoles()),
-            catalog.getCurrentDatabase(), catalog.heldSchemaName(), null, recorded.getDraws(),
+            catalog.heldDatabaseName(), catalog.heldSchemaName(), null, recorded.getDraws(),
             sessionContext.getAllSessionVariables(), sessionContext.getAllSessionParameters(),
             Collections.<String>emptySet(), Collections.<String>emptySet(), recorded.getResults(),
             recorded.getAnswers(), false, walAppends.get(), 0)
             .withDecfloatVariables(sessionContext.getDecfloatVariableNames())
             .withVariablePrecisions(sessionContext.getVariablePrecisions());
-        appendTransactionToWal(Collections.singletonList(statementText),
+        appendApplied(Collections.singletonList(statementText),
             Collections.singletonList(recorded.getStarted()), Collections.singletonList(context));
         runsLoggedApart.set(Boolean.TRUE);
         return true;
@@ -1159,7 +1219,51 @@ public class DatabaseEngine {
                     .logStatementForWal(statements.get(i), instants.get(i), contexts.get(i));
             }
         } else {
+            try {
+                appendApplied(statements, instants, contexts);
+            } catch (final RuntimeException notLogged) {
+                // A checkpoint written now holds the statement's work as the log would have: it then stands.
+                if (!transactionManager.isLastingTransaction()) {
+                    checkpoint();
+                }
+                if (logBehind.get()) {
+                    throw notLogged;
+                }
+            }
+        }
+    }
+
+    /**
+     * Appends the record of work that is already applied: a statement that ran in no transaction, or work committed in
+     * a session of its own. A failed append leaves that work in place, where a failed commit's goes, so the engine is
+     * behind its log until a checkpoint holds it (see {@link #logBehind}).
+     */
+    private void appendApplied(final List<String> statements, final List<Instant> instants,
+                               final List<WalStatementContext> contexts) {
+        try {
             appendTransactionToWal(statements, instants, contexts);
+        } catch (final RuntimeException notLogged) {
+            logBehind.set(true);
+            checkpointOwed.set(true);
+            throw notLogged;
+        }
+    }
+
+    /**
+     * Refuses a statement that writes while applied work is missing from the write-ahead log (see {@link #logBehind}),
+     * once a checkpoint tried first could not be written: what it changed would rest on work a restart does not bring
+     * back. A read, COMMIT and ROLLBACK still run, so a session's open transaction can end and let the checkpoint in.
+     */
+    private void refuseWritesWhileLogBehind(final String sql) {
+        if (!logBehind.get() || wal == null || replaying || statementDepth.get().intValue() != 0
+                || !isLoggableStatement(sql)) {
+            return;
+        }
+        if (!transactionManager.isLastingTransaction()) {
+            checkpoint();
+        }
+        if (logBehind.get()) {
+            throw new RuntimeException(LOG_BEHIND_REFUSAL);
         }
     }
 
@@ -1207,7 +1311,7 @@ public class DatabaseEngine {
      * Sets the lock a wrapper serves this engine's requests under (see {@link ConcurrentDatabaseEngine}): what the
      * engine runs on a thread of its own - a scheduled task run, an alert's evaluation, a dynamic table's refresh, a
      * checkpoint - takes it before the engine's monitor, so that it never runs beside a request. Without one such
-     * work holds the monitor alone, as the in-process connections' statements do.
+     * work holds the monitor alone, as the in-process connections' statements and {@link #execute} do.
      *
      * @param lock the lock, or null for none
      */
@@ -1240,6 +1344,8 @@ public class DatabaseEngine {
         final boolean owed = checkpointOwed.getAndSet(false);
         try {
             checkpointSeq++;
+            // A file a purge takes off its stage from now on may postdate the snapshot.
+            purgedFileHold.setGeneration(checkpointSeq);
             final String ref = "cp-" + checkpointSeq;
             final Path dir = checkpointDir().resolve(ref);
             // The points kept beside the log so far go into the snapshot, which keeps every point the history has.
@@ -1251,7 +1357,10 @@ public class DatabaseEngine {
                 pointLog.dropBefore(pointsKept);
             }
             deleteSupersededCheckpoints(ref);
+            // The snapshot holds the loads whose files a purge took before it.
+            purgedFileHold.release(checkpointSeq);
             txnsSinceCheckpoint = 0;
+            logBehind.set(false);
             logger.info("WAL checkpoint {} written; log truncated", ref);
         } catch (final Exception e) {
             if (owed) {
@@ -1344,10 +1453,13 @@ public class DatabaseEngine {
 
     /** Directory holding checkpoint snapshots, beside the WAL file. */
     private Path checkpointDir() {
-        final Path walPath = Path.of(config.getWalFile());
-        final Path parent = walPath.getParent();
-        final Path base = (parent != null) ? parent : Path.of(".");
-        return base.resolve("wal-checkpoints");
+        return walDataDir().resolve("wal-checkpoints");
+    }
+
+    /** The directory the WAL file is in. */
+    private Path walDataDir() {
+        final Path parent = Path.of(config.getWalFile()).getParent();
+        return (parent != null) ? parent : Path.of(".");
     }
 
     /** Highest existing {@code cp-<n>} sequence under the checkpoint directory, so a fresh run names new
@@ -1499,12 +1611,44 @@ public class DatabaseEngine {
     }
 
     /**
-     * Execute a SQL statement or script
+     * Execute a SQL statement or script.
+     *
+     * <p>Without a wrapper's lock (see {@link #setExclusiveLock}) the statement holds the engine's monitor while it
+     * runs, as an in-process connection's statement does, so that statements callers send from several threads, and
+     * what the engine runs on a thread of its own - a scheduled task run, an alert's evaluation, a dynamic table's
+     * refresh, a checkpoint - run one at a time rather than beside each other. Under a wrapper's lock the wrapper
+     * decides what runs at once.
      */
     public ExecutionResult execute(final String sql) {
+        if (exclusiveLock != null || lentDepth.get().intValue() > 0) {
+            return executeStatement(sql);
+        }
+        synchronized (this) {
+            return executeStatement(sql);
+        }
+    }
+
+    /**
+     * The statements the calling thread sends until {@link #endLentStatement} run on behalf of a statement another
+     * thread runs, and holds the engine for, while it waits for them: a stored procedure's handler that hands its
+     * session to a worker thread and waits for the worker's query. They run under what that statement holds rather
+     * than wait for it, which would wait for good.
+     */
+    public void beginLentStatement() {
+        lentDepth.set(Integer.valueOf(lentDepth.get().intValue() + 1));
+    }
+
+    /** Ends what {@link #beginLentStatement} began. */
+    public void endLentStatement() {
+        lentDepth.set(Integer.valueOf(lentDepth.get().intValue() - 1));
+    }
+
+    /** {@link #execute}'s work, under what serializes it. */
+    private ExecutionResult executeStatement(final String sql) {
         // A statement a handler issues from inside a procedure arrives here too: one issued past the depth bodies
         // run to ends its body (see CallDepth). A statement the session sends runs in no body.
         CallDepth.requireMayIssue(transactionManager.scopeDepth());
+        refuseWritesWhileLogBehind(sql);
         sessionContext.setCurrentStatement(sql);
         logger.debug("Executing SQL: {}", sql);
 
@@ -1531,6 +1675,7 @@ public class DatabaseEngine {
         if (statementDepth.get().intValue() == 1) {
             // A debt an earlier statement on this thread left unsettled is not this one's.
             CheckpointDebt.settle();
+            CheckpointDebt.settleUnlogged();
         }
         final EngineConfig displacedEngine = RunningEngine.enter(config);
         final StatementBoundaries displacedBoundaries = queryExecutor.bindStatementBoundaries(new StatementBoundaries() {
@@ -1673,6 +1818,9 @@ public class DatabaseEngine {
             queryExecutor.restoreStatementBoundaries(displacedBoundaries);
             statementDepth.set(Integer.valueOf(statementDepth.get().intValue() - 1));
             if (statementDepth.get().intValue() == 0) {
+                // Where DML applies at once, the versions of a statement no DML kind was noted for (see
+                // StreamManager#noteImmediateStatement) are written as it ends.
+                streamManager.endImmediateStatement(storageEngine, lastingTransaction());
                 endWalStatement();
                 oweCheckpointForUnreplayableReads(sql);
                 checkpointAfterRun();
@@ -1698,10 +1846,14 @@ public class DatabaseEngine {
     /**
      * A logged statement that read what its record cannot read again — a stage's files, a handler function's answers
      * (see {@link CheckpointDebt}) — owes a checkpoint, as a task's run does: a restart then starts after it and does
-     * not run it a second time over files a purge or an overwrite changed, or a handler that answers otherwise.
+     * not run it a second time over files a purge or an overwrite changed, or a handler that answers otherwise. A
+     * statement that changed what no record carries — a view stream its read re-bound — owes one whether the log keeps
+     * it or not, and whether it succeeded or failed.
      */
     private void oweCheckpointForUnreplayableReads(final String sql) {
-        if (CheckpointDebt.settle() && wal != null && !replaying && isLoggableStatement(sql)) {
+        final boolean unlogged = CheckpointDebt.settleUnlogged();
+        if (CheckpointDebt.settle() && wal != null && !replaying && isLoggableStatement(sql)
+                || unlogged && wal != null && !replaying) {
             runCheckpointDue.set(Boolean.TRUE);
         }
     }

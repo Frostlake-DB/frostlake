@@ -30,7 +30,9 @@ import java.time.LocalDateTime;
  *   <li>a version that changed rows rewrote the table, so it added the table's rows after it and removed those
  *       before it;</li>
  *   <li>an INSERT, an UPDATE or a DELETE that changed no row adds and removes none, and inside an explicit
- *       transaction writes no version at all;</li>
+ *       transaction writes no version at all - unless it is an INSERT whose source the account read rather than
+ *       settled empty while compiling (see InsertSourcePruning), which rewrote the table as it was: it adds and
+ *       removes every row the table holds, inside a transaction too;</li>
  *   <li>a TRUNCATE writes a version even of an empty table, and a MERGE rewrites the table whatever its branches
  *       did, a MERGE that only inserts or changes nothing included.</li>
  * </ul>
@@ -45,6 +47,7 @@ final class StatementTableChange {
     private long updated;
     private long deleted;
     private boolean truncated;
+    private boolean rewritten;
 
     /**
      * @param ordinal the statement's ordinal in its transaction, -1 for a statement that commits alone
@@ -65,6 +68,7 @@ final class StatementTableChange {
         moved.updated = updated;
         moved.deleted = deleted;
         moved.truncated = truncated;
+        moved.rewritten = rewritten;
         return moved;
     }
 
@@ -79,6 +83,11 @@ final class StatementTableChange {
     /** The statement says what kind of DML it is: INSERT, UPDATE, DELETE or MERGE. */
     void noteKind(final StreamVersionKind statementKind) {
         kind = statementKind;
+    }
+
+    /** The statement rewrote the table whether or not it changed a row: it read its source rather than settling it empty. */
+    void noteRewritten() {
+        rewritten = true;
     }
 
     void addInserted() {
@@ -104,6 +113,11 @@ final class StatementTableChange {
         return before + inserted - deleted;
     }
 
+    /** The table's rows before the statement, given those after it. */
+    long rowsBefore(final long after) {
+        return after - inserted + deleted;
+    }
+
     /**
      * The version the statement wrote, or null where it wrote none.
      *
@@ -117,7 +131,7 @@ final class StatementTableChange {
         if (written == null) {
             return null;
         }
-        if (changed || written == StreamVersionKind.MERGE) {
+        if (changed || rewritten || written == StreamVersionKind.MERGE) {
             return new StreamVersion(table, time, written, rowsAfter(before), before, inserted, sequence);
         }
         // A statement that changed no row commits a version only where it commits alone.

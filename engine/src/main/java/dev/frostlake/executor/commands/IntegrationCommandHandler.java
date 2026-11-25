@@ -322,8 +322,16 @@ public final class IntegrationCommandHandler {
         return new RuntimeException(SqlCompilationError.doesNotExist("Integration", name));
     }
 
-    /** SHOW [kind] INTEGRATIONS: every integration of the kind, or of every kind, by name. */
-    public ResultSet show(final FrostlakeParser.IntegrationKindContext kindContext) {
+    /**
+     * SHOW [kind] INTEGRATIONS: every integration of the kind, or of every kind, by name. A scope names this account,
+     * by its locator or as its organization's account; any other account is refused as no object, and a name of
+     * three parts or more as an account identifier with too many qualifiers (live-verified).
+     */
+    public ResultSet show(final FrostlakeParser.IntegrationKindContext kindContext,
+                          final FrostlakeParser.IntegrationListingScopeContext scope) {
+        if (scope != null) {
+            requireThisAccount(queryExecutor.resolveObjectNameParts(scope.objectName()));
+        }
         final IntegrationKind kind = kindOf(kindContext);
         final boolean notifications = kind == IntegrationKind.NOTIFICATION;
         final List<ResultSetColumn> columns = new ArrayList<>(Arrays.asList(
@@ -350,6 +358,19 @@ public final class IntegrationCommandHandler {
             rows.add(new Row(values));
         }
         return new ResultSet(columns, rows);
+    }
+
+    private void requireThisAccount(final String[] parts) {
+        if (parts.length > 2) {
+            throw new RuntimeException(SqlCompilationError.inline("account identifier '"
+                + SqlIdentifiers.spellAlreadyCanonicalPath(QualifiedName.join(parts)) + "' has too many qualifiers"));
+        }
+        final AccountIdentity account = AccountIdentity.of(queryExecutor.getEngineConfig());
+        final boolean own = parts.length == 1 ? parts[0].equalsIgnoreCase(account.getAccountLocator())
+            : parts[0].equalsIgnoreCase(account.getOrganization()) && parts[1].equalsIgnoreCase(account.getAccountName());
+        if (!own) {
+            throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
+        }
     }
 
     /**

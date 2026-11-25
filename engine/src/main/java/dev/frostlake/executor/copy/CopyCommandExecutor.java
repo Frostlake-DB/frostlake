@@ -60,6 +60,7 @@ import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.persistence.CheckpointDebt;
+import dev.frostlake.persistence.PurgedFileHold;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
@@ -1344,15 +1345,28 @@ public final class CopyCommandExecutor {
      * Snowflake rejects. The warning keeps the operator informed without changing the statement's outcome.
      */
     private void purgeLoadedFiles(final List<Path> loadedFiles) {
+        final PurgedFileHold hold = executor.getPurgedFileHold();
         if (StatementClock.isReplay()) {
-            // The files a replayed load purged are gone already; one staged again under their name since stays.
+            // The files a replayed load purged are gone already, or the recovery put them back from the hold for it;
+            // one staged again under their name since stays.
+            if (hold != null) {
+                for (final Path file : loadedFiles) {
+                    hold.purgedOnReplay(file);
+                }
+            }
             return;
         }
         final List<String> failures = new ArrayList<>();
         for (final Path file : loadedFiles) {
             try {
-                // Already gone (concurrently removed) is not a failure — the file is off the stage either way.
-                Files.deleteIfExists(file);
+                if (hold != null) {
+                    // The write-ahead log replays the load from its text, which reads these files: they are kept
+                    // beside the log until a checkpoint holds the load.
+                    hold.hold(file);
+                } else {
+                    // Already gone (concurrently removed) is not a failure — the file is off the stage either way.
+                    Files.deleteIfExists(file);
+                }
             } catch (final IOException e) {
                 failures.add(file.getFileName().toString() + " (" + e.getMessage() + ")");
             }
@@ -2439,7 +2453,7 @@ public final class CopyCommandExecutor {
     /** A staged file's metadata columns, its name read as METADATA$FILENAME reads it: its path beneath the stage. */
     private static StagedFileMetadata metadataOf(final StagePrefix staged, final Path file) {
         return StagedFileMetadata.of(file, staged != null ? staged.metadataFileName(file)
-            : StagePathSegments.diskName(file));
+            : StagePathSegments.diskName(file), staged != null && staged.isClientEncrypted());
     }
 
     /**

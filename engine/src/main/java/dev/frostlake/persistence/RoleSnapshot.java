@@ -49,4 +49,9 @@ public class RoleSnapshot implements Serializable {
     /** When each database role in databaseRoleGrants was granted, by qualified name. */
     public HashMap<String, Instant> databaseRoleGrantTimes;
     public HashMap<String, String> tags;
+    /**
+     * The privileges a system role held on the account from the start whose grant a REVOKE took back, by name. Null
+     * in a snapshot written before they were kept, which takes none back.
+     */
+    public List<String> revokedFromStart;
 }

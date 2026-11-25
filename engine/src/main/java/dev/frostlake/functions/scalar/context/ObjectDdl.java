@@ -115,7 +115,9 @@ final class ObjectDdl {
      * every other value a quoted string; NULL_IF is a parenthesized list.
      */
     static String fileFormat(final FileFormat format, final String name) {
-        final StringBuilder sb = new StringBuilder("CREATE OR REPLACE FILE FORMAT ").append(name).append('\n');
+        // A temporary format's DDL creates a temporary one (live-verified).
+        final StringBuilder sb = new StringBuilder("CREATE OR REPLACE ")
+            .append(format.isTemporary() ? "TEMPORARY " : "").append("FILE FORMAT ").append(name).append('\n');
         for (final FormatProperty property : FileFormatSurfaces.tree(format.getType())) {
             final String line = formatPropertyLine(format, property);
             if (line != null) {

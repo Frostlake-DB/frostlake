@@ -25,7 +25,10 @@ import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A positional argument written after a named one. The account reads such a call whole and refuses it while the
@@ -44,9 +47,20 @@ import java.util.List;
  *   SELECT n1(a =&gt; UPPER(x =&gt; 'a', 'b'), 2) the inner call's: a call is judged after the calls it holds
  * </pre>
  *
+ * <p>Ahead of that, and in the same pass, a name written twice among a call's named arguments, wherever the second
+ * stands, is refused at its second value, under the call's bare name — a built-in's, a user's and an unknown one's
+ * alike (live-verified):
+ *
+ * <pre>
+ *   SELECT f(a =&gt; 1, a =&gt; 2)                 error line 1 at position 18   duplicate named argument A for function F
+ *   SELECT f(a =&gt; 1, a =&gt; 2, 3)              the same: the name outranks the positional argument after it
+ *   SELECT f(a =&gt; 1, 3, a =&gt; 2)              at the 2
+ *   SELECT f(a =&gt; 1, "a" =&gt; 2)               no duplicate: the quoted name is another one
+ * </pre>
+ *
  * <p>Of several such calls the first in the text is the one refused, a WITH clause's queries read after the
  * statement they head. The call a {@code TABLE( … )} names is the table function's to judge, which refuses a mix
- * of the two ways in words of its own, so it is passed over here.
+ * of the two ways in words of its own and takes a name twice, so it is passed over here.
  */
 public final class StrayArguments {
 
@@ -75,10 +89,83 @@ public final class StrayArguments {
             }
         }
         require(heading);
+        requireCall(node);
+    }
+
+    /**
+     * Refuse one call, not the calls it holds, for a name its named arguments write twice and then for a
+     * positional argument after a named one. A node that is no such call, and the call a {@code TABLE( … )}
+     * names, are left alone.
+     *
+     * @param node a node of a parsed text
+     */
+    public static void requireCall(final ParserRuleContext node) {
+        if (namesATableFunction(node)) {
+            return;
+        }
+        final List<FrostlakeParser.NamedArgumentContext> named = namedArguments(node);
+        if (named != null) {
+            final Set<String> seen = new HashSet<String>();
+            for (final FrostlakeParser.NamedArgumentContext argument : named) {
+                final String name = SqlIdentifiers.canonicalText(argument.variableName().getText());
+                if (!seen.add(name)) {
+                    throw new RuntimeException(duplicate(node, argument, name));
+                }
+            }
+        }
         final FrostlakeParser.StrayArgumentsContext stray = of(node);
-        if (stray != null && !namesATableFunction(node)) {
+        if (stray != null) {
             throw new RuntimeException(refusal(node, stray));
         }
+    }
+
+    /** The named arguments a call writes, in the order written, its trailing ones included; null for no call. */
+    private static List<FrostlakeParser.NamedArgumentContext> namedArguments(final ParserRuleContext node) {
+        final List<FrostlakeParser.NamedArgumentContext> named = new ArrayList<FrostlakeParser.NamedArgumentContext>();
+        if (node instanceof FrostlakeParser.FunctionCallMixedArgsExprContext) {
+            named.addAll(((FrostlakeParser.FunctionCallMixedArgsExprContext) node).namedArgument());
+        } else if (node instanceof FrostlakeParser.FunctionCallNamedArgsExprContext) {
+            named.addAll(((FrostlakeParser.FunctionCallNamedArgsExprContext) node).namedArgumentList().namedArgument());
+        } else {
+            return null;
+        }
+        final FrostlakeParser.StrayArgumentsContext stray = of(node);
+        if (stray != null) {
+            named.addAll(stray.namedArgument());
+        }
+        return named;
+    }
+
+    /** The refusal of a call for a name written twice, placed at the second writing's value. */
+    private static String duplicate(final ParserRuleContext call, final FrostlakeParser.NamedArgumentContext argument,
+                                    final String name) {
+        final ParseTree value = argument.getChild(argument.getChildCount() - 1);
+        SourcePosition at = null;
+        if (value instanceof FrostlakeParser.BooleanExprContext) {
+            at = windowPlace((FrostlakeParser.BooleanExprContext) value);
+            if (at == null) {
+                at = operatorPlace((FrostlakeParser.BooleanExprContext) value);
+            }
+        } else if (value instanceof FrostlakeParser.ExpressionContext) {
+            at = windowPlace((FrostlakeParser.ExpressionContext) value);
+            if (at == null) {
+                at = operatorPlace((FrostlakeParser.ExpressionContext) value);
+            }
+        }
+        if (at == null && !(value instanceof FrostlakeParser.ArgumentRowContext)) {
+            try {
+                at = ExpressionPlace.of(new ExpressionAstBuilder().visit(value));
+            } catch (final RuntimeException unread) {
+                // A value this builder does not read keeps the place of its first token.
+                at = null;
+            }
+        }
+        final Token first = ((ParserRuleContext) value).getStart();
+        final SourcePosition within = at != null ? at
+            : new SourcePosition(first.getLine(), first.getCharPositionInLine());
+        final SourcePosition placed = ExpressionSource.place(within.getLine(), within.getCharPositionInLine());
+        return SqlCompilationError.at(placed.getLine(), placed.getCharPositionInLine(),
+            "duplicate named argument " + name + " for function " + calledName(call));
     }
 
     /**
@@ -148,7 +235,11 @@ public final class StrayArguments {
         if (!(argument instanceof FrostlakeParser.ValueExprContext)) {
             return null;
         }
-        final FrostlakeParser.ExpressionContext value = ((FrostlakeParser.ValueExprContext) argument).expression();
+        return operatorPlace(((FrostlakeParser.ValueExprContext) argument).expression());
+    }
+
+    /** The place {@link #operatorPlace(FrostlakeParser.BooleanExprContext)} tells, of a value read as an expression. */
+    private static SourcePosition operatorPlace(final FrostlakeParser.ExpressionContext value) {
         final TerminalNode token;
         if (value instanceof FrostlakeParser.TypedDateTimeLiteralExprContext) {
             token = ((FrostlakeParser.TypedDateTimeLiteralExprContext) value).STRING_LITERAL();
@@ -170,7 +261,11 @@ public final class StrayArguments {
         if (!(argument instanceof FrostlakeParser.ValueExprContext)) {
             return null;
         }
-        final FrostlakeParser.ExpressionContext value = ((FrostlakeParser.ValueExprContext) argument).expression();
+        return windowPlace(((FrostlakeParser.ValueExprContext) argument).expression());
+    }
+
+    /** The place {@link #windowPlace(FrostlakeParser.BooleanExprContext)} tells, of a value read as an expression. */
+    private static SourcePosition windowPlace(final FrostlakeParser.ExpressionContext value) {
         if (!(value instanceof FrostlakeParser.FunctionCallExprContext)
                 || ((FrostlakeParser.FunctionCallExprContext) value).overClause() == null) {
             return null;

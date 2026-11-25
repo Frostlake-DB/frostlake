@@ -42,6 +42,8 @@ public class SnowflakeDatabaseIsReadOnlyTest {
     public void setUp() {
         engine = new DatabaseEngine();
         engine.execute("CREATE DATABASE p");
+        // A role below ACCOUNTADMIN sees only part of the SNOWFLAKE database; every schema of it is named here.
+        engine.execute("USE ROLE ACCOUNTADMIN");
     }
 
     @AfterEach

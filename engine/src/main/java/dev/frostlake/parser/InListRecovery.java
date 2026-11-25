@@ -71,7 +71,20 @@ final class InListRecovery {
                 in = i;
             }
         }
+        boolean emptyNamed = false;
+        for (int i = 3; i + 1 < spoken.size() && in < 0 && statementParse; i++) {
+            if (spoken.get(i).getTokenIndex() == namedIndex && spoken.get(i).getType() == FrostlakeLexer.RPAREN
+                    && spoken.get(i - 1).getType() == FrostlakeLexer.LPAREN
+                    && spoken.get(i - 2).getType() == FrostlakeLexer.IN) {
+                // The parse named the ')' of an empty list rather than its IN.
+                in = i - 2;
+                emptyNamed = true;
+            }
+        }
         if (in < 0 || spoken.get(in).getStopIndex() != spoken.get(in).getStartIndex() + 1) {
+            return null;
+        }
+        if (emptyNamed && opensListing(spoken, in)) {
             return null;
         }
         if (opensListing(spoken, in)) {
@@ -80,6 +93,17 @@ final class InListRecovery {
             final List<String> alone = new ArrayList<>();
             alone.add(SyntaxErrorListener.sentence(spoken.get(in)));
             return alone;
+        }
+        final boolean statementWord = spoken.get(in + 1).getType() == FrostlakeLexer.LPAREN
+            && ValueSubqueryLines.inListStatementWord(sql, spoken, in + 1) != null;
+        final List<String> enclosing = statementParse && !statementWord
+            ? ValueSubqueryLines.enclosingResumed(sql, spoken, in) : null;
+        if (enclosing == null && emptyNamed) {
+            return emptyListLines(sql, spoken, in);
+        }
+        if (enclosing != null) {
+            // A faulty query used as a value around the IN is refused first, and its reading resumes before the IN.
+            return enclosing;
         }
         final char[] text = sql.toCharArray();
         text[spoken.get(in).getStartIndex()] = '=';
@@ -101,10 +125,16 @@ final class InListRecovery {
                 lines.addAll(called);
                 return lines;
             }
-            // A statement its FROM list reads after a comma is refused as in a compared query.
+            // A statement its FROM list reads after a comma - or the FROM list of a query nested in it - is refused as
+            // in a compared query, each faulty query around the list refused at its SELECT first.
             final List<String> worded = ValueSubqueryLines.inListStatementWord(sql, spoken, in + 1);
             if (worded != null) {
-                lines.addAll(worded);
+                return worded;
+            }
+            // A token the query's reading resumes at, before its ')', reads the statement on from there.
+            final List<String> resumed = statementParse ? ValueSubqueryLines.inListResumed(sql, spoken, in + 1) : null;
+            if (resumed != null) {
+                lines.addAll(resumed);
                 return lines;
             }
             int close = -1;
@@ -133,6 +163,10 @@ final class InListRecovery {
             }
             return lines;
         }
+        if (statementParse && spoken.get(in + 1).getType() == FrostlakeLexer.LPAREN && in + 2 < spoken.size()
+                && spoken.get(in + 2).getType() == FrostlakeLexer.RPAREN) {
+            return emptyListLines(sql, spoken, in);
+        }
         final String inPlace = SyntaxErrorListener.sentence(spoken.get(in));
         final int[] inAt = SyntaxErrorListener.sentenceCoordinates(inPlace);
         for (final String line : SyntaxErrorListener.linesReportedFor(new String(text), statementParse)) {
@@ -147,6 +181,31 @@ final class InListRecovery {
             lines.add(place != null && inAt != null && place[0] == inAt[0] && place[1] == inAt[1] ? inPlace : line);
         }
         return lines.isEmpty() ? null : lines;
+    }
+
+    /**
+     * The lines of an IN whose list is empty: its ')' is refused and closes the list, and the statement reads on past
+     * it (live-verified): {@code a IN ())} is that ')' and the next, {@code (a IN ())} the list's ')' alone; null when
+     * the reading on reports a line before it.
+     */
+    private static List<String> emptyListLines(final String sql, final List<Token> spoken, final int in) {
+        final char[] text = sql.toCharArray();
+        text[spoken.get(in).getStartIndex()] = '=';
+        text[spoken.get(in).getStartIndex() + 1] = ' ';
+        final Token closer = spoken.get(in + 2);
+        text[spoken.get(in + 1).getStartIndex()] = '1';
+        text[closer.getStartIndex()] = ' ';
+        final List<String> lines = new ArrayList<>();
+        lines.add(SyntaxErrorListener.sentence(closer));
+        final int[] at = SyntaxErrorListener.sentenceCoordinates(lines.get(0));
+        for (final String line : SyntaxErrorListener.linesReportedFor(new String(text), true)) {
+            final int[] place = SyntaxErrorListener.sentenceCoordinates(line);
+            if (place == null || at == null || place[0] < at[0] || place[0] == at[0] && place[1] <= at[1]) {
+                return null;
+            }
+            lines.add(line);
+        }
+        return lines;
     }
 
     /** Whether the statement the token at {@code index} stands in opens on SHOW. */

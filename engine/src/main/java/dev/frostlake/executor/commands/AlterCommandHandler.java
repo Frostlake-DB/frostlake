@@ -214,11 +214,18 @@ public class AlterCommandHandler implements CommandHandler {
         // The sentence the statement answers in place of the plain status line, or null.
         String answered = null;
         try {
+            if (ctx.SEMANTIC() != null && ctx.RENAME() != null) {
+                branchHandlesIfExists = true;
+                return new SemanticViewCommandHandler(catalog, queryExecutor).rename(ctx);
+            }
             if (ctx.unmodelledCommentKind() != null) {
                 // A missing database or schema is refused, IF EXISTS or not.
                 branchHandlesIfExists = true;
+                final UnmodelledAlteration alteration = new UnmodelledAlteration(queryExecutor);
+                alteration.judge(ctx.unmodelledCommentKind(), ctx.unmodelledAlterAction());
                 new KindComments(catalog, queryExecutor, visitor).refuseUnmodelled(ctx.unmodelledCommentKind(),
-                    ctx.qualifiedName(), ifExists);
+                    queryExecutor.resolveObjectNameParts(ctx.objectName()),
+                    alteration.comment(ctx.unmodelledAlterAction()), ctx.unmodelledAlterAction(), ifExists);
                 return null;
             }
             if (ctx.ALERT() != null) {
@@ -828,9 +835,9 @@ public class AlterCommandHandler implements CommandHandler {
                 }
                 final String[] tableParts = queryExecutor.alterTargetNameParts(ctx);
                 InformationSchemaGuard.refuseWrite(catalog, tableParts);
-                if (ctx.tableAction() != null && ctx.tableAction().SET() != null
-                        && !ctx.tableAction().tableSetProperty().isEmpty()) {
-                    rejectUnknownTableNames(ctx.tableAction().tableSetProperty());
+                if (ctx.tableAction() != null) {
+                    AlteredTableNames.rejectUnknown(ctx.tableAction());
+                    judgeTableSetValues(ctx.tableAction(), catalog);
                 }
                 if (ctx.tableAction() != null && ctx.tableAction().RENAME() != null
                         && ctx.tableAction().COLUMN() == null && ctx.tableAction().CONSTRAINT() == null
@@ -1233,7 +1240,7 @@ public class AlterCommandHandler implements CommandHandler {
                     } else if ((ctx.tableAction().ALTER() != null || ctx.tableAction().MODIFY() != null)
                             && ctx.tableAction().PROJECTION() != null) {
                         columnProjectionPolicy(table, ctx.tableAction().identifier(0),
-                            ctx.tableAction().UNSET() != null ? null : ctx.tableAction().qualifiedName(),
+                            ctx.tableAction().UNSET() != null ? null : ctx.tableAction().containerName().objectName(),
                             ctx.tableAction().FORCE() != null);
                         logger.trace("Set/unset projection policy on column of {}", tableName);
                     } else if ((ctx.tableAction().ALTER() != null || ctx.tableAction().MODIFY() != null)
@@ -1378,7 +1385,8 @@ public class AlterCommandHandler implements CommandHandler {
                         }
                     } else if (ctx.tableAction().ROW() != null && ctx.tableAction().ADD() != null) {
                         // ADD ROW ACCESS POLICY policyName ON (col1, col2)
-                        final String policyName = visitor.getText(ctx.tableAction().qualifiedName());
+                        final String policyName = queryExecutor.resolveObjectName(
+                            ctx.tableAction().createdPolicyName().objectName());
                         final List<String> cols = rowAccessPolicyColumns(ctx.tableAction().identifierList(),
                             table, table.getName(), policyName, table.hasRowAccessPolicy());
                         requireApplyRowAccessPolicy(policyName, tableParts);
@@ -1392,7 +1400,7 @@ public class AlterCommandHandler implements CommandHandler {
                         // and detaches whatever is there, silently when there is nothing.
                         if (ctx.tableAction().ALL() == null) {
                             requireRowAccessPolicyAttached(
-                                visitor.getText(ctx.tableAction().qualifiedName()),
+                                queryExecutor.resolveObjectName(ctx.tableAction().containerName().objectName()),
                                 table.getName(), table.getRowAccessPolicyName());
                         }
                         if (table.getRowAccessPolicyName() != null) {
@@ -1713,10 +1721,10 @@ public class AlterCommandHandler implements CommandHandler {
                         action.qualifiedName(), action.identifierList(), action.ADD() != null,
                         action.MODIFY() != null, action.SUSPEND() != null);
                 } else if (ctx.viewAction().ROW() != null && ctx.viewAction().ADD() != null) {
-                    addViewRowAccessPolicy(view, ctx.viewAction().qualifiedName(), ctx.viewAction().identifierList());
+                    addViewRowAccessPolicy(view, ctx.viewAction().createdPolicyName().objectName(), ctx.viewAction().identifierList());
                 } else if (ctx.viewAction().ROW() != null && ctx.viewAction().DROP() != null) {
                     dropViewRowAccessPolicy(view, ctx.viewAction().ALL() != null ? null
-                        : ctx.viewAction().qualifiedName());
+                        : ctx.viewAction().containerName().objectName());
                 } else if (ctx.viewAction().tagSet() != null) {
                     applyTagSet(view, ctx.viewAction().tagSet());
                 } else if (ctx.viewAction().tagUnset() != null) {
@@ -1731,7 +1739,8 @@ public class AlterCommandHandler implements CommandHandler {
                     logger.trace("Set/unset masking policies on columns of view {}", viewName);
                 } else if (ctx.viewAction().PROJECTION() != null) {
                     columnProjectionPolicy(viewColumns(view), ctx.viewAction().identifier(),
-                        ctx.viewAction().qualifiedName(), ctx.viewAction().FORCE() != null);
+                        ctx.viewAction().UNSET() != null ? null : ctx.viewAction().containerName().objectName(),
+                        ctx.viewAction().FORCE() != null);
                     logger.trace("Set/unset a projection policy on a column of view {}", viewName);
                 } else if (ctx.viewAction().columnTagAction() != null) {
                     viewColumnTag(view, ctx.viewAction().columnTagAction());
@@ -2578,7 +2587,7 @@ public class AlterCommandHandler implements CommandHandler {
             // A column's projection policy is the view column's, set as ALTER VIEW sets it.
             queryExecutor.requirePrivilege(Privilege.MODIFY, "VIEW", viewParts, null);
             columnProjectionPolicy(viewColumns(viewUnder(viewParts)), action.identifier(0),
-                action.UNSET() != null ? null : action.qualifiedName(), action.FORCE() != null);
+                action.UNSET() != null ? null : action.containerName().objectName(), action.FORCE() != null);
             return true;
         }
         final boolean asksForAlterView = action.CLUSTER() != null || action.CLUSTERING() != null
@@ -2659,9 +2668,9 @@ public class AlterCommandHandler implements CommandHandler {
         } else if (action.JOIN() != null) {
             unsetViewJoinPolicy(view);
         } else if (action.ROW() != null && action.ADD() != null) {
-            addViewRowAccessPolicy(view, action.qualifiedName(), action.identifierList());
+            addViewRowAccessPolicy(view, action.createdPolicyName().objectName(), action.identifierList());
         } else if (action.ROW() != null) {
-            dropViewRowAccessPolicy(view, action.ALL() != null ? null : action.qualifiedName());
+            dropViewRowAccessPolicy(view, action.ALL() != null ? null : action.containerName().objectName());
         } else if (action.tagSet() != null) {
             applyTagSet(view, action.tagSet());
         } else if (action.tagUnset() != null) {
@@ -2746,9 +2755,9 @@ public class AlterCommandHandler implements CommandHandler {
     }
 
     /** ADD ROW ACCESS POLICY p ON (c, …) over a view, as over a table: each column one of the view's. */
-    private void addViewRowAccessPolicy(final View view, final FrostlakeParser.QualifiedNameContext policy,
+    private void addViewRowAccessPolicy(final View view, final FrostlakeParser.ObjectNameContext policy,
                                         final FrostlakeParser.IdentifierListContext columns) {
-        final String policyName = visitor.getText(policy);
+        final String policyName = queryExecutor.resolveObjectName(policy);
         final List<String> cols = rowAccessPolicyColumns(columns, viewColumns(view), view.getName(), policyName,
             view.hasRowAccessPolicy());
         requireApplyRowAccessPolicy(policyName, null);
@@ -2758,9 +2767,10 @@ public class AlterCommandHandler implements CommandHandler {
     }
 
     /** DROP ROW ACCESS POLICY p, or with no policy named DROP ALL ROW ACCESS POLICIES, over a view. */
-    private void dropViewRowAccessPolicy(final View view, final FrostlakeParser.QualifiedNameContext policy) {
+    private void dropViewRowAccessPolicy(final View view, final FrostlakeParser.ObjectNameContext policy) {
         if (policy != null) {
-            requireRowAccessPolicyAttached(visitor.getText(policy), view.getName(), view.getRowAccessPolicyName());
+            requireRowAccessPolicyAttached(queryExecutor.resolveObjectName(policy), view.getName(),
+                view.getRowAccessPolicyName());
         }
         if (view.getRowAccessPolicyName() != null) {
             requireApplyRowAccessPolicy(view.getRowAccessPolicyName(), null);
@@ -3261,7 +3271,7 @@ public class AlterCommandHandler implements CommandHandler {
             }
         }
         if (action.ROW() != null && action.ADD() != null) {
-            requireRowAccessPolicy(visitor.getText(action.qualifiedName()));
+            requireRowAccessPolicy(queryExecutor.resolveObjectName(action.createdPolicyName().objectName()));
         }
         for (final FrostlakeParser.AlterColumnItemContext item : action.alterColumnItem()) {
             if (item.alterColumnItemAction().dataTypeName() != null) {
@@ -4584,9 +4594,10 @@ public class AlterCommandHandler implements CommandHandler {
      * @param force  whether FORCE is written
      */
     private void columnProjectionPolicy(final Table target, final FrostlakeParser.IdentifierContext column,
-                                        final FrostlakeParser.QualifiedNameContext policy, final boolean force) {
+                                        final FrostlakeParser.ObjectNameContext policy, final boolean force) {
         final String colName = visitor.getText(column);
-        final String policyName = policy == null ? null : requireProjectionPolicy(visitor.getText(policy));
+        final String policyName = policy == null ? null
+            : requireProjectionPolicy(queryExecutor.resolveObjectName(policy));
         requireColumn(target, colName, column);
         final TableColumn col = target.getColumn(colName);
         if (policyName == null) {
@@ -4713,7 +4724,7 @@ public class AlterCommandHandler implements CommandHandler {
                 if (earlier != found && SqlTypeNames.sameFamily(typeMasked(earlier), typeMasked(found))) {
                     throw new RuntimeException(SqlCompilationError.inline(
                         "Multiple masking policies are specified with same data type "
-                            + SqlTypeNames.canonical(typeMasked(found)) + "."));
+                            + typeReported(found) + "."));
                 }
             }
             policies.add(found);
@@ -4749,6 +4760,21 @@ public class AlterCommandHandler implements CommandHandler {
         }
         tag.setMaskingPolicies(carried);
         catalog.noteTagMasking();
+    }
+
+    /**
+     * The type a refusal of two masking policies of one type on a tag names: the policy's RETURNS type, a text or a
+     * binary written without its width at the widest a value can be, {@code VARCHAR(134217728)} and
+     * {@code BINARY(67108864)}, one written with it as written (live-verified).
+     */
+    private static String typeReported(final MaskingPolicy policy) {
+        final DataType declared = policy.getReturnDataType();
+        if (declared == null) {
+            return SqlTypeNames.routineDataType(typeMasked(policy));
+        }
+        final String spelling = policy.getReturnSpelling();
+        final boolean sized = spelling == null || !("VARCHAR".equals(spelling) || "BINARY".equals(spelling));
+        return SqlTypeNames.routineDataType(declared, Boolean.valueOf(sized));
     }
 
     /** The type a masking policy masks: its first parameter's. */
@@ -5244,46 +5270,45 @@ public class AlterCommandHandler implements CommandHandler {
         final List<WrittenParameterValue> values = new ArrayList<>();
         for (final FrostlakeParser.TableSetPropertyContext property : properties) {
             names.add(property.propertyName().getText());
-            taken.add(Boolean.valueOf(tableTakes(property)));
+            taken.add(Boolean.valueOf(AlteredTableNames.takes(property)));
             values.add(WrittenParameterValue.of(property));
         }
         // A parameter of another level is no table's to set (see ParameterLevels).
         ParameterLevels.judgeAlter(names, taken, values, "TABLE", privilegeKind(table), table.getName());
     }
 
-    /** Whether an ALTER TABLE … SET's property is one a table takes: its own, or a parameter of its level. */
-    private static boolean tableTakes(final FrostlakeParser.TableSetPropertyContext property) {
-        final String raw = property.propertyName().getText();
-        return "CHANGE_TRACKING".equalsIgnoreCase(raw) || "DATA_METRIC_SCHEDULE".equalsIgnoreCase(raw)
-            || "ENABLE_SCHEMA_EVOLUTION".equalsIgnoreCase(raw) || "COMMENT".equalsIgnoreCase(raw)
-            || "STAGE_COPY_OPTIONS".equalsIgnoreCase(raw) && property.stageCopyOptionList() != null
-            || ParameterRegistry.isTableParameter(ParameterRegistry.canonical(raw));
-    }
-
     /**
-     * Refuses what an ALTER TABLE … SET names that no table takes before the table is looked for (live-verified): an
-     * unknown name as an invalid property, the name as written, and BASE_LOCATION, which only an Iceberg table's
-     * CREATE writes, as an unsupported feature.
+     * Judges what an ALTER TABLE … SET's names are given before the table is looked for, its names judged already
+     * (see {@link AlteredTableNames}) (live-verified): a value of another kind than the name takes, a list or a list of
+     * constants the name takes none of, a switch's value, and what a STAGE_FILE_FORMAT or a STAGE_COPY_OPTIONS list
+     * holds, the format it names looked up. Any other action passes.
      */
-    private static void rejectUnknownTableNames(final List<FrostlakeParser.TableSetPropertyContext> properties) {
+    private static void judgeTableSetValues(final FrostlakeParser.TableActionContext action, final Catalog catalog) {
+        if (action.SET() == null || action.tableSetProperty().isEmpty()) {
+            return;
+        }
+        final List<FrostlakeParser.TableSetPropertyContext> properties = action.tableSetProperty();
         final List<String> names = new ArrayList<>();
         final List<Boolean> taken = new ArrayList<>();
-        boolean baseLocation = false;
+        final List<WrittenParameterValue> values = new ArrayList<>();
         for (final FrostlakeParser.TableSetPropertyContext property : properties) {
-            final boolean isBaseLocation = BASE_LOCATION.equals(
-                ParameterRegistry.canonical(property.propertyName().getText()));
-            baseLocation |= isBaseLocation;
             names.add(property.propertyName().getText());
-            taken.add(Boolean.valueOf(isBaseLocation || tableTakes(property)));
+            taken.add(Boolean.valueOf(AlteredTableNames.takes(property)));
+            values.add(WrittenParameterValue.of(property));
         }
-        ParameterLevels.rejectUnknownNames(names, taken, "TABLE");
-        if (baseLocation) {
-            throw new RuntimeException("Unsupported feature '" + BASE_LOCATION + "'.");
+        ParameterLevels.judgeValueKinds(names, taken, values, "TABLE");
+        for (final FrostlakeParser.TableSetPropertyContext property : properties) {
+            CreatedObjectProperties.judgeAlterList(property);
+            final String rawKey = property.propertyName().getText();
+            CreatedObjectProperties.requireSwitchValue(rawKey, property.copyOptionValue());
+            if ("STAGE_FILE_FORMAT".equalsIgnoreCase(rawKey) && property.parenOptionList() != null) {
+                TableStageOptions.keepFormat(property.parenOptionList(), new LinkedHashMap<String, String>(),
+                    catalog);
+            } else if ("STAGE_COPY_OPTIONS".equalsIgnoreCase(rawKey) && property.stageCopyOptionList() != null) {
+                StageCopyOptions.read(property.stageCopyOptionList());
+            }
         }
     }
-
-    /** The location an Iceberg table's CREATE writes, which ALTER TABLE … SET does not take. */
-    private static final String BASE_LOCATION = "BASE_LOCATION";
 
     /** The noun a refusal for want of access names a table by: an Iceberg table is an iceberg_table (live-verified). */
     private static String privilegeKind(final Table table) {
@@ -5292,28 +5317,9 @@ public class AlterCommandHandler implements CommandHandler {
 
     /** Judges what an ALTER TABLE … UNSET names, as its SET's names are judged (see {@link ParameterLevels}). */
     private static void judgeTableUnset(final List<FrostlakeParser.PropertyNameContext> keys, final Table table) {
-        final List<String> names = new ArrayList<>();
-        final List<Boolean> taken = new ArrayList<>();
-        for (final FrostlakeParser.PropertyNameContext key : keys) {
-            final String canonical = ParameterRegistry.canonical(key.getText());
-            names.add(key.getText());
-            taken.add(Boolean.valueOf(!TABLE_STAGE_PROPERTIES.contains(canonical)
-                && (TABLE_UNSET_PROPERTIES.contains(canonical) || ParameterRegistry.isTableParameter(canonical))));
-        }
-        ParameterLevels.judgeAlter(names, taken, "TABLE", privilegeKind(table), table.getName());
+        ParameterLevels.judgeAlter(AlteredTableNames.writtenNames(keys), AlteredTableNames.unsetTaken(keys), "TABLE",
+            privilegeKind(table), table.getName());
     }
-
-    /** What an ALTER TABLE … UNSET takes besides the table's parameters. */
-    private static final Set<String> TABLE_UNSET_PROPERTIES = new HashSet<>(Arrays.asList("CHANGE_TRACKING",
-        "DATA_RETENTION_TIME_IN_DAYS", "MAX_DATA_EXTENSION_TIME_IN_DAYS", "DEFAULT_DDL_COLLATION",
-        "ENABLE_SCHEMA_EVOLUTION", "DATA_METRIC_SCHEDULE", "COMMENT"));
-
-    /**
-     * A table's stage file format and copy options: its SET writes them, and its UNSET names either as an invalid
-     * property (live-verified).
-     */
-    private static final Set<String> TABLE_STAGE_PROPERTIES = new HashSet<>(Arrays.asList("STAGE_FILE_FORMAT",
-        "STAGE_COPY_OPTIONS"));
 
     /** Judges what an ALTER DATABASE or ALTER SCHEMA … UNSET names (see {@link ParameterLevels}). */
     private static void judgeContainerUnset(final List<FrostlakeParser.PropertyNameContext> keys, final String kind,

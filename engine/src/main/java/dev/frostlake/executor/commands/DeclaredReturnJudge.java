@@ -92,7 +92,9 @@ final class DeclaredReturnJudge {
 
     /** An untyped DECLARE of the block, typed by its initialiser. */
     void declared(final FrostlakeParser.UntypedDeclarationItemContext item) {
-        record(item.identifier(), initialiserType(item.booleanExpr()));
+        // A procedure's answer a CALL hands back as a value is a text.
+        record(item.identifier(), item.anonymousCallValue() != null ? StringType.VARCHAR
+            : initialiserType(item.booleanExpr()));
     }
 
     /** One direct statement of the block, once the name pass has walked it. */
@@ -113,6 +115,8 @@ final class DeclaredReturnJudge {
             record(let.variableName(), writtenType(let.dataTypeName(), let.typeParameters(), false));
         } else if (let.CURSOR() == null && let.RESULTSET() == null && let.booleanExpr() != null) {
             record(let.variableName(), initialiserType(let.booleanExpr()));
+        } else if (let.anonymousCallValue() != null) {
+            record(let.variableName(), StringType.VARCHAR);
         } else {
             record(let.variableName(), null);
         }

@@ -22,6 +22,8 @@ import dev.frostlake.functions.VariantAccessorFunction;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.StringType;
+import dev.frostlake.values.DecimalOriginNode;
+import dev.frostlake.values.ScaledDecimalNode;
 import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantUndefined;
 import tools.jackson.databind.JsonNode;
@@ -75,11 +77,19 @@ public class ArrayToString extends VariantAccessorFunction {
     /**
      * One element as the join spells it: its text when it is text, a DOUBLE as a FLOAT is cast to text
      * ({@code 0.1234567016}, {@code 3}, {@code 1e+20}), and a nested array or object as the variant itself displays,
-     * its DOUBLEs in their fifteen-decimal form (live-verified).
+     * its DOUBLEs in their fifteen-decimal form, and a number read from a scaled NUMBER at its type's scale,
+     * {@code 2.500} and {@code 2.000} out of a NUMBER(10,3), where the array itself displays {@code [2.5]} and
+     * {@code [2]} (live-verified).
      */
     private static String elementText(final JsonNode element) {
         if (element.isTextual()) {
             return element.asText();
+        }
+        if (element instanceof ScaledDecimalNode) {
+            return ((ScaledDecimalNode) element).scaledText();
+        }
+        if (element instanceof DecimalOriginNode && ((DecimalOriginNode) element).declaredScale() > 0) {
+            return ((DecimalOriginNode) element).scaledText();
         }
         if (element.isDouble() || element.isFloat()) {
             return SharedFunctionHelpers.floatText(element.doubleValue());

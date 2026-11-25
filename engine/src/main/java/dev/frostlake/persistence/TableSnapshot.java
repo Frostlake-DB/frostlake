@@ -111,6 +111,10 @@ public class TableSnapshot implements Serializable {
     public boolean eventTable;
     public IcebergMetadataSnapshot icebergMetadata;
     public boolean changeTracking;
+    // Where change tracking was last turned on, and whether a statement had written the table by then. Null on
+    // snapshots written before they were saved, which restore tracking as turned on with the restore.
+    public Long changeTrackingSince;
+    public Boolean writtenUntracked;
     public boolean schemaEvolution;
     public boolean reclusterSuspended;
     public List<DataMetricSnapshot> dataMetrics;

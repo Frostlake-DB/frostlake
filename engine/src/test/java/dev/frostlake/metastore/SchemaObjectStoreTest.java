@@ -104,17 +104,21 @@ public class SchemaObjectStoreTest {
         assertNull(schema.getFileFormatExact("FF"));
         assertEquals(0, schema.getFileFormats().size());
         assertEquals(1, schema.allFileFormats().size());
-        assertTrue(refusal(new Executable() {
-            @Override
-            public void execute() {
-                schema.addFileFormat(new FileFormat("FF", "JSON"));
-            }
-        }).contains("Object 'FF' already exists."));
+        // Another session's permanent format of the name takes nothing from the temporary one.
+        final FileFormat permanent = new FileFormat("FF", "JSON");
+        assertFalse(schema.holdsFileFormatFor("FF", false));
+        schema.addFileFormat(permanent);
+        assertSame(permanent, schema.getFileFormatExact("FF"));
+        assertEquals(2, schema.allFileFormats().size());
         StatementSession.bind(1L);
+        // The session's own temporary format hides the permanent one from it alone, and is dropped first.
         assertSame(temporary, schema.getFileFormatExact("FF"));
-        final FileFormat replacement = new FileFormat("FF", "JSON");
-        schema.addFileFormat(replacement);
-        assertSame(replacement, schema.getFileFormat("ff"));
+        assertSame(temporary, schema.getFileFormat("ff"));
+        assertEquals(1, schema.getFileFormats().size());
+        assertEquals(2, schema.getFileFormatsWithHidden().size());
+        schema.dropFileFormatExact("FF");
+        assertSame(permanent, schema.getFileFormat("ff"));
+        assertEquals(1, schema.allFileFormats().size());
     }
 
     @Test

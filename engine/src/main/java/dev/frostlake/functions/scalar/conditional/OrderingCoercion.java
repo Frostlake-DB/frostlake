@@ -21,13 +21,13 @@ import tools.jackson.databind.JsonNode;
 import dev.frostlake.executor.SetOperations;
 import dev.frostlake.executor.ValueComparisons;
 import dev.frostlake.functions.IncomparableArgumentsException;
+import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.DecimalText;
 import dev.frostlake.values.VariantValue;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,6 +44,8 @@ import java.util.List;
  *   GREATEST(v, n)              1          a scalar VARIANT unwraps to its value
  *   GREATEST(n, 2.5)            2.5        two numerics compare by VALUE, not by Java class
  *   GREATEST(n, s)              "Numeric value 'abc' is not recognized"   — a ROW-time value error
+ *   GREATEST(z, '… +02:00')     the text as a timestamp of z's flavour, an offset kept beside a TIMESTAMP_TZ,
+ *                               a bare wall clock read in the session's zone
  * </pre>
  *
  * <p>The string rule is the set operation's rule, and it is literally the same code
@@ -99,10 +101,13 @@ public final class OrderingCoercion {
         // A temporal set is ordered in its WIDEST member's family, not the first one written: live
         // answers GREATEST(d, ts) and GREATEST(ts, d) alike with a timestamp, reading the DATE at
         // midnight. A TIME is deliberately outside this order — live refuses it beside a timestamp.
+        // Among the zoned ones a TIMESTAMP_TZ wins over a TIMESTAMP_LTZ, whichever is written first: live types
+        // GREATEST(l, z) and GREATEST(z, l) alike as a TIMESTAMP_TZ.
         Object widestTemporal = null;
         for (final Object arg : args) {
             if (temporalRank(arg) > 0
-                    && (widestTemporal == null || temporalRank(arg) > temporalRank(widestTemporal))) {
+                    && (widestTemporal == null || temporalRank(arg) > temporalRank(widestTemporal)
+                        || arg instanceof ZonedDateTime && widestTemporal instanceof OffsetDateTime)) {
                 widestTemporal = arg;
             }
         }
@@ -140,8 +145,10 @@ public final class OrderingCoercion {
     }
 
     /**
-     * One temporal read in a wider temporal's family — a DATE at midnight, a naive timestamp at the
-     * target's own offset.
+     * One temporal read in a wider temporal's family — a DATE at midnight, and beside a zoned timestamp a
+     * naive one (or a date's midnight) read in the session's zone, as a cast to the zoned flavour reads it:
+     * live answers {@code GREATEST(z, n)} with the NTZ's wall clock at the session's offset when that
+     * instant is the later one.
      *
      * @param value  the narrower temporal
      * @param target the value whose family is being ordered in
@@ -149,18 +156,9 @@ public final class OrderingCoercion {
      */
     private static Object widenTemporal(final Object value, final Object target) {
         if (target instanceof OffsetDateTime || target instanceof ZonedDateTime) {
-            final ZoneOffset offset = target instanceof ZonedDateTime
-                ? ((ZonedDateTime) target).getOffset() : ((OffsetDateTime) target).getOffset();
-            if (value instanceof LocalDate) {
-                return ((LocalDate) value).atStartOfDay().atOffset(offset);
-            }
-            if (value instanceof LocalDateTime) {
-                return ((LocalDateTime) value).atOffset(offset);
-            }
-            if (value instanceof ZonedDateTime) {
-                return ((ZonedDateTime) value).toOffsetDateTime();
-            }
-            return value;
+            // A TIMESTAMP_LTZ beside a TIMESTAMP_TZ becomes one at the session's offset, as its cast does; a value
+            // already of the target's flavour stays as it is, a TIMESTAMP_TZ keeping the offset it was written with.
+            return value.getClass() == target.getClass() ? value : readZoned(value, target);
         }
         if (target instanceof LocalDateTime && value instanceof LocalDate) {
             return ((LocalDate) value).atStartOfDay();
@@ -177,6 +175,9 @@ public final class OrderingCoercion {
                 throw incomparable(unwrapped, target);
             }
             return flag;
+        }
+        if (unwrapped instanceof CharSequence && temporalRank(target) == 3) {
+            return readZoned(unwrapped.toString(), target);
         }
         if (unwrapped instanceof CharSequence) {
             final Object converted = SetOperations.coerceStringToLeadingType(
@@ -197,6 +198,21 @@ public final class OrderingCoercion {
             return unwrapped;
         }
         throw incomparable(unwrapped, target);
+    }
+
+    /**
+     * A text, a date, a naive timestamp or a TIMESTAMP_LTZ read in a zoned timestamp's flavour, as a cast to it reads one: an
+     * offset, an RFC or ISO form and an epoch fix the instant, a bare wall clock is in the session's zone,
+     * and text that is no timestamp is {@code Timestamp 'x' is not recognized}. Beside a TIMESTAMP_TZ the
+     * value keeps the offset it was written with — {@code GREATEST(z, '… 15:00:00 +02:00')} answers
+     * {@code +0200} — and beside a TIMESTAMP_LTZ it is an instant at the session's offset.
+     */
+    private static Object readZoned(final Object value, final Object target) {
+        if (target instanceof ZonedDateTime) {
+            return SharedFunctionHelpers.toWrittenOffsetTimestamp(value instanceof OffsetDateTime
+                ? SharedFunctionHelpers.toSessionOffsetDateTime(value) : value);
+        }
+        return SharedFunctionHelpers.toSessionOffsetDateTime(value);
     }
 
     private static boolean isScalarVariant(final Object value) {

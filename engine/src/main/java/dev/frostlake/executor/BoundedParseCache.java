@@ -71,4 +71,13 @@ public final class BoundedParseCache<V> {
             entries.put(key, value);
         }
     }
+
+    /**
+     * Forgets the value kept for a key, if any.
+     *
+     * @param key the key
+     */
+    public synchronized void remove(final String key) {
+        entries.remove(key);
+    }
 }

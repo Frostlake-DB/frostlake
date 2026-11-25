@@ -743,6 +743,39 @@ public class SnowflakeDriverProtocolTest {
     }
 
     @Test
+    public void aSynchronousTextOfSeveralStatementsIsTheParentOfItsStatements() throws Exception {
+        try (Connection connection = connect("sfp_db");
+             Statement statement = connection.createStatement();
+             Statement other = connection.createStatement()) {
+            final SnowflakeConnection snowflake = connection.unwrap(SnowflakeConnection.class);
+            statement.unwrap(SnowflakeStatement.class).setParameter("MULTI_STATEMENT_COUNT", 2);
+            assertTrue(statement.execute("select 11; select 22"));
+            final String first = statement.unwrap(SnowflakeStatement.class).getQueryID();
+            assertEquals(List.of("11"), rows(statement.getResultSet()));
+            // The request takes an ID of its own and ends after its statements, each of which has its own: the
+            // session's last query is the request, the parent of its statements (live-verified).
+            final String parent;
+            final String second;
+            final String before;
+            try (ResultSet ids = other.executeQuery("SELECT LAST_QUERY_ID(), LAST_QUERY_ID(-2), LAST_QUERY_ID(-3)")) {
+                assertTrue(ids.next());
+                parent = ids.getString(1);
+                second = ids.getString(2);
+                before = ids.getString(3);
+            }
+            assertEquals(first, before);
+            assertArrayEquals(new String[] {first, second}, snowflake.getChildQueryIds(parent));
+            assertEquals(List.of("Multiple statements executed successfully."),
+                rows(snowflake.createResultSet(parent)));
+            assertEquals(List.of("22"), rows(snowflake.createResultSet(second)));
+            assertEquals(List.of("select 11; select 22|MULTI_STATEMENT", "select 11|SELECT", "select 22|SELECT"),
+                rows(other.executeQuery("SELECT query_text, query_type FROM "
+                    + "TABLE(information_schema.query_history_by_session()) WHERE query_id IN ('" + parent + "', '"
+                    + first + "', '" + second + "') ORDER BY query_type = 'MULTI_STATEMENT' DESC, query_text")));
+        }
+    }
+
+    @Test
     public void aLoginNamingARoleTheSessionCannotTakeIsRefused() throws SQLException {
         try (Connection connection = connect(null);
              Statement statement = connection.createStatement()) {

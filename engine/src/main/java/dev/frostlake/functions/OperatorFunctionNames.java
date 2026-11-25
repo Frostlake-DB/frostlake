@@ -44,8 +44,9 @@ import java.util.TreeSet;
  * </ol>
  *
  * <p>Names that fail either test stay out. {@code DIV} is the instructive one: Snowflake lists it, but it
- * is not invocable there either ({@code SELECT DIV(10, 3)} answers "Unsupported feature 'DIV'") and
- * Frostlake has no {@code DIV} in any form — {@code 10 DIV 3} is a syntax error — so it is not listed.
+ * is not invocable there either ({@code SELECT DIV(10, 3)} answers "Unsupported feature 'DIV'"), and
+ * Frostlake reads only the call form — {@code 10 DIV 3} is a syntax error — so it is a registered function
+ * refused as the account refuses it (see {@code Div}), not an operator form.
  * {@code ILIKE_ALL} is absent from Snowflake's own listing and rejected by it
  * ("Unknown function ILIKE_ALL"), matching Frostlake's grammar, which allows {@code ILIKE ANY} but not
  * {@code ILIKE ALL}. The interval-arithmetic quartets are split for the same reason: Frostlake evaluates

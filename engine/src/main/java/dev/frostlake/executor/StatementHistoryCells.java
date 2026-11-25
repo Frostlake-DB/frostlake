@@ -56,6 +56,8 @@ import java.util.Locale;
  */
 final class StatementHistoryCells {
 
+    /** The kind of a CALL, which runs in no transaction of its own: its statements run theirs. */
+    private static final String CALL = "CALL";
     private static final String COMPILATION_ERROR = "SQL compilation error";
 
     private StatementHistoryCells() {
@@ -78,6 +80,13 @@ final class StatementHistoryCells {
                           final QueryExecutor executor, final List<ResultSet> results, final long writtenRows,
                           final String lastBefore, final String lastAfter, final TransactionManager transactions,
                           final Catalog catalog) {
+        if (isRequestOfSeveral(row)) {
+            // A request of several statements runs on the session's warehouse and in no transaction of its own: its
+            // statements ran theirs (live-verified).
+            row.setTransactionId(transactionOf(transactions, lastBefore, lastAfter, CALL));
+            row.setWarehouseSize(warehouseSize(catalog));
+            return;
+        }
         final FrostlakeParser.StatementContext effective = QueryTypeNames.effective(statement, executor);
         final String kind = QueryTypeNames.of(statement, executor);
         row.setQueryTypeName(kind);
@@ -112,10 +121,11 @@ final class StatementHistoryCells {
     static void failed(final QueryHistory row, final FrostlakeParser.StatementContext statement,
                        final QueryExecutor executor, final Throwable failure, final String lastBefore,
                        final String lastAfter, final TransactionManager transactions, final Catalog catalog) {
-        // A text of more statements than the session lets it hold is refused unread (live-verified).
-        final String kind = statement == null ? null
+        // A text of more statements than the session lets it hold is refused unread (live-verified); a request of
+        // several statements that ran keeps its kind, and runs in no transaction of its own.
+        final String kind = isRequestOfSeveral(row) ? CALL : statement == null ? null
             : countRefused(failure) ? QueryTypeNames.UNKNOWN : QueryTypeNames.of(statement, executor);
-        if (kind != null) {
+        if (kind != null && !isRequestOfSeveral(row)) {
             row.setQueryTypeName(kind);
         }
         // A statement refused while it compiled ran in no transaction and on no warehouse; one that failed as it ran
@@ -123,6 +133,11 @@ final class StatementHistoryCells {
         final boolean ran = failure.getMessage() == null || !failure.getMessage().startsWith(COMPILATION_ERROR);
         row.setTransactionId(ran ? transactionOf(transactions, lastBefore, lastAfter, kind) : 0L);
         row.setWarehouseSize(ran ? warehouseSize(catalog) : null);
+    }
+
+    /** Whether a row lists a request of several statements, the parent of the statements it ran. */
+    private static boolean isRequestOfSeveral(final QueryHistory row) {
+        return QueryTypeNames.MULTI_STATEMENT.equals(row.getQueryTypeName());
     }
 
     /** Whether a failure is, or was caused by, the refusal of a text's statement count. */
@@ -143,7 +158,7 @@ final class StatementHistoryCells {
     private static long transactionOf(final TransactionManager transactions, final String lastBefore,
                                       final String lastAfter, final String kind) {
         final Transaction open = transactions.getCurrentTransaction();
-        if ("CALL".equals(kind)) {
+        if (CALL.equals(kind)) {
             return open != null && transactions.isLastingTransaction() ? open.getPublicId() : 0L;
         }
         if (open != null) {

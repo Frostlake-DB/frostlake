@@ -57,7 +57,15 @@ import java.util.Set;
  * HAVING, QUALIFY, a LIMIT (TOP and FETCH alike), ORDER BY, time travel, a function whose value is not deterministic,
  * GROUPING SETS, ROLLUP or CUBE, GROUP BY ALL, a DISTINCT aggregate, a GROUP BY key its select list leaves out, or an
  * aggregate the view cannot keep up to date (MEDIAN, the percentiles, LISTAGG, ARRAY_AGG, MODE, OBJECT_AGG,
- * HASH_AGG). Where several are written, the first in that order is the one reported.
+ * HASH_AGG). Where several are written, the first in that order is the one reported. A select list leaving an
+ * expression unnamed, with no column list to name it, is refused after time travel and before the clauses that
+ * follow it (GROUP BY ALL alone excepted, which is reported ahead of it).
+ *
+ * <p>A materialized view reads its table with a hidden partition column, SYS_MV_SOURCE_PARTITION, which an UNPIVOT
+ * keeps among the columns it does not unpivot. A star over an UNPIVOT therefore selects it: as the view's whole select
+ * list it is refused as a column name a materialized view may not have, and anywhere else (beside another item, in a
+ * branch of a set operation, or through a derived table or CTE that a star reads) as a duplicate column
+ * (live-verified).
  */
 final class MaterializedViewDefinition {
 
@@ -78,6 +86,9 @@ final class MaterializedViewDefinition {
         "HASH_AGG"));
 
     private static final String DEFINITION = "Invalid materialized view definition. ";
+
+    /** The hidden column a materialized view reads its table's partitions by. */
+    private static final String PARTITION_COLUMN = "SYS_MV_SOURCE_PARTITION";
 
     private final Catalog catalog;
     private final FunctionRegistry functions;
@@ -101,6 +112,10 @@ final class MaterializedViewDefinition {
     private Token orderBy;
     private Token groupingSet;
     private boolean groupByAll;
+    /** Whether a star selects the hidden partition column an UNPIVOT keeps as the view's whole select list. */
+    private boolean partitionColumnSelected;
+    /** Whether a star selects that column where it meets another copy of it. */
+    private boolean partitionColumnDuplicated;
 
     /** The one table the view reads, and the name its columns are spelled under. */
     private Table table;
@@ -129,6 +144,7 @@ final class MaterializedViewDefinition {
         }
         QueryExecutor.collectCteNames(select, cteNames);
         walk(select);
+        readUnpivotStars(select);
         if (unreadSource) {
             return;
         }
@@ -182,10 +198,17 @@ final class MaterializedViewDefinition {
         if (viewRead != null) {
             refuse(at(viewReadAt, DEFINITION + "'" + SqlIdentifiers.spellCanonical(viewRead) + "' should be a table."));
         }
+        if (partitionColumnDuplicated) {
+            refuse(SqlCompilationError.of("duplicate column name '" + PARTITION_COLUMN + "'"));
+        }
         if (timeTravel != null) {
             final int[] place = LeadingCommentOffset.rebase(timeTravel.getLine(), timeTravel.getCharPositionInLine());
             refuse(SqlCompilationError.inline("Invalid materialized view: Time travel on base table in line " + place[0]
                 + " at position " + place[1] + "."));
+        }
+        if (unnamedColumn()) {
+            refuseGroupByAll();
+            refuse(SqlCompilationError.of("Missing column specification"));
         }
         final Token name = create.objectName().getStart();
         if (window) {
@@ -209,20 +232,164 @@ final class MaterializedViewDefinition {
         if (inSubquery) {
             refuse(SqlCompilationError.at(0, -1, DEFINITION + "sub-queries not allowed in view materialized definition."));
         }
+        if (partitionColumnSelected) {
+            refuseGroupingSet();
+            refuse(SqlCompilationError.of("'" + PARTITION_COLUMN
+                + "' cannot be used as a column name for materialized views."));
+        }
         refuseNotDeterministic();
-        if (groupingSet != null) {
-            final int[] place = LeadingCommentOffset.rebase(groupingSet.getLine(), groupingSet.getCharPositionInLine());
-            refuse(SqlCompilationError.inline("Invalid materialized view: Grouping sets, cube, rollup are not supported:"
-                + "  line '" + place[0] + "' at position '" + place[1] + "'."));
-        }
-        if (groupByAll) {
-            refuse(SqlCompilationError.inline(DEFINITION + "GROUP BY ALL not allowed in MV definition."));
-        }
+        refuseGroupingSet();
+        refuseGroupByAll();
         refuseDistinctAggregates();
         for (final FrostlakeParser.SelectClauseContext block : blocks) {
             refuseUnselectedKeys(block);
         }
         refuseUnsupportedAggregates();
+    }
+
+    private void refuseGroupByAll() {
+        if (groupByAll) {
+            refuse(SqlCompilationError.inline(DEFINITION + "GROUP BY ALL not allowed in MV definition."));
+        }
+    }
+
+    /**
+     * Whether the view's columns go unnamed: it declares no column list, and its one query block selects an
+     * expression with no name and no star.
+     */
+    private boolean unnamedColumn() {
+        if (create.viewColumnList() != null || create.trailingViewColumns() != null) {
+            return false;
+        }
+        final FrostlakeParser.SelectStatementContext select = create.selectStatement();
+        if (select.selectOperand().size() != 1) {
+            return false;
+        }
+        final FrostlakeParser.SelectClauseContext block = select.selectOperand(0).selectClause();
+        if (block == null || block.selectList() == null || hasStar(block)) {
+            return false;
+        }
+        for (final FrostlakeParser.SelectItemContext item : block.selectList().selectItem()) {
+            if (SelectItemAccessors.isUnnamedExpressionItem(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void refuseGroupingSet() {
+        if (groupingSet != null) {
+            final int[] place = LeadingCommentOffset.rebase(groupingSet.getLine(), groupingSet.getCharPositionInLine());
+            refuse(SqlCompilationError.inline("Invalid materialized view: Grouping sets, cube, rollup are not supported:"
+                + "  line '" + place[0] + "' at position '" + place[1] + "'."));
+        }
+    }
+
+    /** Where a star of the definition selects the partition column an UNPIVOT keeps (see the class comment). */
+    private void readUnpivotStars(final FrostlakeParser.SelectStatementContext select) {
+        final List<FrostlakeParser.SelectOperandContext> operands = select.selectOperand();
+        if (operands.size() > 1) {
+            for (final FrostlakeParser.SelectOperandContext operand : operands) {
+                final FrostlakeParser.SelectClauseContext block = operand.selectClause();
+                if (block != null && (starOverUnpivot(block) || starOverUnpivotStar(block, select))) {
+                    partitionColumnDuplicated = true;
+                }
+            }
+            return;
+        }
+        final FrostlakeParser.SelectClauseContext block = operands.get(0).selectClause();
+        if (block == null) {
+            return;
+        }
+        if (starOverUnpivot(block)) {
+            if (onlyStars(block)) {
+                partitionColumnSelected = true;
+            } else {
+                partitionColumnDuplicated = true;
+            }
+        } else if (starOverUnpivotStar(block, select)) {
+            partitionColumnDuplicated = true;
+        }
+    }
+
+    /** Whether a query block selects a star FROM a relation an UNPIVOT is applied to. */
+    private static boolean starOverUnpivot(final FrostlakeParser.SelectClauseContext block) {
+        if (!hasStar(block) || block.tableExpression() == null) {
+            return false;
+        }
+        for (final FrostlakeParser.TableReferenceContext reference : block.tableExpression().tableReference()) {
+            if (reference.unpivotClause() != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a query block selects a star FROM a derived table or a CTE one of whose query blocks selects a star over
+     * an UNPIVOT, directly or through such a relation of its own.
+     */
+    private static boolean starOverUnpivotStar(final FrostlakeParser.SelectClauseContext block,
+                                               final FrostlakeParser.SelectStatementContext statement) {
+        if (!hasStar(block) || block.tableExpression() == null) {
+            return false;
+        }
+        for (final FrostlakeParser.TableReferenceContext reference : block.tableExpression().tableReference()) {
+            final FrostlakeParser.SelectStatementContext body = bodyRead(reference.tableSource(), statement);
+            if (body == null) {
+                continue;
+            }
+            for (final FrostlakeParser.SelectOperandContext operand : body.selectOperand()) {
+                final FrostlakeParser.SelectClauseContext inner = operand.selectClause();
+                if (inner != null && (starOverUnpivot(inner) || starOverUnpivotStar(inner, body))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The query a relation reads: a derived table's own, or that of the CTE of the statement its name is. */
+    private static FrostlakeParser.SelectStatementContext bodyRead(final FrostlakeParser.TableSourceContext source,
+                                                                   final FrostlakeParser.SelectStatementContext
+                                                                       statement) {
+        if (source == null) {
+            return null;
+        }
+        if (source.selectStatement() != null) {
+            return source.selectStatement();
+        }
+        if (source.tableQualifiedName() == null || statement.withClause() == null) {
+            return null;
+        }
+        final String[] parts = ParseTreeText.qualifiedNameParts(source.tableQualifiedName());
+        if (parts.length != 1) {
+            return null;
+        }
+        for (final FrostlakeParser.CteDefinitionContext cte : statement.withClause().cteDefinition()) {
+            if (ParseTreeText.namePartText(cte.nameStartPart()).equalsIgnoreCase(parts[0])) {
+                return cte.selectStatement();
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasStar(final FrostlakeParser.SelectClauseContext block) {
+        for (final FrostlakeParser.SelectItemContext item : block.selectList().selectItem()) {
+            if (SelectItemAccessors.isStarItem(item) || SelectItemAccessors.isQualifiedStarItem(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean onlyStars(final FrostlakeParser.SelectClauseContext block) {
+        for (final FrostlakeParser.SelectItemContext item : block.selectList().selectItem()) {
+            if (!SelectItemAccessors.isStarItem(item) && !SelectItemAccessors.isQualifiedStarItem(item)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Collects what the definition holds, in the order it is written. */
@@ -396,10 +563,25 @@ final class MaterializedViewDefinition {
             final boolean refused = "UUID_STRING".equals(reported) ? argumentCount(call) == 0
                 : NOT_DETERMINISTIC.contains(reported);
             if (refused) {
-                refuse(at(call.getStart(), DEFINITION + "non deterministic function '" + reported
+                refuse(notDeterministicAt(call, name, DEFINITION + "non deterministic function '" + reported
                     + "' not allowed in view definition."));
             }
         }
+    }
+
+    /**
+     * The place a non-deterministic call is refused at: the call's own, but SYSDATE is reported at line 1 position 35
+     * and GETDATE and SYSTIMESTAMP at line 1 position 1 wherever they are written, as the CURRENT_TIMESTAMP each is
+     * read as (live-verified).
+     */
+    private static String notDeterministicAt(final ParserRuleContext call, final String name, final String detail) {
+        if ("SYSDATE".equals(name)) {
+            return SqlCompilationError.PREFIX + " error line 1 at position 35\n" + detail;
+        }
+        if ("GETDATE".equals(name) || "SYSTIMESTAMP".equals(name)) {
+            return SqlCompilationError.PREFIX + " error line 1 at position 1\n" + detail;
+        }
+        return at(call.getStart(), detail);
     }
 
     private void refuseDistinctAggregates() {

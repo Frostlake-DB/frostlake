@@ -16,12 +16,14 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.expressions.BetweenExpression;
 import dev.frostlake.executor.expressions.BinaryOperationExpression;
 import dev.frostlake.executor.expressions.BinaryOperator;
 import dev.frostlake.executor.expressions.ColumnReferenceExpression;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
+import dev.frostlake.executor.expressions.InExpression;
 import dev.frostlake.executor.expressions.IsNullExpression;
 import dev.frostlake.executor.expressions.LiteralExpression;
 import dev.frostlake.executor.expressions.LiteralType;
@@ -36,6 +38,8 @@ import dev.frostlake.metastore.model.Table;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.KeyContexts;
 import dev.frostlake.types.DataType;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -75,6 +79,12 @@ import org.antlr.v4.runtime.misc.Interval;
 final class PlanEcho {
 
     private final ExpressionEvaluator printer;
+    private final Table table;
+    private final Map<String, Table> aliasToTable;
+    private final List<Table> allTables;
+    private final FunctionRegistry functionRegistry;
+    private final Catalog catalog;
+    private final QueryExecutor queryExecutor;
 
     PlanEcho(final Table table, final Map<String, Table> aliasToTable, final List<Table> allTables,
              final FunctionRegistry functionRegistry, final Catalog catalog) {
@@ -94,6 +104,12 @@ final class PlanEcho {
         if (allTables != null) {
             this.printer.setMultiTableContext(aliasToTable, allTables);
         }
+        this.table = table;
+        this.aliasToTable = aliasToTable;
+        this.allTables = allTables;
+        this.functionRegistry = functionRegistry;
+        this.catalog = catalog;
+        this.queryExecutor = queryExecutor;
     }
 
     /**
@@ -150,6 +166,58 @@ final class PlanEcho {
         } catch (final RuntimeException notAnExpression) {
             return written;
         }
+    }
+
+    /**
+     * A window call's argument or key as live's PLAN holds it: {@link #printPlanned}, and a predicate cast to the
+     * BOOLEAN it yields, {@code CAST(FZ.ID > 1 AS BOOLEAN)}, while a BOOLEAN column and NOT / AND / OR over them alone
+     * stay as they are (live-verified). A text that will not re-parse prints as written.
+     *
+     * @param unit the argument or key
+     * @return its plan text
+     */
+    String printPlannedValue(final ParserRuleContext unit) {
+        final String written = ParseTreeText.getOriginalText(unit);
+        try {
+            return printer.plannedValueText(ExpressionEvaluator.parse(written));
+        } catch (final RuntimeException notAnExpression) {
+            return written;
+        }
+    }
+
+    /**
+     * A sort key as live's PLAN holds it: {@link #printPlanned}, and a key that is a predicate cast to the BOOLEAN it
+     * sorts by, {@code CAST(LA.Y > 1 AS BOOLEAN)}, {@code CAST(LA.Y IN (1, 2) AS BOOLEAN)}, {@code CAST((LA.Y >= 1)
+     * AND (LA.Y <= 2) AS BOOLEAN)} for a BETWEEN; a key of the logical vocabulary alone - a BOOLEAN column, a NOT of
+     * one - stays uncast (live-verified). A text that will not re-parse prints as written.
+     *
+     * @param key the sort key
+     * @return its plan text
+     */
+    String printPlannedSortKey(final ParserRuleContext key) {
+        final String written = ParseTreeText.getOriginalText(key);
+        final Expression parsed;
+        try {
+            parsed = ExpressionEvaluator.parse(written);
+        } catch (final RuntimeException notAnExpression) {
+            return written;
+        }
+        final String planned = printPlanned(key);
+        return isPredicateKey(parsed) && !isLogical(parsed) ? "CAST(" + unwrapped(planned) + " AS BOOLEAN)" : planned;
+    }
+
+    /** Whether a sort key is a predicate: a comparison, an IS NULL, an IN, a BETWEEN, or a NOT, AND or OR. */
+    private boolean isPredicateKey(final Expression expression) {
+        if (expression instanceof InExpression || expression instanceof BetweenExpression
+                || isSpelledOutPredicate(expression)) {
+            return true;
+        }
+        if (expression instanceof BinaryOperationExpression) {
+            final BinaryOperator operator = ((BinaryOperationExpression) expression).getOperator();
+            return operator == BinaryOperator.AND || operator == BinaryOperator.OR;
+        }
+        return expression instanceof UnaryOperationExpression
+            && ((UnaryOperationExpression) expression).getOperator() == UnaryOperator.NOT;
     }
 
     /**
@@ -231,6 +299,70 @@ final class PlanEcho {
      */
     void typeAliases(final Map<String, DataType> types) {
         printer.setOutputAliasTypes(types);
+    }
+
+    /**
+     * A call a sentence names by itself with its OVER clause dropped, as {@link #print} re-prints it, a plain AVG by
+     * its SUM half (see {@link #printAggregateCall}): {@code MAX(o.i) OVER ()} is {@code MAX(O.I)} and
+     * {@code AVG(o.i)} is {@code SUM(O.I)}. A text that will not re-parse prints as written.
+     *
+     * @param call the call
+     * @return its text
+     */
+    String printCallWithoutWindow(final ParserRuleContext call) {
+        String written = null;
+        if (call instanceof FrostlakeParser.FunctionCallExprContext) {
+            written = bareCallText((FrostlakeParser.FunctionCallExprContext) call);
+        }
+        if (written == null) {
+            written = ParseTreeText.getOriginalText(call);
+        }
+        try {
+            final Expression parsed = ExpressionEvaluator.parse(written);
+            final boolean average = parsed instanceof FunctionCallExpression
+                && "AVG".equalsIgnoreCase(((FunctionCallExpression) parsed).getFunctionName());
+            return average ? printer.qualifiedAggregateText(parsed) : printer.qualifiedText(parsed);
+        } catch (final RuntimeException notAnExpression) {
+            return written;
+        }
+    }
+
+    /**
+     * A call written in a lambda's body that reads the lambda's parameters, named as live's plan holds it: the
+     * parameters are a relation of their own, nameless, whose columns the given text reads — an AVG as the sum half
+     * of its division, every other call as its plan definition: {@code MAX(TO_NUMBER(X))}, {@code SUM(CAST(X AS
+     * FLOAT))} (live-verified).
+     *
+     * @param text       the call's text, each parameter read as the lambda converts it
+     * @param parameters the lambda's parameters as columns
+     * @return the call as named, or the text where it does not print
+     */
+    String printLambdaCall(final String text, final Table parameters) {
+        final ExpressionEvaluator lambdaPrinter = queryExecutor == null
+            ? new ExpressionEvaluator(table != null ? table : parameters, functionRegistry, catalog)
+            : new ExpressionEvaluator(table != null ? table : parameters, functionRegistry, catalog, queryExecutor);
+        final Map<String, Table> aliases = new LinkedHashMap<>();
+        final List<Table> tables = new ArrayList<>();
+        if (aliasToTable != null) {
+            aliases.putAll(aliasToTable);
+        }
+        if (allTables != null) {
+            tables.addAll(allTables);
+        } else if (table != null) {
+            tables.add(table);
+            aliases.put(table.getName(), table);
+        }
+        aliases.put("", parameters);
+        tables.add(parameters);
+        lambdaPrinter.setMultiTableContext(aliases, tables);
+        try {
+            final Expression parsed = ExpressionEvaluator.parse(text);
+            final boolean average = parsed instanceof FunctionCallExpression
+                && "AVG".equalsIgnoreCase(((FunctionCallExpression) parsed).getFunctionName());
+            return average ? lambdaPrinter.qualifiedAggregateText(parsed) : lambdaPrinter.plannedCallDefinition(parsed);
+        } catch (final RuntimeException notAnExpression) {
+            return text;
+        }
     }
 
     String printAggregateCall(final ParserRuleContext call) {

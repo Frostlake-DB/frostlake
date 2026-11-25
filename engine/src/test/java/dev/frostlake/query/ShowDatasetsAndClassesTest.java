@@ -15,6 +15,7 @@
  */
 package dev.frostlake.query;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -28,6 +29,12 @@ import org.junit.jupiter.api.Test;
  * as keywords, and a scope's word they are not. Every answer is live-verified.
  */
 public class ShowDatasetsAndClassesTest extends MeasuredCellsTestSupport {
+
+    /** Acts as ACCOUNTADMIN, the role these answers were measured under (see {@link #actAsAccountAdministrator}). */
+    @BeforeEach
+    public void actAsTheMeasuringRole() {
+        actAsAccountAdministrator();
+    }
 
     @Test
     public void theTwoListings() {

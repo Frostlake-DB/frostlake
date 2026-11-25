@@ -17,9 +17,7 @@
 package dev.frostlake.functions.aggregate;
 
 import dev.frostlake.functions.AggregateFunction;
-import dev.frostlake.values.Decfloats;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -65,15 +63,8 @@ public class AvgAccumulator
     @Override
     public Object getResult() {
         if (decfloatArgument) {
-            // A DECFLOAT average is the exact sum over the count, to 38 significant digits (live-verified).
-            if (values.isEmpty()) {
-                return null;
-            }
-            BigDecimal sum = BigDecimal.ZERO;
-            for (final Object value : values) {
-                sum = sum.add(Decfloats.of((Number) value, "AVG"));
-            }
-            return Decfloats.divide(sum, BigDecimal.valueOf(values.size()));
+            // A DECFLOAT average is the exact sum, held to 38 significant digits, over the count (live-verified).
+            return DecfloatAggregates.avg(values);
         }
         return AggregateNumerics.avg(values, approximateArgument);
     }

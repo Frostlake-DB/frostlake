@@ -18,6 +18,7 @@ package dev.frostlake.parser;
 
 import org.antlr.v4.runtime.Token;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -33,6 +34,9 @@ import java.util.List;
  * is the CREATE TABLE this grammar reads, the kind word blanked and every position where it was written, and with the
  * {@code AS (…)} of each column before the fault blanked too, which that reading does not take; it speaks only where
  * its first fault falls inside a type's parameter list there.
+ *
+ * <p>A fault anywhere else in the column list reports nothing inside a property's parenthesized value after it
+ * ({@link #withoutValueLines}).
  */
 final class ExternalTableListLines {
 
@@ -70,6 +74,71 @@ final class ExternalTableListLines {
             }
         }
         return columnListLines(sql, spoken, at);
+    }
+
+    /**
+     * The lines of a CREATE EXTERNAL TABLE whose first fault stands in its column list, without those the parse's
+     * recovery reports inside a property's parenthesized value after it: the reading resumes at that value's '(' as at
+     * a statement of its own, {@code FILE_FORMAT = (TYPE = CSV)} naming its TYPE, where the account reports nothing
+     * there (live-verified). {@code lines} for any other statement.
+     *
+     * @param spoken     the default-channel tokens, end of input included
+     * @param faultIndex the token index of the statement's first fault, negative for the end of input
+     * @param lines      the lines the parse reports
+     * @return the lines
+     */
+    static List<String> withoutValueLines(final List<Token> spoken, final int faultIndex, final List<String> lines) {
+        if (lines.size() < 2 || faultIndex < 0) {
+            return lines;
+        }
+        int at = 0;
+        if (type(spoken, at) != FrostlakeLexer.CREATE) {
+            return lines;
+        }
+        at++;
+        if (type(spoken, at) == FrostlakeLexer.OR && type(spoken, at + 1) == FrostlakeLexer.REPLACE) {
+            at += 2;
+        }
+        if (type(spoken, at) != FrostlakeLexer.EXTERNAL || type(spoken, at + 1) != FrostlakeLexer.TABLE) {
+            return lines;
+        }
+        int open = at + 2;
+        while (!ends(spoken, open) && type(spoken, open) != FrostlakeLexer.LPAREN) {
+            open++;
+        }
+        if (ends(spoken, open) || type(spoken, open - 1) == FrostlakeLexer.EQ
+                || spoken.get(open).getTokenIndex() >= faultIndex) {
+            return lines;
+        }
+        final int close = closeOf(spoken, open);
+        if (close > 0 && spoken.get(close).getTokenIndex() < faultIndex) {
+            return lines;
+        }
+        // The first property value opened after the fault: an '=' and its '('.
+        Token value = null;
+        for (int i = open + 1; !ends(spoken, i) && value == null; i++) {
+            if (spoken.get(i).getTokenIndex() > faultIndex && type(spoken, i) == FrostlakeLexer.LPAREN
+                    && type(spoken, i - 1) == FrostlakeLexer.EQ) {
+                value = spoken.get(i);
+            }
+        }
+        if (value == null) {
+            return lines;
+        }
+        final List<String> kept = new ArrayList<>();
+        kept.add(lines.get(0));
+        for (int i = 1; i < lines.size(); i++) {
+            final int[] place = SyntaxErrorListener.sentenceCoordinates(lines.get(i));
+            if (place == null || !after(place, value) && !at(place, value)) {
+                kept.add(lines.get(i));
+            }
+        }
+        return kept;
+    }
+
+    /** Whether a line's place is a token's own. */
+    private static boolean at(final int[] place, final Token token) {
+        return place[0] == token.getLine() && place[1] == token.getCharPositionInLine();
     }
 
     /** The lines of a column list read as a table's, or null where its first fault falls outside a type's list. */

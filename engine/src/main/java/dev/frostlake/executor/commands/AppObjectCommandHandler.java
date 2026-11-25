@@ -465,13 +465,13 @@ public class AppObjectCommandHandler {
      * unless IF EXISTS forgives it.
      *
      * @param kind     the object's kind
-     * @param nameCtx  the object's name
+     * @param parts    the object's name parts
      * @param comment  the comment
      * @param ifExists whether IF EXISTS forgives a missing object
      */
-    public void comment(final AppObjectKind kind, final FrostlakeParser.QualifiedNameContext nameCtx,
-                        final String comment, final boolean ifExists) {
-        final AppObject object = existing(kind, nameCtx, ifExists);
+    public void comment(final AppObjectKind kind, final String[] parts, final String comment,
+                        final boolean ifExists) {
+        final AppObject object = existing(kind, parts, ifExists);
         if (object != null) {
             object.setComment(comment);
         }
@@ -480,10 +480,15 @@ public class AppObjectCommandHandler {
     /** The object an ALTER names, or null when it is absent and IF EXISTS forgives that. */
     private AppObject existing(final AppObjectKind kind, final FrostlakeParser.QualifiedNameContext nameCtx,
                                final boolean ifExists) {
-        final Schema schema = schemaOf(nameCtx);
-        final AppObject object = schema.getAppObjects().get(kind, nameOf(nameCtx));
+        return existing(kind, ParseTreeText.qualifiedNameParts(nameCtx), ifExists);
+    }
+
+    private AppObject existing(final AppObjectKind kind, final String[] parts, final boolean ifExists) {
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        final String name = parts[parts.length - 1];
+        final AppObject object = schema.getAppObjects().get(kind, name);
         if (object == null && !ifExists) {
-            throw missing(kind, schema, nameOf(nameCtx));
+            throw missing(kind, schema, name);
         }
         return object;
     }

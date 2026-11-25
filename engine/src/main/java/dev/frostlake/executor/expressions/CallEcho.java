@@ -55,4 +55,15 @@ public interface CallEcho {
     default String spellConstant(final Expression expression, final ParsedEchoPrinter printer) {
         return null;
     }
+
+    /**
+     * A column reference's text, or null to print it as parsed.
+     *
+     * @param column  the column reference
+     * @param printer the printer
+     * @return the text, or null
+     */
+    default String spellColumn(final ColumnReferenceExpression column, final ParsedEchoPrinter printer) {
+        return null;
+    }
 }

@@ -57,7 +57,8 @@ import java.util.jar.Manifest;
 
 /**
  * What a routine is given to run with, read from its options and judged as CREATE judges it: PACKAGES, the
- * ARTIFACT_REPOSITORY they come from, the TARGET_PATH a Java or Scala handler's classes are kept at, and the
+ * ARTIFACT_REPOSITORY they come from (with ARTIFACT_REPOSITORY_PACKAGES, the packages taken from it beside those
+ * PACKAGES names), the TARGET_PATH a Java or Scala handler's classes are kept at, and the
  * EXTERNAL_ACCESS_INTEGRATIONS and SECRETS it may use. A repeated option is taken with the last one winning, and
  * an earlier one is never looked at (live-verified).
  */
@@ -89,6 +90,7 @@ final class RoutineEnvironments {
                             final boolean procedure, final boolean hasBody, final String replacedPath) {
         FrostlakeParser.PackagesClauseContext packages = null;
         FrostlakeParser.RoutineArtifactRepositoryContext repository = null;
+        FrostlakeParser.RoutineArtifactRepositoryPackagesContext repositoryPackages = null;
         FrostlakeParser.RoutineTargetPathContext targetPath = null;
         FrostlakeParser.RoutineIntegrationListContext integrations = null;
         FrostlakeParser.RoutineSecretListContext secrets = null;
@@ -97,6 +99,8 @@ final class RoutineEnvironments {
                 packages = option.packagesClause();
             } else if (option.routineArtifactRepository() != null) {
                 repository = option.routineArtifactRepository();
+            } else if (option.routineArtifactRepositoryPackages() != null) {
+                repositoryPackages = option.routineArtifactRepositoryPackages();
             } else if (option.routineTargetPath() != null) {
                 targetPath = option.routineTargetPath();
             } else if (option.routineIntegrationList() != null) {
@@ -105,7 +109,10 @@ final class RoutineEnvironments {
                 secrets = option.routineSecretList();
             }
         }
+        final List<String> fromRepository = repositoryPackages == null ? null
+            : artifactRepositoryPackages(repositoryPackages, repository != null, language);
         final RoutineEnvironment environment = new RoutineEnvironment();
+        environment.setArtifactRepositoryPackages(fromRepository);
         if (packages != null && packages.stringLiteralList() != null) {
             final List<String> named = new ArrayList<>();
             for (final TerminalNode literal : packages.stringLiteralList().STRING_LITERAL()) {
@@ -147,6 +154,44 @@ final class RoutineEnvironments {
         if (procedure && language == UdfLanguage.SQL) {
             throw new RuntimeException(SqlCompilationError.invalidPropertyFor(property, "PROCEDURE"));
         }
+    }
+
+    /**
+     * The packages ARTIFACT_REPOSITORY_PACKAGES names, as written (live-verified): a parenthesized list of strings,
+     * refused as the property's value otherwise; then a routine that names no ARTIFACT_REPOSITORY, whatever its
+     * language, and a routine of another language than Python, are refused, each before the repository itself is
+     * looked at.
+     */
+    private static List<String> artifactRepositoryPackages(
+            final FrostlakeParser.RoutineArtifactRepositoryPackagesContext written, final boolean hasRepository,
+            final UdfLanguage language) {
+        if (written.LPAREN() == null) {
+            throw new RuntimeException(invalidPackagesValue("constant list"));
+        }
+        final List<String> named = new ArrayList<>();
+        for (final FrostlakeParser.RoutinePackageItemContext item : written.routinePackageItem()) {
+            if (item.STRING_LITERAL() != null) {
+                named.add(ParseTreeText.extractStringLiteral(item.STRING_LITERAL()));
+            } else if (item.DOLLAR_QUOTED_STRING() != null) {
+                final String token = item.DOLLAR_QUOTED_STRING().getText();
+                named.add(token.substring(2, token.length() - 2));
+            } else {
+                throw new RuntimeException(invalidPackagesValue("single quoted string literals"));
+            }
+        }
+        if (!hasRepository) {
+            throw new RuntimeException("Artifact Repository Packages requires a valid Artifact Repository.");
+        }
+        if (language != UdfLanguage.PYTHON) {
+            throw new RuntimeException(SqlCompilationError.invalidPropertyFor("ARTIFACT_REPOSITORY_PACKAGES",
+                "FUNCTION"));
+        }
+        return named;
+    }
+
+    private static String invalidPackagesValue(final String expected) {
+        return "Invalid value specified for property 'ARTIFACT_REPOSITORY_PACKAGES', use '" + expected
+            + "' instead.";
     }
 
     /**

@@ -60,6 +60,9 @@ public class DynamicTableSnapshot implements Serializable {
     // and when the table was suspended; its retention settings; whether it is a clone and its reclustering is
     // suspended. Null, zero or false on snapshots written before they were saved.
     public String createText;
+    /** Where the name sits in {@link #createText}, from and to; null when not known. */
+    public Integer createNameFrom;
+    public Integer createNameTo;
     public String bodyText;
     /** Where the query reads its bare names once the table has moved; null where it lives and on older snapshots. */
     public String definitionDatabase;

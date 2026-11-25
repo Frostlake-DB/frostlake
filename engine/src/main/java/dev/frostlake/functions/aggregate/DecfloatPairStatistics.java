@@ -26,10 +26,12 @@ import java.util.List;
 
 /**
  * The statistics of (y, x) pairs of which either side is a DECFLOAT, each a DECFLOAT of 38 significant digits computed
- * as the account computes it. The sums run in DECFLOAT arithmetic, every step held to 38 digits: COVAR_POP is
+ * as the account computes it, over DECFLOAT SUMs: each of Σx, Σy, Σxy, Σxx and Σyy adds its terms exactly (a product
+ * held to 38 digits first) and is held once, so REGR_AVGX over 1e38, 1 and -1e38 is a third, and every later step is
+ * held to 38 digits (live-verified). COVAR_POP is
  * {@code (Σxy - Σx·Σy / n) / n}, COVAR_SAMP the same over n - 1, REGR_SXX {@code Σxx - Σx·Σx / n}
  * (and REGR_SYY, REGR_SXY alike), REGR_AVGX {@code Σx / n}. The slope divides COVAR_POP by VAR_POP of x,
- * CORR divides it by the product of the two STDDEV_POPs, both correctly rounded (see {@link DecfloatMoments}),
+ * CORR divides it by the product of the two STDDEV_POPs, both as {@link DecfloatMoments} plans them,
  * REGR_INTERCEPT is {@code avg(y) - slope·avg(x)} and REGR_R2 the square of CORR - 1 where y does not vary.
  * Over (1, 2), (2, 3), (4, 9), COVAR_POP is 3.7777777777777777777777777777777777777, REGR_SXX
  * 4.666666666666666666666666666666666667 and REGR_SLOPE of y on x 2.4285714285714285714285714285714285713
@@ -155,22 +157,26 @@ final class DecfloatPairStatistics {
         return Decfloats.multiply(correlation, correlation);
     }
 
-    /** {@code Σab - Σa·Σb / n}, each step held to 38 digits. */
+    /**
+     * {@code Σab - Σa·Σb / n}: the three sums taken exactly and held once, as a DECFLOAT SUM is, each product held to
+     * 38 digits before it is summed, and every later step held to 38 digits.
+     */
     private BigDecimal centered(final List<BigDecimal> a, final List<BigDecimal> b) {
         BigDecimal products = BigDecimal.ZERO;
         for (int i = 0; i < a.size(); i++) {
-            products = Decfloats.add(products, Decfloats.multiply(a.get(i), b.get(i)));
+            products = DecfloatAggregates.added(products, Decfloats.multiply(a.get(i), b.get(i)));
         }
-        return Decfloats.subtract(products,
+        return Decfloats.subtract(DecfloatAggregates.held(products),
             Decfloats.divide(Decfloats.multiply(sum(a), sum(b)), BigDecimal.valueOf(a.size())));
     }
 
+    /** The sum of the values, taken exactly and held once, as a DECFLOAT SUM is. */
     private static BigDecimal sum(final List<BigDecimal> values) {
         BigDecimal total = BigDecimal.ZERO;
         for (final BigDecimal value : values) {
-            total = Decfloats.add(total, value);
+            total = DecfloatAggregates.added(total, value);
         }
-        return total;
+        return DecfloatAggregates.held(total);
     }
 
     private static DecfloatMoments moments(final List<BigDecimal> values) {

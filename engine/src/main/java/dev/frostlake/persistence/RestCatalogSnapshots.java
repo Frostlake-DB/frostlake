@@ -242,7 +242,7 @@ final class RestCatalogSnapshots {
         snapshot.dataRetentionTimeInDays = db.getDataRetentionTimeInDays();
         snapshot.transientObject = db.isTransientObject();
         snapshot.parameters = new HashMap<>(db.getParameters().entries());
-        for (final DatabaseRole role : db.getDatabaseRoles()) {
+        for (final DatabaseRole role : db.storedDatabaseRoles()) {
             snapshot.databaseRoles.add(saveRole(role));
         }
     }
@@ -446,6 +446,10 @@ final class RestCatalogSnapshots {
         snapshot.defaultDdlCollation = table.getDefaultDdlCollation();
         snapshot.eventTable = table.isEventTable();
         snapshot.changeTracking = table.isChangeTracking();
+        if (table.isChangeTracking()) {
+            snapshot.changeTrackingSince = table.getChangeTrackingSince();
+            snapshot.writtenUntracked = table.wasWrittenUntracked();
+        }
         snapshot.schemaEvolution = table.isSchemaEvolution();
         snapshot.reclusterSuspended = table.isReclusterSuspended();
         final IcebergTableMetadata iceberg = table.getIcebergMetadata();
@@ -478,7 +482,10 @@ final class RestCatalogSnapshots {
         if (snapshot.eventTable) {
             table.setEventTable(true);
         }
-        if (snapshot.changeTracking) {
+        if (snapshot.changeTracking && snapshot.changeTrackingSince != null) {
+            table.restoreChangeTracking(snapshot.changeTrackingSince.longValue(),
+                Boolean.TRUE.equals(snapshot.writtenUntracked));
+        } else if (snapshot.changeTracking) {
             table.setChangeTracking(true);
         }
         if (snapshot.schemaEvolution) {
@@ -624,7 +631,28 @@ final class RestCatalogSnapshots {
         saved.privileges = CatalogSnapshotWriter.snapshotPrivileges(role.getAllPrivileges(),
             role.getAllColumnPrivileges());
         saveRoleGrants(role, saved);
+        if (!(role instanceof DatabaseRole)) {
+            saved.revokedFromStart = new ArrayList<>();
+            for (final Privilege privilege : Catalog.accountGrantsFromStart(role.getName())) {
+                if (!role.privilegeGrantors("ACCOUNT", "ACCOUNT", privilege).contains("")) {
+                    saved.revokedFromStart.add(privilege.name());
+                }
+            }
+        }
         return saved;
+    }
+
+    /**
+     * Takes back the grants a system role held on the account from the start that a snapshot records as revoked: the
+     * restored catalog gave them again when it started.
+     */
+    static void restoreRevokedFromStart(final RoleSnapshot saved, final Role role) {
+        if (saved.revokedFromStart == null) {
+            return;
+        }
+        for (final String name : saved.revokedFromStart) {
+            role.revokePrivilegeGrantedBy("ACCOUNT", "ACCOUNT", Privilege.valueOf(name), "");
+        }
     }
 
     /** Adds what the older role snapshot left out: grantors, grant options, future grants, database roles, tags. */

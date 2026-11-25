@@ -39,7 +39,7 @@ import java.util.List;
  * <p>Live-verified for COPY INTO a table, a query over the stage, REMOVE and GET, on a named stage, a table's
  * stage and the user's stage, and case-sensitively ({@code @st/up} does not reach {@code Up/u}). Everything
  * else about the files is judged against the name AS STORED, whatever prefix selected them: a PATTERN is
- * matched against the file's internal path under the stage's folder ({@code stages/st/dir/g}), so it neither
+ * matched against the file's internal path under the stage's folder ({@code stages/<id>/dir/g}), so it neither
  * sees the prefix removed nor a path relative to it, and a {@code FILES = (…)} entry is appended to the written
  * path as one string — {@code @st/dir} with {@code FILES = ('g')} names {@code dirg}, and
  * {@code @st/di} with {@code FILES = ('r/g')} names {@code dir/g}.
@@ -58,11 +58,23 @@ public final class StagePrefix {
     /** Whether any path was written at all ({@code @st/} writes an empty one). */
     private final boolean pathWritten;
 
-    /** The folder a PATTERN sees in front of each file's stage-relative name, e.g. {@code stages/st/}. */
+    /** The folder a PATTERN sees in front of each file's stage-relative name, e.g. {@code stages/<id>/}. */
     private final String patternFolder;
 
     /** The canonical name of the table a table stage belongs to; null for the other kinds. */
     private final String tableName;
+
+    /** Whether the stage encrypts its files on the client, so they read as their stored objects. */
+    private final boolean clientEncrypted;
+
+    /**
+     * The folder the account stores the stage's files under, as a PATTERN and a refusal naming a file see it.
+     *
+     * @return the folder, e.g. {@code stages/<id>/}
+     */
+    public String getPatternFolder() {
+        return patternFolder;
+    }
 
     /** The kind of stage this prefix names — a positional column's declared width follows it. */
     StageKind kind() {
@@ -70,13 +82,23 @@ public final class StagePrefix {
     }
 
     StagePrefix(final StageKind kind, final Path root, final String prefix, final boolean pathWritten,
-                final String patternFolder, final String tableName) {
+                final String patternFolder, final String tableName, final boolean clientEncrypted) {
         this.kind = kind;
         this.root = root == null ? null : root.toAbsolutePath().normalize();
         this.prefix = prefix;
         this.pathWritten = pathWritten;
         this.patternFolder = patternFolder;
         this.tableName = tableName;
+        this.clientEncrypted = clientEncrypted;
+    }
+
+    /**
+     * Whether the stage encrypts its files on the client (see StoredStageObject).
+     *
+     * @return true for the user stage, a table stage, and a named internal stage not encrypted on the server side
+     */
+    public boolean isClientEncrypted() {
+        return clientEncrypted;
     }
 
     /**
@@ -185,7 +207,7 @@ public final class StagePrefix {
      * @return whether one does
      */
     public boolean anyFileStartingWith(final String namePrefix) {
-        return !new StagePrefix(kind, root, namePrefix, true, patternFolder, tableName).files(null).isEmpty();
+        return !new StagePrefix(kind, root, namePrefix, true, patternFolder, tableName, clientEncrypted).files(null).isEmpty();
     }
 
     /**

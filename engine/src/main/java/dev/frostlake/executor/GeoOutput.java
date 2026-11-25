@@ -98,6 +98,17 @@ public final class GeoOutput {
         return value.isGeography() ? value.geoJson() : VariantJsonText.render(doubles(value.node()));
     }
 
+    /**
+     * A value's GeoJSON tree as ST_ASGEOJSON hands it out: a GEOGRAPHY's numbers as written, a GEOMETRY's each a
+     * DOUBLE (live-verified: TYPEOF of a GEOMETRY's coordinate is DOUBLE whatever its input spelled).
+     *
+     * @param value the value
+     * @return its GeoJSON tree; a GEOMETRY's is a copy
+     */
+    public static JsonNode geoJsonNode(final GeoValue value) {
+        return value.isGeography() ? value.node() : doubles(value.node());
+    }
+
     /** A GeoJSON tree with each of its numbers a DOUBLE. */
     private static JsonNode doubles(final JsonNode node) {
         if (node.isNumber()) {
@@ -122,8 +133,15 @@ public final class GeoOutput {
         return node;
     }
 
-    /** A little-endian WKB with its outermost type word flagged and the SRID after it. */
-    private static byte[] extended(final byte[] wkb, final int srid) {
+    /**
+     * A little-endian WKB with its outermost type word flagged and the SRID after it: the EWKB form, a shape with a
+     * third coordinate keeping its ISO type code ({@code 01E9030020…}, live-verified).
+     *
+     * @param wkb the value's WKB
+     * @param srid its SRID
+     * @return its EWKB
+     */
+    public static byte[] extended(final byte[] wkb, final int srid) {
         if (wkb.length < TYPE_AT + WORD) {
             return wkb;
         }

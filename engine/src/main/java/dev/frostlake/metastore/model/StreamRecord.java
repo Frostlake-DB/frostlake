@@ -50,6 +50,28 @@ public class StreamRecord {
         this.sequence = SnapshotSequence.current();
     }
 
+    /**
+     * A change read back from a table's versions rather than captured as it was made: it carries the snapshot number
+     * of the version it was read from, so a read inside a transaction lists it only when that version came first.
+     *
+     * @param values      the row's values
+     * @param changeType  the action
+     * @param isUpdate    whether an update made it
+     * @param rowId       the row's identity
+     * @param sourceTable the table's bare upper-case name
+     * @param sequence    the snapshot number of the version it was read from
+     */
+    public StreamRecord(final List<Object> values, final ChangeType changeType, final boolean isUpdate,
+                        final long rowId, final String sourceTable, final long sequence) {
+        this.values = values;
+        this.changeType = changeType;
+        this.isUpdate = isUpdate;
+        this.rowId = rowId;
+        this.timestamp = LocalDateTime.now(ZoneOffset.UTC);
+        this.sourceTable = sourceTable;
+        this.sequence = sequence;
+    }
+
     private StreamRecord(final StreamRecord from, final List<Object> values) {
         this.values = values;
         this.changeType = from.changeType;

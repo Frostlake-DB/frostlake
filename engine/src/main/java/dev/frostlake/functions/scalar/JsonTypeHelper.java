@@ -150,9 +150,8 @@ public final class JsonTypeHelper {
         // Every KEYWORD is read case-insensitively, and the two that no JSON parser has a number for —
         // nan and inf/infinity — are rewritten to a placeholder here and restored below.
         // A hexadecimal number is rewritten to the decimal it stands for first: no JSON parser reads one,
-        // and live's does (0x10 is 16, 0x1.5 a DOUBLE).
-        final String marked = VariantUndefined.markTokens(
-            JsonKeywords.normalize(JsonHexNumbers.normalize(JsonArrayHoles.fill(input))));
+        // and live's does (0x10 is 16, 0x1.5 a DOUBLE). So is a loosely written one (see JsonLenientNumbers).
+        final String marked = parserText(input);
         try {
             return restoreAll(marked, readTree(strict, marked));
         } catch (final Exception e) {
@@ -171,6 +170,21 @@ public final class JsonTypeHelper {
                 return null;
             }
         }
+    }
+
+    /**
+     * A document rewritten the way {@link #parseLenient(String, boolean)} hands it to the parser: array holes
+     * filled with {@code undefined}, hexadecimal and loosely written numbers spelled out, keywords folded to lower
+     * case, unquoted names quoted, and the words no parser reads ({@code undefined}, {@code NaN}, {@code inf})
+     * turned into string placeholders (see {@link JsonKeywords#isNonFinite(String)} and
+     * {@link VariantUndefined#isMarkerText(String)}).
+     *
+     * @param input the document as written
+     * @return the text a strict parser reads
+     */
+    public static String parserText(final String input) {
+        return VariantUndefined.markTokens(JsonKeywords.normalize(
+            JsonHexNumbers.normalize(JsonLenientNumbers.normalize(JsonArrayHoles.fill(input)))));
     }
 
     /** Turns both kinds of placeholder — the undefined sentinel and a non-finite double — back into nodes. */

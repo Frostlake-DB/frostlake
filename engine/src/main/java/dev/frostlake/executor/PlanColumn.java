@@ -39,6 +39,8 @@ final class PlanColumn {
     private final boolean constantNull;
     /** Whether the text spells an operation or a computed call, which stands in parentheses as an operand. */
     private boolean compound;
+    /** Whether the text spells a value the plan holds as it is: a literal or a folded constant. */
+    private boolean constant;
     /** The catalog table a scanned column is stored in, or null. */
     private Table storedTable;
     /** The scanned column's name in that table, or null. */
@@ -139,6 +141,21 @@ final class PlanColumn {
     PlanColumn markCompound() {
         compound = true;
         return this;
+    }
+
+    /**
+     * Marks the column a constant: an Aggregate groups by no such key (live-verified).
+     *
+     * @return this column
+     */
+    PlanColumn markConstant() {
+        constant = true;
+        return this;
+    }
+
+    /** Whether the text spells a constant (see {@link #markConstant}). */
+    boolean isConstant() {
+        return constant;
     }
 
     /** Whether the text spells an operation or a computed call (see {@link #markCompound}). */

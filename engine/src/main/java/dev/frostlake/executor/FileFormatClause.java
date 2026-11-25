@@ -191,6 +191,10 @@ public final class FileFormatClause {
     private static WrittenFormatOption writtenOption(final FrostlakeParser.ParenOptionContext option) {
         final String spelled = option.optionKey().getText();
         final String name = optionName(spelled);
+        if (option.LPAREN() != null && option.NULL() != null) {
+            // A parenthesized NULL, which has no text as written: judged where the list is (see apply).
+            return new WrittenFormatOption(name, spelled, null, null, false, null);
+        }
         if (option.LPAREN() != null) {
             return new WrittenFormatOption(name, spelled, null, null, false, listed(option.stringLiteralList()));
         }
@@ -240,11 +244,15 @@ public final class FileFormatClause {
                 throw new RuntimeException(SqlCompilationError.conflictingFileFormatParameter(option.name));
             }
             if (option.value == null && option.listed == null) {
-                // A NULL is no value of an option the list knows, and an unknown name is refused first
-                // (live-verified).
+                // A NULL, alone or parenthesized, is no value of an option the list knows, and an unknown name is
+                // refused first (live-verified).
                 if (!"TYPE".equals(option.name) && !"FORMAT_NAME".equals(option.name)
                         && !"COMMENT".equals(option.name) && !FileFormatSurfaces.isKnownOption(option.name)) {
                     throw new RuntimeException(SqlCompilationError.of("invalid parameter '" + option.spelled + "'"));
+                }
+                if (option.written == null) {
+                    // A parenthesized NULL, in a sentence of its own (live-verified).
+                    throw new RuntimeException(SqlCompilationError.invalidValueForProperty("NULL", option.name));
                 }
                 throw new RuntimeException(SqlCompilationError.invalidValueForParameter(option.written,
                     option.name));

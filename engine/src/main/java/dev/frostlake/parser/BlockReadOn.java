@@ -351,6 +351,53 @@ public final class BlockReadOn {
         return tokens.get(next).getType() == Token.EOF ? null : tokens.get(next);
     }
 
+    /**
+     * The END live refuses after the ELSE that follows a given-up statement's semicolon, when the ELSE opens a run of
+     * two queries or more ({@link #endPastQueries}); null for any other shape.
+     *
+     * @param stream    the parse's token stream
+     * @param semicolon the given-up statement's semicolon
+     * @return the END, or null
+     */
+    public static Token endAfterElseQueries(final TokenStream stream, final Token semicolon) {
+        final List<Token> tokens = spoken(stream);
+        final int at = indexAt(tokens, semicolon.getStartIndex());
+        if (at < 0 || at + 2 >= tokens.size() || tokens.get(at).getType() != FrostlakeLexer.SEMI
+                || tokens.get(at + 1).getType() != FrostlakeLexer.ELSE) {
+            return null;
+        }
+        return endPastQueries(tokens, at + 2);
+    }
+
+    /**
+     * The END live refuses after an ELSE that opens a run of two queries or more: the queries are read on and the END
+     * after them is refused — {@code … ; ELSE SELECT 1; SELECT 2; END IF; END;} is 'ELSE', then the 'END' of END IF,
+     * where {@code … ; ELSE SELECT 1; END IF; END;} is 'ELSE' alone (live-verified). Null when the run is one query,
+     * or holds anything that is no plain SELECT.
+     *
+     * @param tokens the text's tokens ({@link #spoken})
+     * @param from   the index of the token after the ELSE
+     * @return the END, or null
+     */
+    private static Token endPastQueries(final List<Token> tokens, final int from) {
+        int queries = 0;
+        int k = from;
+        while (k < tokens.size() && tokens.get(k).getType() == FrostlakeLexer.SELECT) {
+            k++;
+            while (k < tokens.size() && tokens.get(k).getType() != FrostlakeLexer.SEMI) {
+                final int read = tokens.get(k).getType();
+                if (read == Token.EOF || read == FrostlakeLexer.END || read == FrostlakeLexer.BEGIN
+                        || read == FrostlakeLexer.CASE || read == FrostlakeLexer.SELECT) {
+                    return null;
+                }
+                k++;
+            }
+            queries++;
+            k++;
+        }
+        return queries > 1 && k < tokens.size() && tokens.get(k).getType() == FrostlakeLexer.END ? tokens.get(k) : null;
+    }
+
     /** The fault met after the given-up statement and, after an END's wrong word, the one met next. */
     private static List<ReadOnFault> faultsAfter(final List<Token> tokens, final int semicolon) {
         final List<ReadOnFault> faults = new ArrayList<>();

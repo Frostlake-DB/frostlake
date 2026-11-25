@@ -26,7 +26,8 @@ import dev.frostlake.functions.AggregateFunction;
  * OF THE ROUNDED variance, not of the raw one — see {@link AggregateNumerics#rootOfDeclaredVariance}.
  */
 public class SpreadAccumulator
-        implements AggregateFunction.Accumulator, ApproximateAwareAccumulator, DecfloatAwareAccumulator {
+        implements AggregateFunction.Accumulator, ApproximateAwareAccumulator, DecfloatAwareAccumulator,
+        PinnedArgumentAccumulator {
 
     /** The values of a DECFLOAT argument, whose statistic is a DECFLOAT of 38 digits (see DecfloatMoments). */
     private final DecfloatMoments decfloatMoments = new DecfloatMoments();
@@ -69,6 +70,11 @@ public class SpreadAccumulator
     @Override
     public void setDecfloatArgument(final boolean decfloat) {
         this.decfloat = decfloat;
+    }
+
+    @Override
+    public void setPinnedArgument(final PinnedArgument pinned) {
+        moments.setFoldedSquares(pinned);
     }
 
     @Override

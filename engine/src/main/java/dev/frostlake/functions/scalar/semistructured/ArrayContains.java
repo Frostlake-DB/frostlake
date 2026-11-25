@@ -22,6 +22,7 @@ import dev.frostlake.functions.SemiStructuredRejection;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.types.BooleanType;
 import dev.frostlake.values.DecfloatTextNode;
+import dev.frostlake.values.TypedScalarNode;
 import dev.frostlake.values.UuidTextNode;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
@@ -49,9 +50,11 @@ public class ArrayContains extends BuiltInFunction {
         for (final JsonNode el : arr) {
             if (ArrayFunctionHelper.nodesEqual(el, target)) return true;
             // Also compare as string for text values; a VARIANT needle compares by its node alone, so a JSON
-            // null never matches the string "null".
+            // null never matches the string "null", and a DATE, TIME, timestamp or BINARY never matches the
+            // string of its text.
             if (value != null && !(value instanceof VariantValue) && el.isTextual() && UuidTextNode.holds(el) == UuidTextNode.holds(target)
                     && !DecfloatTextNode.holds(el) && !DecfloatTextNode.holds(target)
+                    && !TypedScalarNode.anywhereIn(el) && !TypedScalarNode.anywhereIn(target)
                     && el.asText().equals(value.toString())) return true;
         }
         return value == null ? null : Boolean.FALSE;

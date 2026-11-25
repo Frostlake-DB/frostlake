@@ -109,6 +109,10 @@ final class GroupBySelectListValidator {
 
     /** True while HAVING is walked: its refusal is always the bracketed family (live-verified). */
     private boolean insideHaving;
+    /** Whether the subquery being held to the grouping stands under a HAVING aggregate's argument. */
+    private boolean underHavingAggregate;
+    /** The grouped query being validated. */
+    private FrostlakeParser.SelectClauseContext clause;
     private boolean havingProvenTrue;
 
     /**
@@ -150,6 +154,7 @@ final class GroupBySelectListValidator {
         if (groupKeyForms.isEmpty() && !validateWhenKeyless) {
             return;
         }
+        clause = ctx;
         groupedColumns = new GroupedKeyColumns(table, aliasToTable, allTables, ctx);
         for (final String form : groupKeyForms) {
             groupedColumns.add(form);
@@ -429,14 +434,15 @@ final class GroupBySelectListValidator {
      * A window call's argument or key that is not grouped is named WHOLE, as the plan holds it, once it is more
      * than the column: {@code MAX(id + 1) OVER ()} beside an aggregate is "[FZ.ID + 1] is not a valid group by
      * expression", {@code MAX(ABS(id)) OVER ()} is "[ABS(FZ.ID)] …", while {@code MAX(id) OVER ()} stays
-     * "[FZ.ID] …" (live-verified).
+     * "[FZ.ID] …", and a predicate is named cast to the BOOLEAN it yields, "[CAST(FZ.ID > 1 AS BOOLEAN)] …"
+     * (live-verified).
      */
     private void nameWindowUnit(final ParserRuleContext unit) {
         if (unit instanceof FrostlakeParser.QualifiedNameExprContext || !rejection.endsWith(NOT_A_GROUP_KEY)) {
             return;
         }
         final String planned = new PlanEcho(table, aliasToTable, allTables, executor.getFunctionRegistry(),
-            executor.getCatalog(), executor).printPlanned(unit);
+            executor.getCatalog(), executor).printPlannedValue(unit);
         if (planned != null && !planned.isEmpty()) {
             rejectImplicit(planned);
         }
@@ -454,7 +460,12 @@ final class GroupBySelectListValidator {
         }
         if (node instanceof FrostlakeParser.SelectStatementContext) {
             if (readsARelation((FrostlakeParser.SelectStatementContext) node)) {
-                checkEnclosingReferences((FrostlakeParser.SelectStatementContext) node);
+                underHavingAggregate = true;
+                try {
+                    checkEnclosingReferences((FrostlakeParser.SelectStatementContext) node);
+                } finally {
+                    underHavingAggregate = false;
+                }
             }
             return;
         }
@@ -582,24 +593,102 @@ final class GroupBySelectListValidator {
      * alone — that aggregate is this query's own. One read inside an aggregate that also reads the subquery's
      * own names is judged: {@code (SELECT MAX(fz.id + g.v) FROM g)} beside {@code GROUP BY b} is 'FZ.ID' at the
      * name. In the select list an aggregate in the subquery's WHERE or ON is the subquery's own refusal first;
-     * in HAVING the grouping speaks (both live-verified).
+     * in HAVING the grouping speaks (both live-verified). Under a HAVING aggregate, a subquery that reads one relation
+     * whole and computes an aggregate of its own in its one item reads this query's row beside that aggregate as the
+     * value it is for each row the HAVING's aggregate takes: {@code MAX((SELECT COUNT(*) + fz.id FROM g))} is
+     * answered, where a WHERE of its own holds it to the grouping again (live-verified).
      */
     private void checkEnclosingReferences(final FrostlakeParser.SelectStatementContext subquery) {
         final List<FrostlakeParser.QualifiedNameExprContext> references =
             new CorrelatedSubqueryRule(executor, new HashSet<String>())
                 .enclosingReferencesWithMixedAggregates(subquery, insideHaving);
+        final ParseTree perRowItem = underHavingAggregate ? unfilteredAggregateItem(subquery) : null;
         for (final FrostlakeParser.QualifiedNameExprContext reference : references) {
+            if (perRowItem != null && outsideAggregates(reference, perRowItem)) {
+                continue;
+            }
             final String[] parts = ParseTreeText.qualifiedNameParts(reference.qualifiedName());
             final String column = parts[parts.length - 1].toUpperCase(Locale.ROOT);
             final boolean ownColumn = parts.length > 1
                 ? namesATable(parts[parts.length - 2]) && namesAColumn(column) : namesAColumn(column);
             if (ownColumn) {
                 checkColumnReference(reference);
+                if (rejection != null && underHavingAggregate && rejection.endsWith(NOT_A_GROUP_KEY)) {
+                    nameDerivedSource(parts);
+                }
             }
             if (rejection != null) {
                 return;
             }
         }
+    }
+
+    /**
+     * The one item of a query that reads one relation whole - no WHERE, join, grouping, TOP, LIMIT or set operator -
+     * when the item computes an aggregate of the query's own; null otherwise.
+     */
+    private ParseTree unfilteredAggregateItem(final FrostlakeParser.SelectStatementContext query) {
+        if (query.selectOperand().size() != 1 || query.selectOperand(0).selectClause() == null
+                || query.withClause() != null || query.limitClause() != null || query.fetchClause() != null) {
+            return null;
+        }
+        final FrostlakeParser.SelectClauseContext select = query.selectOperand(0).selectClause();
+        if (select.tableExpression() == null || ParseTreeText.getWhereClause(select) != null
+                || select.tableExpression().tableReference().size() != 1
+                || !select.tableExpression().joinClause().isEmpty()
+                || select.tableExpression().tableReference(0).tableSource() == null
+                || select.tableExpression().tableReference(0).tableSource().tableQualifiedName() == null
+                || select.groupByClause() != null || select.havingClause() != null || select.qualifyClause() != null
+                || select.topClause() != null || select.connectByClause() != null
+                || select.selectList().selectItem().size() != 1
+                || !(select.selectList().selectItem(0) instanceof FrostlakeParser.ExprItemContext)) {
+            return null;
+        }
+        final ParseTree item = ((FrostlakeParser.ExprItemContext) select.selectList().selectItem(0)).booleanExpr();
+        return holdsAggregate(item) ? item : null;
+    }
+
+    /** Whether a node holds an aggregate call outside any query nested in it. */
+    private boolean holdsAggregate(final ParseTree node) {
+        if (node instanceof FrostlakeParser.SelectStatementContext) {
+            return false;
+        }
+        if (isAggregate(node)) {
+            return true;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (holdsAggregate(node.getChild(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a reference in an item stands outside every aggregate call of the item. */
+    private boolean outsideAggregates(final ParseTree reference, final ParseTree item) {
+        for (ParseTree at = reference.getParent(); at != null; at = at.getParent()) {
+            if (isAggregate(at)) {
+                return false;
+            }
+            if (at == item) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a node is a call of an aggregate, not a window. */
+    private boolean isAggregate(final ParseTree node) {
+        final FrostlakeParser.FunctionNameContext name;
+        if (node instanceof FrostlakeParser.FunctionCallExprContext) {
+            name = ((FrostlakeParser.FunctionCallExprContext) node).overClause() == null
+                ? ((FrostlakeParser.FunctionCallExprContext) node).functionName() : null;
+        } else if (node instanceof FrostlakeParser.FunctionCallStarExprContext) {
+            name = ((FrostlakeParser.FunctionCallStarExprContext) node).functionName();
+        } else {
+            return false;
+        }
+        return name != null && executor.getFunctionRegistry().getAggregateFunction(name.getText()) != null;
     }
 
     /**
@@ -667,6 +756,29 @@ final class GroupBySelectListValidator {
             parts.add(np.getText());
         }
         return parts;
+    }
+
+    /**
+     * A column of a derived relation over a VALUES list or a FLATTEN, read by a subquery under a HAVING aggregate, is
+     * named by the source column its definition reads once the subquery is decorrelated into the query:
+     * {@code [VALUES.COLUMN1]} or {@code [F.VALUE]} is not a valid group by expression (live-verified; see
+     * {@link DerivedColumnDefinitions}).
+     */
+    private void nameDerivedSource(final String[] parts) {
+        final DerivedColumnDefinitions definitions =
+            clause == null ? null : DerivedColumnDefinitions.of(clause, aliasToTable);
+        if (definitions == null || parts.length > 2) {
+            return;
+        }
+        final String relation = aliasToTable.keySet().iterator().next();
+        if (parts.length == 2 && !parts[0].equalsIgnoreCase(relation)) {
+            return;
+        }
+        final String source = definitions.sourceColumn(relation.toUpperCase(Locale.ROOT) + "."
+            + parts[parts.length - 1].toUpperCase(Locale.ROOT));
+        if (source != null) {
+            rejectImplicit(source);
+        }
     }
 
     /** The implicit-aggregation refusal — bracketed, positionless, live's other family. */

@@ -16,6 +16,7 @@
 
 package dev.frostlake.query;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +27,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * database roles PUBLIC holds (all live-verified).
  */
 public class AccountUsageQueryHistoryTest extends MeasuredCellsTestSupport {
+
+    /** Acts as ACCOUNTADMIN, the role these answers were measured under (see {@link #actAsAccountAdministrator}). */
+    @BeforeEach
+    public void actAsTheMeasuringRole() {
+        actAsAccountAdministrator();
+    }
 
     @Test
     public void accountUsageView() {

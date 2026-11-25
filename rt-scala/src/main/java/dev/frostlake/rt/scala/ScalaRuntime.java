@@ -19,17 +19,21 @@ package dev.frostlake.rt.scala;
 import dev.frostlake.DatabaseEngine;
 import dev.frostlake.config.EngineConfig;
 import dev.frostlake.config.S3PathResolver;
+import dev.frostlake.executor.commands.JavaHandlerSignature;
 import dev.frostlake.executor.udf.JavaHandlerFailure;
 import dev.frostlake.executor.udf.JavaTableFunctions;
 import dev.frostlake.executor.udf.TablePartitionRows;
 import dev.frostlake.executor.udf.UdfLanguageRuntime;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.model.Function;
+import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Procedure;
 import dev.frostlake.metastore.model.UdfLanguage;
 import dev.frostlake.storage.ResultSet;
+import dev.frostlake.types.DataType;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 
 /** The in-process-scala-compiler-backed {@link UdfLanguageRuntime} provider for LANGUAGE SCALA. */
@@ -74,8 +78,8 @@ public final class ScalaRuntime implements UdfLanguageRuntime {
             JavaTableFunctions.check(function, tableHandler(function));
             throw new RuntimeException("Table functions not supported for language 'SCALA'.");
         }
-        compileBody(function.getBody(), function.getHandler(), function.getName(),
-            function.getParameters() == null ? 0 : function.getParameters().size());
+        compileBody(function.getBody(), function.getHandler(), function.getName(), argumentTypes(
+            function.getParameters()), function.getReturnType(), false);
     }
 
     @Override
@@ -108,15 +112,31 @@ public final class ScalaRuntime implements UdfLanguageRuntime {
     public void compileProcedure(final Procedure procedure) {
         // A procedure's handler takes a leading Session the declared parameter list does not mention.
         compileBody(procedure.getBody(), procedure.getHandler(), procedure.getName(),
-            procedure.getParameters().size() + 1);
+            argumentTypes(procedure.getParameters()), procedure.returnsTable() ? null : procedure.getReturnType(),
+            true);
+    }
+
+    private static List<DataType> argumentTypes(final List<Parameter> parameters) {
+        final List<DataType> types = new ArrayList<>();
+        if (parameters != null) {
+            for (final Parameter parameter : parameters) {
+                types.add(parameter.getDataType());
+            }
+        }
+        return types;
     }
 
     /**
      * Compiles a body and confirms its handler is in it: a class of that name, reported as the class loader
-     * reports one it cannot find, and a method of that name taking {@code arity} arguments, refused when the
-     * routine is created otherwise (live-verified).
+     * reports one it cannot find, and a method of that name taking the routine's arguments (a procedure's after
+     * its Session), refused when the routine is created otherwise; then judges the method's types against the
+     * routine's as a Java handler's are (live-verified).
+     *
+     * @param returnType the declared result, or null for a table
      */
-    private void compileBody(final String body, final String handler, final String routineName, final int arity) {
+    private void compileBody(final String body, final String handler, final String routineName,
+                             final List<DataType> argumentTypes, final DataType returnType, final boolean procedure) {
+        final int arity = argumentTypes.size() + (procedure ? 1 : 0);
         final String where = " in function " + routineName + " with handler " + handler;
         final Class<?> compiled;
         try {
@@ -133,6 +153,7 @@ public final class ScalaRuntime implements UdfLanguageRuntime {
         final String methodName = handler.substring(handler.lastIndexOf('.') + 1);
         for (final Method method : compiled.getMethods()) {
             if (method.getName().equals(methodName) && method.getParameterCount() == arity) {
+                JavaHandlerSignature.checkScala(method, argumentTypes, returnType, routineName, handler, procedure);
                 return;
             }
         }

@@ -118,15 +118,33 @@ final class BlockAssignmentValueLines {
      * @return the index to resume at, or -1
      */
     static int readOn(final List<Token> spoken, final int from, final List<String> lines) {
+        return readOn(spoken, from, lines, false);
+    }
+
+    /**
+     * Reads on as {@link #readOn(List, int, List)} does; where {@code callTakesFollower} holds, a CALL followed by a
+     * ';' or a '(' is read as a word taken for a name.
+     *
+     * @param spoken            the text's tokens
+     * @param from              the index to read on from
+     * @param lines             the lines so far
+     * @param callTakesFollower whether a CALL that names no procedure is read as a name
+     * @return the index to resume at, or -1
+     */
+    static int readOn(final List<Token> spoken, final int from, final List<String> lines,
+                      final boolean callTakesFollower) {
         for (int i = from; i < spoken.size(); i++) {
             final Token token = spoken.get(i);
-            if (token.getType() == Token.EOF || token.getType() == FrostlakeLexer.CALL) {
+            final boolean namelessCall = callTakesFollower && token.getType() == FrostlakeLexer.CALL
+                && i + 1 < spoken.size() && (spoken.get(i + 1).getType() == FrostlakeLexer.SEMI
+                    || spoken.get(i + 1).getType() == FrostlakeLexer.LPAREN);
+            if (token.getType() == Token.EOF || token.getType() == FrostlakeLexer.CALL && !namelessCall) {
                 return -1;
             }
             if (token.getType() == FrostlakeLexer.SEMI) {
                 return i + 1;
             }
-            if (takenForName(token)) {
+            if (namelessCall || takenForName(token)) {
                 int next = i + 1;
                 while (next < spoken.size() && spoken.get(next).getType() == FrostlakeLexer.SEMI) {
                     next++;

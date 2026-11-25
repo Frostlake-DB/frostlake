@@ -16,6 +16,7 @@
 package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.ConditionalDdlOutcome;
+import dev.frostlake.executor.ExpressionEvaluator;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.SQLCommandVisitor;
@@ -26,8 +27,10 @@ import dev.frostlake.executor.SqlStringLiterals;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.ExternalTableMetadata;
+import dev.frostlake.metastore.model.MaskingPolicy;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.RelationKind;
+import dev.frostlake.metastore.model.RowAccessPolicy;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.Table;
@@ -57,6 +60,9 @@ public final class ExternalTableCommandHandler {
     private static final List<String> TEXTS = Arrays.asList("PATTERN", "AWS_SNS_TOPIC", "INTEGRATION",
         "PARTITION_TYPE", "TABLE_FORMAT");
 
+    /** What DESCRIBE and the account's views tell of an external table's VALUE column. */
+    private static final String VALUE_COMMENT = "The value of this row";
+
     private final Catalog catalog;
     private final QueryExecutor queryExecutor;
     private final SQLCommandVisitor types;
@@ -76,7 +82,9 @@ public final class ExternalTableCommandHandler {
     /**
      * CREATE [OR REPLACE] EXTERNAL TABLE [IF NOT EXISTS]. The statement is refused, in this order, for IF NOT
      * EXISTS beside OR REPLACE, a missing LOCATION, a missing FILE_FORMAT, a property or a format type that is
-     * none, a stage that does not exist and a stage that is internal (live-verified).
+     * none, a stage that does not exist and a stage that is internal (live-verified). A second row access policy
+     * is refused before all of these, and the policies are checked once the columns are known: the columns' masking
+     * policies first, then the table's row access policy.
      */
     public ResultSet create(final FrostlakeParser.AccountObjectStatementContext ctx) {
         if (ctx.if_not_exists() != null && ctx.or_replace() != null) {
@@ -87,8 +95,14 @@ public final class ExternalTableCommandHandler {
         String comment = null;
         final ExternalTableMetadata metadata = new ExternalTableMetadata();
         final List<String> invalid = new ArrayList<>();
+        FrostlakeParser.RowAccessPolicyClauseContext rowAccess = null;
         for (final FrostlakeParser.ExternalTableOptionContext option : ctx.externalTableOption()) {
-            if (option.commentClause() != null) {
+            if (option.rowAccessPolicyClause() != null) {
+                if (rowAccess != null) {
+                    throw new RuntimeException("Cannot attach more than one Row access policy to a External table.");
+                }
+                rowAccess = option.rowAccessPolicyClause();
+            } else if (option.commentClause() != null) {
                 comment = CommentClauses.text(option.commentClause());
             } else if (option.optionKey() != null) {
                 final String key = ObjectProperties.key(option.optionKey());
@@ -119,12 +133,18 @@ public final class ExternalTableCommandHandler {
             throw new RuntimeException(SqlCompilationError.of("invalid property '" + invalid.get(0) + "' for 'TABLE'"));
         }
         readFormat(format, metadata);
-        final Stage stage = stage(location, metadata);
+        final Stage stage = stage(location);
         if (stage.getUrl() == null) {
             throw new RuntimeException("Cannot use internal stage " + stage.getName()
                 + " as the location for an external table.");
         }
+        keepLocation(location, stage, metadata);
         metadata.setCloud(cloud(stage.getUrl()));
+        for (final FrostlakeParser.ExternalTableColumnContext written : ctx.externalTableColumn()) {
+            if (written.tagList() != null) {
+                InlineTags.requireApplicable(written.tagList(), queryExecutor);
+            }
+        }
         final String[] parts = catalog.withoutAccount(queryExecutor.resolveObjectNameParts(ctx.objectName()), 3);
         final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
         final String name = parts[parts.length - 1];
@@ -140,28 +160,114 @@ public final class ExternalTableCommandHandler {
         }
         queryExecutor.requireCreatePrivilege(Privilege.CREATE_EXTERNAL_TABLE, schema);
         final List<TableColumn> columns = new ArrayList<>();
-        columns.add(new TableColumn("VALUE", VariantType.VARIANT, true, null, false, false, false));
+        final TableColumn value = new TableColumn("VALUE", VariantType.VARIANT, true, null, false, false, false);
+        value.setComment(VALUE_COMMENT);
+        columns.add(value);
+        final Table read = new Table("DUMMY", new ArrayList<>(columns), false);
         for (final FrostlakeParser.ExternalTableColumnContext written : ctx.externalTableColumn()) {
             final TableColumn column = new TableColumn(SqlIdentifiers.canonicalText(written.columnDefName().getText()),
-                types.parseDataType(written.dataTypeName(), written.typeParameters()), written.NOT() == null, null,
+                types.parseDataType(written.dataTypeName(), written.typeParameters()), written.NOT().isEmpty(), null,
                 false, false, false);
             if (written.expression() != null) {
                 final String expression = ParseTreeText.getOriginalText(written.expression());
-                column.setVirtualExpression(expression, expression);
+                column.setVirtualExpression(expression, VirtualColumnDefinitions.told(
+                    ExpressionEvaluator.parse(expression), expression, read, queryExecutor));
+            }
+            if (written.columnCommentClause() != null) {
+                column.setComment(CommentClauses.text(written.columnCommentClause()));
             }
             columns.add(column);
+        }
+        VirtualColumnDefinitions.judgeExternal(columns, ctx.externalTableColumn(), queryExecutor);
+        final Table table = new Table(name, columns, false, false);
+        for (final FrostlakeParser.ExternalTableColumnContext written : ctx.externalTableColumn()) {
+            if (written.maskingPolicy != null) {
+                attachMaskingPolicy(written, table);
+            }
+            if (written.tagList() != null) {
+                InlineTags.apply(table.getColumn(SqlIdentifiers.canonicalText(written.columnDefName().getText())),
+                    written.tagList(), queryExecutor);
+            }
+        }
+        for (final FrostlakeParser.ExternalTableColumnContext written : ctx.externalTableColumn()) {
+            if (written.expression() == null) {
+                throw new RuntimeException("External table column "
+                    + SqlIdentifiers.canonicalText(written.columnDefName().getText()) + " must have a defining expression.");
+            }
+        }
+        if (rowAccess != null) {
+            attachRowAccessPolicy(rowAccess, table);
         }
         final String key = QualifiedName.key(schema.getDatabaseName(), schema.getName(), name);
         if (exists) {
             remove(schema, name, queryExecutor);
         }
-        final Table table = new Table(name, columns, false, false);
         table.setOwner(catalog.currentRoleForOwner());
         table.setComment(comment);
         table.setExternalMetadata(metadata);
         schema.addTable(table);
         queryExecutor.getStorageEngine().createTable(key, table);
         return StatusResults.of("Table " + name + " successfully created.");
+    }
+
+    /**
+     * A column's WITH MASKING POLICY: the policy must exist, the columns of its USING list must be the table's and
+     * as many as the policy's arguments, and the column's type must be the policy's (live-verified).
+     */
+    private void attachMaskingPolicy(final FrostlakeParser.ExternalTableColumnContext written, final Table table) {
+        final String policyName = queryExecutor.resolveObjectName(written.maskingPolicy);
+        final MaskingPolicy policy = catalog.findMaskingPolicyExact(policyName);
+        if (policy == null) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Masking policy",
+                catalog.qualifiedExactName(policyName)));
+        }
+        final TableColumn column = table.getColumn(SqlIdentifiers.canonicalText(written.columnDefName().getText()));
+        final List<String> arguments = new ArrayList<>();
+        if (written.identifierList() != null) {
+            for (final FrostlakeParser.IdentifierContext id : written.identifierList().identifier()) {
+                final String argument = SqlIdentifiers.canonical(id);
+                if (!table.hasColumn(argument)) {
+                    throw new RuntimeException(SqlCompilationError.columnDoesNotExist(argument));
+                }
+                arguments.add(argument);
+            }
+            if (arguments.size() != policy.getParameters().size()) {
+                throw new RuntimeException(SqlCompilationError.of("Invalid number of arguments for attaching policy '"
+                    + policy.getName().toUpperCase(Locale.ROOT) + "' to '" + table.getName().toUpperCase(Locale.ROOT)
+                    + "', expected " + policy.getParameters().size() + " arguments, got " + arguments.size()
+                    + " arguments."));
+            }
+        }
+        MaskingPolicyAttachment.requireTypeMatch(policy, column);
+        column.setMaskingPolicyName(catalog.qualifiedExactName(policyName));
+        column.setMaskingPolicyArguments(arguments);
+    }
+
+    /**
+     * The table's [WITH] ROW ACCESS POLICY: the policy must exist, its columns must be the table's and none of them
+     * computed - VALUE is the one column it can read - and they must match the policy's arguments in number and type
+     * (live-verified).
+     */
+    private void attachRowAccessPolicy(final FrostlakeParser.RowAccessPolicyClauseContext clause, final Table table) {
+        final String written = ParseTreeText.getQualifiedName(clause.qualifiedName());
+        final RowAccessPolicy policy = RowAccessPolicyAttachment.require(catalog, written);
+        final List<String> policyColumns = new ArrayList<>();
+        for (final FrostlakeParser.IdentifierContext id : clause.identifierList().identifier()) {
+            final String columnName = SqlIdentifiers.canonical(id);
+            if (!table.hasColumn(columnName)) {
+                throw new RuntimeException(SqlCompilationError.columnDoesNotExist(columnName));
+            }
+            policyColumns.add(columnName);
+        }
+        for (final String columnName : policyColumns) {
+            if (table.getColumn(columnName).isVirtual()) {
+                throw new RuntimeException(SqlCompilationError.PREFIX
+                    + " Row access policy cannot be attached to a VIRTUAL_COLUMN column.");
+            }
+        }
+        RowAccessPolicyAttachment.check(catalog, policy, table, table.getName(), written, policyColumns, true);
+        table.setRowAccessPolicyName(catalog.qualifiedExactName(written));
+        table.setRowAccessPolicyColumns(policyColumns);
     }
 
     /** FILE_FORMAT = ( FORMAT_NAME = '...' | TYPE = ... [ options ] ): the format's name or its type is kept. */
@@ -186,22 +292,35 @@ public final class ExternalTableCommandHandler {
         }
     }
 
-    /** The named stage a location reads, its name and the location as written kept in the metadata. */
-    private Stage stage(final FrostlakeParser.StageRefContext location, final ExternalTableMetadata metadata) {
+    /** The named stage a location reads. */
+    private Stage stage(final FrostlakeParser.StageRefContext location) {
         if (location.TILDE() != null || location.PERCENT() != null) {
             throw new RuntimeException(SqlCompilationError.of("Missing option(s): location"));
         }
         queryExecutor.requireNamedStageExact(location);
+        return owner(location).getStageExact(
+            ParseTreeText.getIdentifier(location.identifier(location.identifier().size() - 1)));
+    }
+
+    /** The schema holding the stage a location names. */
+    private Schema owner(final FrostlakeParser.StageRefContext location) {
         final String[] parts = new String[location.identifier().size()];
         for (int i = 0; i < parts.length; i++) {
             parts[i] = ParseTreeText.getIdentifier(location.identifier(i));
         }
-        final Schema owner = catalog.requireOwningSchema(QualifiedName.of(parts));
-        final Stage stage = owner.getStageExact(parts[parts.length - 1]);
-        final String qualified = owner.qualifiedName(stage.getName());
-        metadata.setStage(qualified);
-        metadata.setLocation("@" + qualified + (location.stagePath() == null ? "/" : location.stagePath().getText()));
-        return stage;
+        return catalog.requireOwningSchema(QualifiedName.of(parts));
+    }
+
+    /**
+     * Keeps the stage's name, {@code @DB.SCHEMA.STAGE}, and the location the table reads, the stage's URL and the
+     * path written after it, in the metadata.
+     */
+    private void keepLocation(final FrostlakeParser.StageRefContext location, final Stage stage,
+                              final ExternalTableMetadata metadata) {
+        final String qualified = owner(location).qualifiedName(stage.getName());
+        metadata.setStage("@" + qualified);
+        metadata.setLocation(locationUrl(stage.getUrl(), location.stagePath() == null ? ""
+            : location.stagePath().getText()));
     }
 
     /**
@@ -250,12 +369,29 @@ public final class ExternalTableCommandHandler {
                     table.getName(), schema.getDatabaseName(), schema.getName(), "false", null, table.getOwner(),
                     ShowResultHelpers.text(table.getComment()), metadata.getStage(), metadata.getLocation(),
                     ShowResultHelpers.text(metadata.getFileFormatName()),
-                    ShowResultHelpers.text(metadata.getFileFormatType()), metadata.getCloud(), "", null, null,
+                    ShowResultHelpers.text(metadata.getFileFormatType()), metadata.getCloud(), null, null, null,
                     metadata.getTableFormat() == null ? "UNSPECIFIED" : metadata.getTableFormat(), null,
                     ShowResultHelpers.OWNER_ROLE_TYPE)));
             }
         }
         return rows;
+    }
+
+    /**
+     * The location an external table reads: its stage's URL as the stage keeps it where the path names nothing more,
+     * else the URL and the path, each part closed by a slash - {@code @st/a} over {@code s3://b/x} is
+     * {@code s3://b/x/a/} (live-verified).
+     */
+    private static String locationUrl(final String url, final String path) {
+        int start = 0;
+        while (start < path.length() && path.charAt(start) == '/') {
+            start++;
+        }
+        final String rest = path.substring(start);
+        if (rest.isEmpty()) {
+            return url;
+        }
+        return (url.endsWith("/") ? url : url + "/") + rest + (rest.endsWith("/") ? "" : "/");
     }
 
     /** The cloud a stage's URL names by its scheme. */

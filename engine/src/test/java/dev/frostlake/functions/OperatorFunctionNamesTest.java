@@ -100,9 +100,9 @@ public class OperatorFunctionNamesTest extends BaseDatabaseTest {
     @Test
     public void namesFrostlakeCannotEvaluateAreNotDeclared() {
         final Set<String> declared = OperatorFunctionNames.names();
-        // Snowflake lists DIV, but neither engine can invoke it and Frostlake cannot even parse the
-        // operator form, so listing it would advertise something that does not work.
-        assertTrue(!declared.contains("DIV"), "DIV is not implemented in any form");
+        // DIV is a registered function whose call is refused, and Frostlake does not parse the operator
+        // form, so it is no operator-implemented name.
+        assertTrue(!declared.contains("DIV"), "DIV is not an operator form here");
         // Interval scaling: Frostlake parses <datetime> +/- INTERVAL but not INTERVAL * n / INTERVAL / n.
         assertTrue(!declared.contains("INTERVAL DAY TIME MULTIPLY"), "interval scaling is not implemented");
         assertTrue(!declared.contains("INTERVAL DAY TIME DIVIDE"), "interval scaling is not implemented");

@@ -24,8 +24,9 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Reads WKB and EWKB into the GeoJSON model: either byte order (a first byte of 0 is big-endian, any other
- * little-endian), the seven 2D shapes, and the EWKB SRID flag. A shape with no points anywhere in it reads as the
- * EMPTY shape, which makes the whole value NULL, as WKT's EMPTY does (live-verified). Coordinates are doubles.
+ * little-endian), the seven 2D shapes and their ISO 3D forms (type codes 1001 to 1007, a third coordinate per point),
+ * and the EWKB SRID flag; the EWKB Z and M flags are refused. A shape with no points anywhere in it reads as the EMPTY
+ * shape, which makes the whole value NULL, as WKT's EMPTY does (live-verified). Coordinates are doubles.
  */
 public final class WkbReader {
 
@@ -85,19 +86,21 @@ public final class WkbReader {
                 srid = named;
             }
         }
-        final int type = code & ~SRID_FLAG;
+        final int full = code & ~SRID_FLAG;
+        final int dims = full > 1000 && full <= 1007 ? 3 : 2;
+        final int type = dims == 3 ? full - 1000 : full;
         final ObjectNode out = MAPPER.createObjectNode();
         switch (type) {
             case 1:
-                out.set("coordinates", point(little, "Point"));
+                out.set("coordinates", point(little, dims, "Point"));
                 out.put("type", "Point");
                 return out;
             case 2:
-                out.set("coordinates", line(little, 2, "LineString"));
+                out.set("coordinates", line(little, dims, 2, "LineString"));
                 out.put("type", "LineString");
                 return out;
             case 3:
-                out.set("coordinates", rings(little));
+                out.set("coordinates", rings(little, dims));
                 out.put("type", "Polygon");
                 return out;
             case 4:
@@ -130,23 +133,23 @@ public final class WkbReader {
                 return out;
             }
             default:
-                throw new WkbFormatException("Type '" + type + "' unknown.");
+                throw new WkbFormatException("Type '" + full + "' unknown.");
         }
     }
 
-    private ArrayNode rings(final boolean little) {
+    private ArrayNode rings(final boolean little, final int dims) {
         final int count = readInt(little);
         final ArrayNode rings = MAPPER.createArrayNode();
         for (int i = 0; i < count; i++) {
-            rings.add(line(little, 4, "LineString"));
+            rings.add(line(little, dims, 4, "LineString"));
         }
         empty |= count == 0;
         return rings;
     }
 
-    private ArrayNode line(final boolean little, final int minPoints, final String name) {
+    private ArrayNode line(final boolean little, final int dims, final int minPoints, final String name) {
         final int count = readInt(little);
-        if (count < 0 || (long) count * 16 > bytes.length - pos) {
+        if (count < 0 || (long) count * 8 * dims > bytes.length - pos) {
             throw new WkbFormatException("'" + name + "' holds less points than specified.");
         }
         if (count == 0) {
@@ -156,18 +159,19 @@ public final class WkbReader {
         }
         final ArrayNode line = MAPPER.createArrayNode();
         for (int i = 0; i < count; i++) {
-            line.add(point(little, name));
+            line.add(point(little, dims, name));
         }
         return line;
     }
 
-    private ArrayNode point(final boolean little, final String name) {
-        if (bytes.length - pos < 16) {
+    private ArrayNode point(final boolean little, final int dims, final String name) {
+        if (bytes.length - pos < 8 * dims) {
             throw new WkbFormatException("'" + name + "' holds less coordinates than specified.");
         }
         final ArrayNode pt = MAPPER.createArrayNode();
-        pt.add(Double.longBitsToDouble(readLong(little)));
-        pt.add(Double.longBitsToDouble(readLong(little)));
+        for (int i = 0; i < dims; i++) {
+            pt.add(Double.longBitsToDouble(readLong(little)));
+        }
         return pt;
     }
 

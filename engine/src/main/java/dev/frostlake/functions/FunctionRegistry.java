@@ -210,6 +210,7 @@ import dev.frostlake.functions.scalar.math.Cosh;
 import dev.frostlake.functions.scalar.math.Cot;
 import dev.frostlake.functions.scalar.math.Degrees;
 import dev.frostlake.functions.scalar.math.Div0;
+import dev.frostlake.functions.scalar.math.Div;
 import dev.frostlake.functions.scalar.math.Exp;
 import dev.frostlake.functions.scalar.math.Factorial;
 import dev.frostlake.functions.scalar.math.Floor;
@@ -615,6 +616,7 @@ public class FunctionRegistry {
         register(new Sha2());
 
         // Numeric functions
+        register(new Div());
         register(new Div0(false));   // DIV0
         register(new Div0(true));    // DIV0NULL
         register(new ZeroIfNull());

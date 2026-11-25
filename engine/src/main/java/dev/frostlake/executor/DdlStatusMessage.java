@@ -179,6 +179,10 @@ public final class DdlStatusMessage {
             return name + " successfully dropped.";
         }
         final String kind = kindPhrase(statement);
+        if ("Code bundle".equals(kind)) {
+            // A code bundle is answered for by its name alone (live-verified).
+            return name + " successfully created.";
+        }
         if (ROW_ACCESS_POLICY.equals(kind) || PROJECTION_POLICY.equals(kind) || AGGREGATION_POLICY.equals(kind)
                 || JOIN_POLICY.equals(kind)) {
             // A row access policy and a projection, an aggregation and a join policy quote their names and "are"

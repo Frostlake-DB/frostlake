@@ -40,6 +40,7 @@ import dev.frostlake.types.UuidType;
 import dev.frostlake.values.ApproximateValues;
 import dev.frostlake.values.CodePointText;
 import dev.frostlake.values.Decfloats;
+import dev.frostlake.values.FloatOriginNode;
 import dev.frostlake.values.HexDoubleText;
 import dev.frostlake.values.VariantValue;
 
@@ -134,6 +135,44 @@ public final class SetOperations {
             }
         }
         return result;
+    }
+
+    /**
+     * A union's rows with every VARIANT holding a folded FLOAT turned into a computed double (see FloatOriginNode),
+     * but in the columns whose every arm projects one folded constant: a union computes its values, so
+     * {@code TO_VARIANT(1::FLOAT)} beside {@code TO_VARIANT(2::FLOAT)} reads {@code 1} through {@code ::VARCHAR}, where
+     * the same wrap in every arm, INTERSECT and EXCEPT keep {@code 1.0} (live-verified).
+     *
+     * @param rows the union's rows
+     * @param kept for each column, whether every arm projects one folded constant; a column past its end is not
+     * @return the rows, copied where a value changed
+     */
+    public static List<Row> withoutFloatOrigin(final List<Row> rows, final boolean[] kept) {
+        List<Row> out = rows;
+        for (int r = 0; r < rows.size(); r++) {
+            final Row row = rows.get(r);
+            Row copy = row;
+            for (int i = 0; i < row.size(); i++) {
+                if (i < kept.length && kept[i]) {
+                    continue;
+                }
+                final Object value = row.getValue(i);
+                final Object stripped = FloatOriginNode.withoutOrigin(value);
+                if (stripped != value) {
+                    if (copy == row) {
+                        copy = row.copy();
+                    }
+                    copy.setValue(i, stripped);
+                }
+            }
+            if (copy != row) {
+                if (out == rows) {
+                    out = new ArrayList<>(rows);
+                }
+                out.set(r, copy);
+            }
+        }
+        return out;
     }
 
 

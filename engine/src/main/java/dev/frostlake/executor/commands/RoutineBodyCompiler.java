@@ -23,6 +23,7 @@ import dev.frostlake.executor.IntoClausePlacement;
 import dev.frostlake.executor.LeadingCommentOffset;
 import dev.frostlake.executor.ProceduralExecutor;
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.RowPatternDefinitionReferences;
 import dev.frostlake.executor.SideEffectFunctions;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.StatementClock;
@@ -58,6 +59,7 @@ import dev.frostlake.parser.EndOfInput;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.LimitValueSyntax;
+import dev.frostlake.parser.ObjectConstantValueLines;
 import dev.frostlake.parser.OperandRefusal;
 import dev.frostlake.parser.OperandRefusals;
 import dev.frostlake.parser.SqlCharStream;
@@ -288,6 +290,9 @@ final class RoutineBodyCompiler {
             try {
                 ShowShapeCompiler.requireShapes(block,
                     new ShowCommandHandler(queryExecutor.getCatalog(), queryExecutor));
+                MultiTableInsertShape.requireThroughout(block);
+                // So is a call, a window or a CREATE TABLE refused for its shape alone (see BlockCompiledShapes).
+                BlockCompiledShapes.require(block, queryExecutor);
                 requireSessionVariables(block, queryExecutor);
             } finally {
                 LeadingCommentOffset.end(displaced);
@@ -710,6 +715,7 @@ final class RoutineBodyCompiler {
             resolveQueryBodyNames(queryExecutor, body, trimmed, declared,
                 queryExecutor.getCatalog().getCurrentDatabase(), queryExecutor.getCatalog().getCurrentSchema());
             SqlUdfBodyCalls.reject(queryExecutor, queryBody, trimmed, routineName, scopeDatabase, scopeSchema);
+            RowPatternDefinitionReferences.reject(queryBody, queryExecutor.getFunctionRegistry());
             return;
         }
         // A body that is one other statement ending in its semicolon is read as a Snowscript UDF too, and the
@@ -852,7 +858,8 @@ final class RoutineBodyCompiler {
     /**
      * A query or block body's bare stages, judged at CREATE as a statement of its own, its places the untrimmed body's:
      * a query, a table function's as a scalar function's, and a scalar function's block, with no "Compilation of SQL
-     * UDF failed: " before the refusal (live-verified). An expression body is judged once it reads as one.
+     * UDF failed: " before the refusal (live-verified) — but for a query whose stage breaks its syntax, which is read
+     * in the expression's frame. An expression body is judged once it reads as one.
      *
      * @param script        the body as parsed before any stage in it is judged, or null when it does not parse
      * @param body          the body's text
@@ -865,6 +872,11 @@ final class RoutineBodyCompiler {
         }
         final FrostlakeParser.StatementContext statement = script.flowChain().get(0).statement().get(0);
         if (statement.queryStatement() != null) {
+            // A query whose stage breaks its syntax is read in the expression's frame (see SqlUdfStageQueryLines).
+            final String framed = SqlUdfStageQueryLines.lines(statement, body);
+            if (framed != null) {
+                throw new RuntimeException(StageArgumentSyntax.UDF_COMPILATION_FAILED + SqlCompilationError.of(framed));
+            }
             StageArgumentSyntax.requirePlacement(statement, body);
         } else if (!tableFunction && statement.proceduralStatement() != null
                 && statement.proceduralStatement().beginEndBlock() != null) {
@@ -1067,6 +1079,19 @@ final class RoutineBodyCompiler {
      * Live-verified.
      */
     private static String describeUnreadableExpression(final QueryExecutor queryExecutor, final String body) {
+        final String refusal = describeUnreadableFrame(queryExecutor, body);
+        if (refusal == null) {
+            return null;
+        }
+        // An object constant the reading meets after its last refused token tells its values as well (see
+        // ObjectConstantValueLines).
+        final List<String> values = ObjectConstantValueLines.afterRefusal(spokenTokens("(" + body + ")"),
+            refusal.substring(refusal.lastIndexOf('\n') + 1));
+        return values.isEmpty() ? refusal : refusal + "\n" + String.join("\n", values);
+    }
+
+    /** The syntax errors of a body that does not read, before the values of a constant after them. */
+    private static String describeUnreadableFrame(final QueryExecutor queryExecutor, final String body) {
         final String framed = "(" + body + ")";
         final List<Token> framedTokens = spokenTokens(framed);
         final Token semicolon = semicolonAfterClosedFrame(framedTokens);
@@ -2042,7 +2067,7 @@ final class RoutineBodyCompiler {
      */
     static void compileProcedureBody(final Procedure procedure, final QueryExecutor queryExecutor) {
         if (procedure != null && procedure.getUdfLanguage() == UdfLanguage.PYTHON
-                && PythonSnowparkPackage.namesNone(procedure.getPackages())) {
+                && PythonSnowparkPackage.namesNone(procedure.getAllPackages())) {
             // Its handler is handed a Snowpark session the account cannot build without the package.
             throw PythonSnowparkPackage.missing(procedure.getName(), procedure.getHandler());
         }

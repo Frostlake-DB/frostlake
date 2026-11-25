@@ -21,6 +21,7 @@ import dev.frostlake.metastore.LoadRecord;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.QueryHistory;
 import dev.frostlake.metastore.StreamSources;
+import dev.frostlake.metastore.SystemSchema;
 import dev.frostlake.metastore.model.AggregationPolicy;
 import dev.frostlake.metastore.model.CheckConstraint;
 import dev.frostlake.metastore.model.Contact;
@@ -46,6 +47,7 @@ import dev.frostlake.metastore.model.Role;
 import dev.frostlake.metastore.model.RowAccessPolicy;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SearchOptimizationExpression;
+import dev.frostlake.metastore.model.SemanticView;
 import dev.frostlake.metastore.model.Sequence;
 import dev.frostlake.metastore.model.Stage;
 import dev.frostlake.metastore.model.StorageLifecyclePolicy;
@@ -133,7 +135,7 @@ final class CatalogSnapshotWriter {
     static CatalogSnapshot buildSnapshot(final Catalog catalog, final StorageEngine storageEngine,
                                          final TableDataStore tableData) throws IOException {
         final CatalogSnapshot snapshot = new CatalogSnapshot();
-        snapshot.currentDatabase = catalog.getCurrentDatabase();
+        snapshot.currentDatabase = catalog.heldDatabaseName();
         snapshot.currentSchema = catalog.heldSchemaName();
         snapshot.currentWarehouse = catalog.getCurrentWarehouse();
 
@@ -262,7 +264,7 @@ final class CatalogSnapshotWriter {
         RestCatalogSnapshots.saveDatabase(db, dbSnapshot);
 
         // Save schemas
-        for (final Schema schema : db.getAllSchemas()) {
+        for (final Schema schema : db.storedSchemas()) {
             dbSnapshot.schemas.add(saveSchema(catalog, db.getName(), schema, storageEngine, tableData));
         }
         return dbSnapshot;
@@ -400,8 +402,10 @@ final class CatalogSnapshotWriter {
         }
 
         // Save view metadata. A temporary view ends with its session, which no restore brings back.
+        // A view the SNOWFLAKE database starts with is seeded on every start, never saved (see AccountUsageViews).
+        final boolean seededSchema = SystemSchema.of(databaseName, schema.getName()) != null;
         for (final View view : schema.getViews()) {
-            if (view.isTemporary()) {
+            if (view.isTemporary() || seededSchema && view.getOwner() == null) {
                 continue;
             }
             final ViewSnapshot viewSnapshot = new ViewSnapshot();
@@ -496,6 +500,20 @@ final class CatalogSnapshotWriter {
             schemaSnapshot.cortexSearchServices.add(serviceSnapshot);
         }
 
+        // Save semantic views (the whole definition)
+        for (final SemanticView view : schema.getSemanticViews()) {
+            final SemanticViewSnapshot viewSnapshot = new SemanticViewSnapshot();
+            viewSnapshot.name = view.getName();
+            viewSnapshot.comment = view.getComment();
+            viewSnapshot.owner = view.getOwner();
+            viewSnapshot.createdAt = view.getCreatedTime();
+            viewSnapshot.lastDdlAt = view.getLastDdlTime();
+            viewSnapshot.tables = new ArrayList<>(view.getTables());
+            viewSnapshot.relationships = new ArrayList<>(view.getRelationships());
+            viewSnapshot.expressions = new ArrayList<>(view.getExpressions());
+            schemaSnapshot.semanticViews.add(viewSnapshot);
+        }
+
         // Save streams (definition + pending unconsumed change records)
         for (final Stream stream : schema.getStreams()) {
             final StreamSnapshot streamSnapshot = new StreamSnapshot();
@@ -515,6 +533,7 @@ final class CatalogSnapshotWriter {
             streamSnapshot.lostInClone = stream.isLostInClone();
             streamSnapshot.rebound = stream.isRebound();
             streamSnapshot.shownTables = catalog == null ? null : StreamSources.shownTablePlaces(catalog, stream);
+            streamSnapshot.boundTableIds = catalog == null ? null : StreamSources.boundTableIds(stream);
             streamSnapshot.comment = stream.getComment();
             streamSnapshot.owner = stream.getOwner();
             streamSnapshot.createdAt = stream.getCreatedAt();
@@ -882,6 +901,10 @@ final class CatalogSnapshotWriter {
             }
             dtSnapshot.transientTable = dt.isTransient();
             dtSnapshot.createText = dt.getCreateText();
+            if (dt.getCreateNameFrom() >= 0) {
+                dtSnapshot.createNameFrom = Integer.valueOf(dt.getCreateNameFrom());
+                dtSnapshot.createNameTo = Integer.valueOf(dt.getCreateNameTo());
+            }
             dtSnapshot.bodyText = dt.getBodyText();
             dtSnapshot.definitionDatabase = dt.getDefinitionDatabase();
             dtSnapshot.definitionSchema = dt.getDefinitionSchema();
@@ -1088,6 +1111,10 @@ final class CatalogSnapshotWriter {
         colSnapshot.formatType = col.getFormatType();
         colSnapshot.virtualExpression = col.getVirtualExpression();
         colSnapshot.virtualText = col.getVirtualText();
+        if (col.isVirtual()) {
+            colSnapshot.virtualRead = col.getVirtualRead();
+            colSnapshot.virtualDefinedType = col.getDefinedType();
+        }
         colSnapshot.ordinalPosition = col.getOrdinalPosition();
         colSnapshot.tags = SnapshotTags.of(col);
         colSnapshot.referencedTable = col.getReferencedTable();

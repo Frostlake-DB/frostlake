@@ -87,6 +87,10 @@ public class ResultSetColumn {
     private final StoredRead storedRead;
     // Whether the column projects a number or boolean literal a FROM-less select writes (see withLiteralConstant).
     private final boolean literalConstant;
+    // Whether the projection is a text the plan folds to a constant, or a column carrying one out of a derived
+    // relation: read as a FLOAT, such a text past the double's range is the infinity rather than refused (see
+    // ApproximateText). Read only by that reading, through a derived relation or a typed CTAS built from this result.
+    private final boolean foldedText;
     // The stored table the column projects a column of as it is, which the drivers report as its catalog, schema and
     // table; null for a computed column.
     private final ColumnSource source;
@@ -140,7 +144,7 @@ public class ResultSetColumn {
                             final boolean nullText) {
         this(name, dataType, tableName, staticType, nullable, nullabilityKnown, valueRange, spelledNumber, collation,
             uncheckedConstant, foldedDouble, collationExplicit, projectionPolicyName, nullText, null, StoredRead.NONE,
-            false, null, null);
+            false, null, null, false);
     }
 
     private ResultSetColumn(final String name, final DataType dataType, final String tableName,
@@ -151,8 +155,10 @@ public class ResultSetColumn {
                             final boolean collationExplicit, final String projectionPolicyName,
                             final boolean nullText, final Boolean derivedNullable,
                             final StoredRead storedRead, final boolean literalConstant,
-                            final Boolean reportedNullable, final ColumnSource source) {
+                            final Boolean reportedNullable, final ColumnSource source,
+                            final boolean foldedText) {
         this.source = source;
+        this.foldedText = foldedText;
         this.derivedNullable = derivedNullable;
         this.reportedNullable = reportedNullable;
         this.storedRead = storedRead;
@@ -195,7 +201,8 @@ public class ResultSetColumn {
     public ResultSetColumn withCollation(final String spec, final boolean explicit) {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, spec, uncheckedConstant, foldedDouble, spec != null && explicit,
-            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source,
+            foldedText);
     }
 
     /**
@@ -207,7 +214,7 @@ public class ResultSetColumn {
     public ResultSetColumn withoutValueRange() {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             null, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit, projectionPolicyName,
-            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source, foldedText);
     }
 
     /**
@@ -219,7 +226,8 @@ public class ResultSetColumn {
     public ResultSetColumn withName(final String renamed) {
         return new ResultSetColumn(renamed, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
-            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source,
+            foldedText);
     }
 
     /**
@@ -232,7 +240,7 @@ public class ResultSetColumn {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
             projectionPolicyName, nullText, Boolean.valueOf(derived), storedRead, literalConstant, reportedNullable,
-            source);
+            source, foldedText);
     }
 
     /**
@@ -256,7 +264,7 @@ public class ResultSetColumn {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
             projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, Boolean.valueOf(reported),
-            source);
+            source, foldedText);
     }
 
     /**
@@ -303,7 +311,7 @@ public class ResultSetColumn {
     public ResultSetColumn withUncheckedConstant() {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, true, foldedDouble, collationExplicit, projectionPolicyName,
-            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source, foldedText);
     }
 
     /**
@@ -315,7 +323,7 @@ public class ResultSetColumn {
     public ResultSetColumn withFoldedDouble() {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, true, collationExplicit, projectionPolicyName,
-            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source, foldedText);
     }
 
     /**
@@ -327,7 +335,8 @@ public class ResultSetColumn {
     public ResultSetColumn withNullText() {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
-            projectionPolicyName, true, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            projectionPolicyName, true, derivedNullable, storedRead, literalConstant, reportedNullable, source,
+            foldedText);
     }
 
     /**
@@ -346,7 +355,7 @@ public class ResultSetColumn {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
             projectionPolicyName, nullText, derivedNullable, storedRead, true,
-            reportedNullable, source);
+            reportedNullable, source, foldedText);
     }
 
     /** Whether this column projects a number or boolean literal a FROM-less select writes. */
@@ -364,7 +373,8 @@ public class ResultSetColumn {
     public ResultSetColumn withSource(final ColumnSource read) {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
-            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, read);
+            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, read,
+            foldedText);
     }
 
     /** Where the column's values are read from, a stored table's column as it is, or null for a computed column. */
@@ -375,7 +385,8 @@ public class ResultSetColumn {
     public ResultSetColumn withStoredRead(final StoredRead read) {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
-            projectionPolicyName, nullText, derivedNullable, read, literalConstant, reportedNullable, source);
+            projectionPolicyName, nullText, derivedNullable, read, literalConstant, reportedNullable, source,
+            foldedText);
     }
 
     /**
@@ -406,7 +417,7 @@ public class ResultSetColumn {
     public ResultSetColumn withProjectionPolicy(final String policyName) {
         return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
             valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit, policyName,
-            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source);
+            nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source, foldedText);
     }
 
     /**
@@ -417,6 +428,28 @@ public class ResultSetColumn {
      */
     public String getProjectionPolicyName() {
         return projectionPolicyName;
+    }
+
+    /**
+     * This column marked as projecting a text the plan folds to a constant (see {@link #isFoldedText}).
+     *
+     * @return a copy of this column carrying the mark
+     */
+    public ResultSetColumn withFoldedText() {
+        return new ResultSetColumn(name, dataType, tableName, staticType, nullable, nullabilityKnown,
+            valueRange, spelledNumber, collation, uncheckedConstant, foldedDouble, collationExplicit,
+            projectionPolicyName, nullText, derivedNullable, storedRead, literalConstant, reportedNullable, source,
+            true);
+    }
+
+    /**
+     * Whether this column projects a text the plan folds to a constant, or carries one out of a derived relation:
+     * read as a FLOAT, such a text past the double's range is the infinity of its sign rather than refused.
+     *
+     * @return true for such a column
+     */
+    public boolean isFoldedText() {
+        return foldedText;
     }
 
     /**

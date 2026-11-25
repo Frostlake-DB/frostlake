@@ -21,8 +21,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * SYSTEM$STREAM_HAS_DATA counts a version a stream's table took past its offset by what it wrote (live-verified): an
- * INSERT and a MERGE always, one of no row too; any other change where it left the table rows, or, for a stream that
- * reads more than inserts, where it removed some. So a DELETE of every row and a TRUNCATE count for a standard stream
+ * INSERT and a MERGE wherever it added or removed rows, one of no row that rewrote a table holding rows too (see
+ * StreamVersionSourcePruningTest); any other change where it left the table rows, or, for a stream that reads more
+ * than inserts, where it removed some. So a DELETE of every row and a TRUNCATE count for a standard stream
  * alone, an UPDATE or a DELETE that changed no row, a TRUNCATE of an empty table and a DDL change for none, and a
  * change a view filters out counts though the stream lists nothing.
  */

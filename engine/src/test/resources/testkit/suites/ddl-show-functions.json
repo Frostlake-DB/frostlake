@@ -1,6 +1,6 @@
 {
   "suite": "ddl-show-functions",
-  "description": "SHOW FUNCTIONS lists the whole dispatchable library: built-ins beside user functions, the 14 window functions, the higher-order three, dispatch aliases (each really dispatching under its own name), operator-implemented names (||, [], IS NULL, COUNT(*), ...), SYSTEM$ functions; description defaults to the user-defined placeholder or carries the routine's comment; and the non-registry families really dispatch. Converted from ddl/ShowFunctionsTest (9 of its 11 tests; the two engine-internal ones - the registry-equality sweep and the every-name-resolves loop - stay in the trimmed Java class). DIV-absence is an engine-only fact split into a skip-snowflake test, as the Java's assumption gated it; SYSTEM$TYPEOF, SYSTEM$STREAM_HAS_DATA and the other SYSTEM$ names the account's own listing leaves out stay out on every backend.",
+  "description": "SHOW FUNCTIONS lists the whole dispatchable library: built-ins beside user functions, the 14 window functions, the higher-order three, dispatch aliases (each really dispatching under its own name), operator-implemented names (||, [], IS NULL, COUNT(*), ...), SYSTEM$ functions; description defaults to the user-defined placeholder or carries the routine's comment; and the non-registry families really dispatch. Converted from ddl/ShowFunctionsTest (9 of its 11 tests; the two engine-internal ones - the registry-equality sweep and the every-name-resolves loop - stay in the trimmed Java class). DIV is listed as the account lists it, though a call to it is refused as Unsupported; SYSTEM$TYPEOF, SYSTEM$STREAM_HAS_DATA and the other SYSTEM$ names the account's own listing leaves out stay out on every backend.",
   "tags": ["ddl", "converted"],
   "tests": [
     {"name": "lists-builtins-when-no-user-functions-exist", "steps": [
@@ -38,12 +38,11 @@
       {"sql": "SELECT COUNT(DISTINCT \"name\") FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE \"name\" IN ('LIKE_ANY', 'LIKE_ALL', 'ILIKE_ANY', '||', '[]', ':', 'IS NULL', 'IS NOT NULL', 'COUNT(*)', 'BETWEEN', 'CASE', 'REGEXP')",
        "expect": {"value": "12"}}
     ]},
-    {"name": "div-is-not-listed-because-it-is-not-dispatchable",
-     "skip": {"backends": ["snowflake"], "reason": "a real account lists DIV even though it cannot run it (Java test had the same assumption); this engine's listing mirrors what it dispatches"},
+    {"name": "div-is-listed-though-it-runs-no-call",
      "steps": [
       {"sql": "SHOW FUNCTIONS"},
       {"sql": "SELECT COUNT(*) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE \"name\" = 'DIV'",
-       "expect": {"value": "0"}}
+       "expect": {"value": "1"}}
     ]},
     {"name": "lists-system-functions", "steps": [
       {"sql": "SHOW FUNCTIONS"},

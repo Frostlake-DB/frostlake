@@ -19,6 +19,7 @@ package dev.frostlake.executor.expressions;
 import dev.frostlake.executor.NumericRangeRefusal;
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.executor.SqlCompilationError;
+import dev.frostlake.executor.ValueComparisons;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.functions.scalar.conversion.BooleanWords;
 import dev.frostlake.functions.scalar.datetime.DateShiftAmount;
@@ -31,6 +32,7 @@ import dev.frostlake.values.HexDoubleText;
 import dev.frostlake.values.NonFiniteDoubles;
 import dev.frostlake.values.VariantBooleans;
 import dev.frostlake.values.VariantJsonNulls;
+import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantValue;
 import dev.frostlake.values.VectorValue;
 import dev.frostlake.values.XmlVariants;
@@ -920,6 +922,23 @@ public final class ExpressionArithmetic {
     }
 
     /**
+     * Equality as a comparison against a SUBQUERY's value answers it: {@link #equals}, except that two VARIANTs key
+     * as DISTINCT keys them, a number by its exact value — so an integer never meets the double it rounds to there,
+     * although {@code =} between the two finds them equal (live-verified: {@code v IN (SELECT w …)} and
+     * {@code v = (SELECT w …)} are FALSE for 12345678901234567890 against 1.2345678901234567e19).
+     *
+     * @param left one value, not NULL
+     * @param right the other, not NULL
+     * @return whether the two are equal
+     */
+    public static boolean keyEquals(final Object left, final Object right) {
+        if (left instanceof VariantValue && right instanceof VariantValue) {
+            return ValueComparisons.canonicalGroupKeyValue(left).equals(ValueComparisons.canonicalGroupKeyValue(right));
+        }
+        return equals(left, right);
+    }
+
+    /**
      * SQL value equality, as the {@code =} operator answers it: numbers compare by VALUE whatever
      * their runtime class, a boolean reads against a number, a temporal against its own text, a DATE
      * against a TIMESTAMP by instant, and a VARIANT against either. A string that must read as a
@@ -927,8 +946,7 @@ public final class ExpressionArithmetic {
      * is not recognized".
      *
      * <p>Exposed so the functions that are defined AS a comparison — DECODE today — answer with the
-     * operator instead of a hand-rolled test of their own. It is the only member of this class
-     * visible outside the package; the rest stay package-private.
+     * operator instead of a hand-rolled test of their own.
      */
     public static boolean equals(final Object left, final Object right) {
         if (left == null && right == null) {
@@ -1093,7 +1111,9 @@ public final class ExpressionArithmetic {
         if (node == null || !node.isNumber()) {
             return null;
         }
-        if ((node.isDouble() || node.isFloat()) && !Double.isFinite(node.doubleValue())) {
+        // A double stays one, so it compares as a double beside any number, the exact side converted:
+        // PARSE_JSON('1.2345678901234567e19') = 12345678901234567890 is TRUE (live-verified).
+        if (node.isDouble() || node.isFloat()) {
             return Double.valueOf(node.doubleValue());
         }
         return node.decimalValue();
@@ -1132,7 +1152,11 @@ public final class ExpressionArithmetic {
         return null;
     }
 
-    /** The text a variant presents to VARCHAR contexts: a string's content, an XML element's compact XML, otherwise the JSON text. */
+    /**
+     * The text a variant presents to VARCHAR contexts: a string's content, an XML element's compact XML,
+     * otherwise its {@code ::VARCHAR} text — a double the FLOAT text, so a stored {@code TO_VARIANT(1::FLOAT)}
+     * equals {@code '1'} and {@code PARSE_JSON('1e20')} equals {@code '1e+20'} (live-verified).
+     */
     private static String variantDisplayText(final VariantValue variant) {
         if (variant.node().isTextual()) {
             return variant.node().asText();
@@ -1140,7 +1164,8 @@ public final class ExpressionArithmetic {
         if (XmlVariants.isXmlElement(variant.node())) {
             return XmlVariants.compactXml(variant.node());
         }
-        return variant.text();
+        final String converted = VariantJsonText.stringConversionTextOf(variant);
+        return converted != null ? converted : variant.text();
     }
 
     /**

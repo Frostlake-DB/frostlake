@@ -370,7 +370,7 @@ ALTER SESSION sets them. `disablePlatformDetection=true` spares the driver its c
 |---|---|
 | `POST /session/v1/login-request` | Opens a session; its token is the session's id. Answers the session parameters the driver renders values by: the output formats and the zone - the session's own, else the account's (UTC here) - the account's flags for reading dates and timestamps in that zone, and its result size limits (128 MB), which `getMaxCharLiteralLength` and `getMaxFieldSize` answer. |
 | `POST /queries/v1/query-request` | Runs a statement in the session the token names, its bindings written in, and answers its result: each column's type, and the rows as an Arrow stream (a query's) or as JSON cells in the driver's internal form. A refusal carries its SQLSTATE and vendor code. |
-| `GET /queries/{id}/result` | One statement's result of a text of several (the driver asks for those with `MULTI_STATEMENT_COUNT`). |
+| `GET /queries/{id}/result` | One statement's result of a text of several (the driver asks for those with `MULTI_STATEMENT_COUNT`), or the text's own answer under its own ID, which lists its statements' IDs (`getChildQueryIds`). |
 | `GET /monitoring/queries/{id}` | A query's status, read from the query history: RUNNING, SUCCESS, or FAILED_WITH_ERROR with its error (the driver's `getQueryStatus`, and what an asynchronous statement and a statement of several are followed by). |
 | `POST /queries/v1/abort-request` | Cancels the session's running statement (`Statement.cancel()`). |
 | `POST /session?delete=true` | Ends the session. |

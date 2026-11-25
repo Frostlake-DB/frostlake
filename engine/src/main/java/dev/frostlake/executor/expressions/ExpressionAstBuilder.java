@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor.expressions;
 
+import dev.frostlake.executor.AnonymousCallValues;
 import dev.frostlake.executor.BoundedParseCache;
 import dev.frostlake.executor.IntegerLiteralRange;
 import dev.frostlake.executor.ParseTreeText;
@@ -1489,8 +1490,47 @@ public class ExpressionAstBuilder extends FrostlakeBaseVisitor<Expression> {
         return new SourcePosition(query.getStart().getLine(), query.getStart().getCharPositionInLine());
     }
 
+    /**
+     * A CALL of a procedure the CALL defines for itself, as a value: the statement it runs, from the definition to
+     * the CALL's closing parenthesis with a {@code ?} for each value written for an argument, and those values (see
+     * {@link AnonymousCallExpression}).
+     */
+    @Override
+    public Expression visitAnonymousCallExpr(final FrostlakeParser.AnonymousCallExprContext ctx) {
+        final FrostlakeParser.AnonymousProcedureContext defined = ctx.anonymousProcedure();
+        final StringBuilder call = new StringBuilder(ctx.start.getInputStream().getText(
+            new Interval(defined.start.getStartIndex(), ctx.CALL().getSymbol().getStopIndex())));
+        call.append(' ').append(originalText(ctx.qualifiedName())).append('(');
+        final List<Expression> arguments = new ArrayList<>();
+        if (ctx.callArguments() != null) {
+            boolean first = true;
+            for (final FrostlakeParser.CallArgumentContext argument : ctx.callArguments().callArgument()) {
+                call.append(first ? "" : ", ");
+                first = false;
+                if (argument.expression() != null) {
+                    call.append('?');
+                    arguments.add(visit(argument.expression()));
+                } else if (argument.booleanExpr() != null) {
+                    call.append('?');
+                    arguments.add(visit(argument.booleanExpr()));
+                } else {
+                    call.append(originalText(argument));
+                }
+            }
+        }
+        call.append(')');
+        return new AnonymousCallExpression(call.toString(), arguments,
+            AnonymousCallValues.unknownRoutine(defined, ctx.qualifiedName()));
+    }
+
     @Override
     public Expression visitScalarSubqueryExpr(final FrostlakeParser.ScalarSubqueryExprContext ctx) {
+        final FrostlakeParser.WithCallContext withCall = ctx.selectStatement().withCall();
+        if (withCall != null) {
+            // A CALL after a WITH that defines no procedure: refused by the name it calls where it is reached.
+            return new AnonymousCallExpression(originalText(ctx.selectStatement()), new ArrayList<Expression>(),
+                AnonymousCallValues.unknownRoutine(withCall.qualifiedName()));
+        }
         final SubqueryExpression subquery = new SubqueryExpression(originalText(ctx.selectStatement()));
         subquery.setPosition(new SourcePosition(ctx.selectStatement().getStart().getLine(),
             ctx.selectStatement().getStart().getCharPositionInLine()));

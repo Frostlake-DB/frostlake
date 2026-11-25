@@ -32,6 +32,8 @@ final class FoldedConstantExpression extends LiteralExpression {
 
     private final DataType declaredType;
     private boolean blockBinding;
+    private boolean written;
+    private DataType spelledType;
 
     /**
      * @param value        the folded value: a BigDecimal for an exact number, a Double for a FLOAT, or null
@@ -55,6 +57,43 @@ final class FoldedConstantExpression extends LiteralExpression {
     /** Marks this constant as a block's exact NUMBER variable — see {@link #isBlockBinding()}. */
     void markBlockBinding() {
         this.blockBinding = true;
+    }
+
+    /**
+     * @return whether the plan prints this constant as a number written out - one it folds from numbers written out
+     *         beside a block's variable, or a text compared with one - bare, never rescaled or cast to its own type
+     */
+    boolean isWritten() {
+        return written;
+    }
+
+    /**
+     * Marks this constant as printed as a number written out - see {@link #isWritten()}.
+     *
+     * @return this constant
+     */
+    FoldedConstantExpression markWritten() {
+        this.written = true;
+        return this;
+    }
+
+    /**
+     * @return the width a text term's spelling reads at, which a term of a smaller scale beside it is raised from,
+     *         or null for a constant no text spelled
+     */
+    DataType getSpelledType() {
+        return spelledType;
+    }
+
+    /**
+     * Records the width a text term's spelling reads at - see {@link #getSpelledType()}.
+     *
+     * @param spelled the spelling's own width
+     * @return this constant
+     */
+    FoldedConstantExpression withSpelledType(final DataType spelled) {
+        this.spelledType = spelled;
+        return this;
     }
 
     /** @return whether the target is a FLOAT */

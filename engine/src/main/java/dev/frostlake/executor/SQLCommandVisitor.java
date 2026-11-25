@@ -24,17 +24,18 @@ import dev.frostlake.executor.commands.AlertCommandHandler;
 import dev.frostlake.executor.commands.AlterCommandHandler;
 import dev.frostlake.executor.commands.AppObjectCommandHandler;
 import dev.frostlake.executor.commands.ApplyPrivileges;
+import dev.frostlake.executor.commands.BackupAndBundleHandler;
 import dev.frostlake.executor.commands.BeginEndBlockHandler;
 import dev.frostlake.executor.commands.BoundPropertyVariable;
 import dev.frostlake.executor.commands.ColumnDefinitionParser;
 import dev.frostlake.executor.commands.CommentCommandHandler;
+import dev.frostlake.executor.commands.ConnectionCommandHandler;
 import dev.frostlake.executor.commands.ContainerServicesHandler;
 import dev.frostlake.executor.commands.CreateNamespaceHandler;
 import dev.frostlake.executor.commands.DDLCommandHandler;
 import dev.frostlake.executor.commands.DMLCommandHandler;
 import dev.frostlake.executor.commands.DataTypeParser;
 import dev.frostlake.executor.commands.DbtProjects;
-import dev.frostlake.executor.commands.DynamicTableProperties;
 import dev.frostlake.executor.commands.ExternalTableCommandHandler;
 import dev.frostlake.executor.commands.ExternalVolumeCommandHandler;
 import dev.frostlake.executor.commands.FailoverGroupCommandHandler;
@@ -45,6 +46,7 @@ import dev.frostlake.executor.commands.LoopControlPlacement;
 import dev.frostlake.executor.commands.ManualRunPrivileges;
 import dev.frostlake.executor.commands.PropertyVariables;
 import dev.frostlake.executor.commands.QueryCommandHandler;
+import dev.frostlake.executor.commands.RefusalsBeforeNames;
 import dev.frostlake.executor.commands.ResourceMonitorCommandHandler;
 import dev.frostlake.executor.commands.SecurityObjectCommandHandler;
 import dev.frostlake.executor.commands.ShareCommandHandler;
@@ -87,6 +89,8 @@ import dev.frostlake.metastore.HiddenDatabases;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.QueryHistory;
+import dev.frostlake.metastore.SystemDatabaseSight;
+import dev.frostlake.metastore.UnseenCurrentDatabase;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.Parameter;
@@ -269,12 +273,16 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
     public Object visitStatement(final FrostlakeParser.StatementContext ctx) {
         // Every statement is named for the refusal a session with no current database gets.
         final String enclosingKind = NoCurrentDatabaseRefusal.enter(StatementKindText.of(ctx));
+        // A current database the statement's roles neither see nor hold anything in is none to it (see
+        // UnseenCurrentDatabase).
+        final String displacedUnseen = UnseenCurrentDatabase.begin(unseenCurrentDatabase());
         try {
             DoubledSigns.rejectAheadOfCaret(ctx);
             CaretOperator.rejectInStatement(ctx);
             DoubledSigns.rejectInStatement(ctx);
             FromClauseProcedureJobs.require(ctx, procedureDepth > 0, queryExecutor);
             ReadOnlyRequest.require(ctx);
+            RefusalsBeforeNames.rejectUnsupported(ctx);
             if (catalog != null && catalog.getCurrentDatabase() == null) {
                 rejectWithoutCurrentDatabase(ctx);
             }
@@ -292,9 +300,18 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 final boolean names = !HiddenDatabases.installed();
                 final Set<String> displaced = names
                     ? HiddenDatabases.begin(WrittenDatabases.hiddenIn(ctx, queryExecutor)) : null;
+                // So is a part of the SNOWFLAKE database its roles do not see (see SystemDatabaseSight).
+                final boolean sights = !SystemDatabaseSight.installed();
+                final Boolean displacedSight = sights
+                    ? SystemDatabaseSight.begin(!seesWholeSystemDatabase()) : null;
                 try {
+                    // A DIV call is refused once the statement has compiled, ahead of any row (see DivCalls).
+                    DivCalls.requireNone(ctx, queryExecutor);
                     return visitChildren(ctx);
                 } finally {
+                    if (sights) {
+                        SystemDatabaseSight.end(displacedSight);
+                    }
                     if (names) {
                         HiddenDatabases.end(displaced);
                     }
@@ -308,8 +325,23 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 PropertyVariables.unbind(boundVariables);
             }
         } finally {
+            UnseenCurrentDatabase.end(displacedUnseen);
             NoCurrentDatabaseRefusal.exit(enclosingKind);
         }
+    }
+
+    /**
+     * The database the session holds as its current one when the statement's roles do not see it, or null.
+     *
+     * @return the database's stored name, or null
+     */
+    private String unseenCurrentDatabase() {
+        if (catalog == null) {
+            return null;
+        }
+        final String held = catalog.heldDatabaseName();
+        return held != null && WrittenDatabases.hides(held, queryExecutor)
+            && !queryExecutor.getSecurityManager().holdsAnythingIn(held) ? held : null;
     }
 
     /**
@@ -383,14 +415,16 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * variable SET to NULL exists and reads NULL; a session PARAMETER of the same name is not a variable.
      * Checked once per statement, so a SET earlier in the same script counts. A DESCRIBE's properties are judged
      * one by one in the order written, each name before its value (DescribeProperties), so theirs wait; so does
-     * an ALTER SESSION's value, judged with the rest of its list (SessionParameterSettings). A variable read with
+     * an ALTER SESSION's value, judged with the rest of its list (SessionParameterSettings), and the value of a
+     * property an ALTER of an unmodelled kind sets (UnmodelledAlteration). A variable read with
      * dotted keys after it, {@code $x.y.z}, is one name with them, X.Y.Z, whether or not X is set, and the refusal
      * carries no position: "Session variable '$X.Y.Z' does not exist" (live-verified). A grant of privileges reads
      * its grantee before what it grants on, so of two such variables the grantee's is named (live-verified).
      */
     private void rejectUnsetSessionVariables(final ParseTree node) {
         if (node instanceof FrostlakeParser.DescribePropertyContext
-                || node instanceof FrostlakeParser.SessionValueContext) {
+                || node instanceof FrostlakeParser.SessionValueContext
+                || node instanceof FrostlakeParser.UnmodelledPropertyContext) {
             return;
         }
         if (node instanceof FrostlakeParser.GrantStatementContext
@@ -467,6 +501,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * notwithstanding. RENAME COLUMN and RENAME CONSTRAINT are the exception: they look a bare table name up,
      * and miss it.
      */
+    /** Whether the session's roles see the whole SNOWFLAKE database; an engine without security sees it all. */
+    private boolean seesWholeSystemDatabase() {
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        return security == null || security.seesWholeSystemDatabase();
+    }
+
     private void rejectWithoutCurrentDatabase(final FrostlakeParser.StatementContext ctx) {
         final FrostlakeParser.QualifiedNameContext target = StatementKindText.underQualifiedTarget(ctx);
         if (target == null) {
@@ -475,11 +515,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         if (target.namePart().isEmpty() && StatementKindText.renamesColumnOrConstraint(ctx)) {
             throw new RuntimeException(SqlCompilationError.doesNotExist("Table", qualifiedNameParts(target)[0]));
         }
-        final FrostlakeParser.DdlStatementContext ddl = ctx.ddlStatement();
-        if (ddl != null && ddl.alterStatement() != null && ddl.alterStatement().dynamicTableAction() != null) {
-            // A property the account refuses outranks the missing database (live-verified).
-            DynamicTableProperties.rejectUntakeable(ddl.alterStatement().dynamicTableAction());
-        }
+        // A property the account refuses, and a feature it does not support, outrank the missing database
+        // (live-verified).
+        RefusalsBeforeNames.rejectProperties(ctx);
         throw NoCurrentDatabaseRefusal.forStatement();
     }
 
@@ -526,9 +564,13 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         } else if (node instanceof FrostlakeParser.JoinPolicyClauseContext) {
             requireApplyAttachedPolicy("JOIN_POLICY", ((FrostlakeParser.JoinPolicyClauseContext) node).qualifiedName());
         }
-        // A CREATE STAGE judges its own clause once its name is (see InlineTags#isStageOwn).
+        // A CREATE STAGE judges its own clause once its name is (see InlineTags#isStageOwn), an external table's
+        // column once its stage is (see InlineTags#isExternalColumnOwn).
+        // A CREATE CODE BUNDLE refuses any clause at all (see BackupAndBundleHandler).
         if (node instanceof FrostlakeParser.TagListContext && catalog != null
-                && !InlineTags.isStageOwn((FrostlakeParser.TagListContext) node)) {
+                && !InlineTags.isStageOwn((FrostlakeParser.TagListContext) node)
+                && !InlineTags.isExternalColumnOwn((FrostlakeParser.TagListContext) node)
+                && !(node.getParent() instanceof FrostlakeParser.CodeBundleStatementContext)) {
             InlineTags.requireApplicable((FrostlakeParser.TagListContext) node, queryExecutor);
         }
         for (int i = 0; i < node.getChildCount(); i++) {
@@ -670,6 +712,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             if (ctx.SHARE() != null) {
                 return new ShareCommandHandler(catalog, identity).handle(ctx);
             }
+            if (ctx.connectionWord != null) {
+                return new ConnectionCommandHandler(catalog, identity).handle(ctx);
+            }
             return new FailoverGroupCommandHandler(catalog, identity).handle(ctx);
         } catch (final Exception e) {
             if (e instanceof SecurityException) throw (SecurityException) e;
@@ -762,6 +807,16 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             }
             throw StatementErrors.propagate(e);
         }
+    }
+
+    @Override
+    public Object visitBackupPolicyStatement(final FrostlakeParser.BackupPolicyStatementContext ctx) {
+        return new BackupAndBundleHandler(catalog, queryExecutor).handleBackupPolicy(ctx);
+    }
+
+    @Override
+    public Object visitCodeBundleStatement(final FrostlakeParser.CodeBundleStatementContext ctx) {
+        return new BackupAndBundleHandler(catalog, queryExecutor).handleCodeBundle(ctx);
     }
 
     @Override
@@ -1155,6 +1210,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
 
     @Override
     public Object visitQueryStatement(final FrostlakeParser.QueryStatementContext ctx) {
+        // A block runs its statements from their trees: a CALL after a WITH that defines no procedure is refused here.
+        WithCalls.requireNone(ctx);
         IntoClausePlacement.rejectHierarchicalSelectInto(ctx);
         // A query of an explicit transaction that meets a stream another session's transaction holds waits for it and
         // runs again (see TableLockGate#requireStreamFree).
@@ -1335,6 +1392,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             proceduralExecutor.executeStatement(stmt);
 
             logger.trace("Declared resultset: {}", resultSetName);
+        } else if (ctx.anonymousCallValue() != null) {
+            final FrostlakeParser.AnonymousCallValueContext value = ctx.anonymousCallValue();
+            assignAnonymousCall(getText(ctx.identifier()), parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()),
+                true, false, value.getStart(), value.anonymousProcedure(), value.qualifiedName(), value.callArguments(),
+                value.RPAREN(0).getSymbol());
         } else {
             // Variable declaration
             final String varName = getText(ctx.identifier());
@@ -1382,6 +1444,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
     public Object visitUntypedDeclarationItem(final FrostlakeParser.UntypedDeclarationItemContext ctx) {
         // A DECLARE-section item with the type omitted (`v := expr;`); the type is inferred from the value.
         final String varName = getText(ctx.identifier());
+        if (ctx.anonymousCallValue() != null) {
+            final FrostlakeParser.AnonymousCallValueContext value = ctx.anonymousCallValue();
+            assignAnonymousCall(varName, null, true, false, value.getStart(), value.anonymousProcedure(),
+                value.qualifiedName(), value.callArguments(), value.RPAREN(0).getSymbol());
+            return null;
+        }
         final Object defaultValue = evaluateExpression(ctx.booleanExpr());
         final DeclareStatement stmt = new DeclareStatement(varName, defaultValue,
             inferredDeclarationType(ctx.booleanExpr()));
@@ -1690,6 +1758,14 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             return null;
         }
 
+        if (ctx.anonymousCallValue() != null) {
+            final FrostlakeParser.AnonymousCallValueContext value = ctx.anonymousCallValue();
+            assignAnonymousCall(varName, ctx.dataTypeName() == null ? null
+                    : parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()), true, true, value.getStart(),
+                value.anonymousProcedure(), value.qualifiedName(), value.callArguments(), value.RPAREN(0).getSymbol());
+            return null;
+        }
+
         if (ctx.booleanExpr() == null) {
             // A type and no value declares the variable NULL of its type, as a DECLARE section's item does
             // (live-verified).
@@ -1712,7 +1788,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         try {
             defaultValue = ctx.dataTypeName() != null
                 ? declaredInitialValue(ctx.booleanExpr(), parseDeclaredType(ctx.dataTypeName(), ctx.typeParameters()))
-                : evaluateExpression(ctx.booleanExpr());
+                : AnonymousCallAnswers.unwrapped(evaluateExpression(ctx.booleanExpr()));
         } catch (final RuntimeException failed) {
             proceduralExecutor.failExpressionQuery(asQuery, ctx.booleanExpr(), failed);
             throw failed;
@@ -1770,6 +1846,31 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             return null;
         }
 
+        // The CALL of a procedure it defines for itself, in parentheses, is read as the value it stands for: a RESULTSET
+        // holds what the CALL answers, any other variable the value the call hands back (see AnonymousCallValues).
+        final FrostlakeParser.AnonymousCallExprContext ownCall = wholeAnonymousCall(ctx.booleanExpr());
+        if (ownCall != null) {
+            if (proceduralExecutor.holdsResultSet(varName)) {
+                final int[] place = proceduralExecutor.placeOfAssignedCall(ownCall.anonymousProcedure().getStart());
+                proceduralExecutor.assignResultSetQuery(varName, AnonymousCallValues.callText(
+                    ownCall.anonymousProcedure(), ownCall.RPAREN(0).getSymbol()), place[0], place[1]);
+                return null;
+            }
+            assignAnonymousCall(varName, proceduralExecutor.getDeclaredVariableType(varName), false, false,
+                ownCall.LPAREN(0).getSymbol(), ownCall.anonymousProcedure(), ownCall.qualifiedName(),
+                ownCall.callArguments(), ownCall.RPAREN(0).getSymbol());
+            return null;
+        }
+
+        // Handle: var := (WITH p AS PROCEDURE … CALL p()) — the value the call hands back (see AnonymousCallValues).
+        if (ctx.callStatement() != null && ctx.callStatement().anonymousProcedure() != null) {
+            final FrostlakeParser.CallStatementContext call = ctx.callStatement();
+            assignAnonymousCall(varName, proceduralExecutor.getDeclaredVariableType(varName), false, false,
+                ctx.LPAREN().getSymbol(), call.anonymousProcedure(), call.qualifiedName(), call.callArguments(),
+                call.RPAREN().getSymbol());
+            return null;
+        }
+
         // Handle: var := (call proc()) — capture procedure return value. The CALL is the statement that runs: a
         // failure of it stands at the CALL, and its own places count from there (live-verified).
         if (ctx.callStatement() != null) {
@@ -1787,7 +1888,8 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 LeadingCommentOffset.end(displaced);
             }
             // The answer is held as the CALL handed it back, its conversion waiting for a read of the variable.
-            proceduralExecutor.assignCallAnswer(varName, ProceduralExecutor.procedureReturnValue(result));
+            proceduralExecutor.assignCallAnswer(varName, ProceduralExecutor.procedureReturnValue(result),
+                ProceduralExecutor.procedureAnswerType(result));
             logger.trace("Assigned variable {} from procedure call", varName);
             return null;
         }
@@ -2459,6 +2561,34 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         return answer;
     }
 
+    /**
+     * Refuses a CALL whose name reaches no routine, as compiling the statement does, without running it: {@code
+     * Unknown function P.}, and under a qualifier {@code Unknown user-defined function S.P.} (live-verified). A name a
+     * built-in, a SYSTEM$ function, an IDENTIFIER() reference, a class instance or the CALL's own procedure answers is
+     * left to the call itself.
+     *
+     * @param ctx the CALL as written
+     */
+    void requireCalledRoutine(final FrostlakeParser.CallStatementContext ctx) {
+        if (ctx.qualifiedName() == null || ctx.BANG() != null || ctx.anonymousProcedure() != null) {
+            return;
+        }
+        final String[] parts = qualifiedNameParts(ctx.qualifiedName());
+        if (InformationSchemaCalls.builtIn(Arrays.asList(parts)) != null) {
+            return;
+        }
+        final String procName = parts[parts.length - 1];
+        final String builtIn = procName.toUpperCase(Locale.ROOT);
+        if (parts.length == 1 && (queryExecutor.getFunctionRegistry().hasFunction(builtIn)
+                || queryExecutor.getFunctionRegistry().hasAggregateFunction(builtIn)
+                || WindowFunctionNames.handles(builtIn))) {
+            return;
+        }
+        if (calledSchema(parts, procName).getProcedureOverloads(procName).isEmpty()) {
+            throw unknownProcedure(parts);
+        }
+    }
+
     /** The database a name under INFORMATION_SCHEMA is written with, which is looked up (live-verified). */
     private void requireQualifierDatabase(final List<String> parts) {
         final String database = InformationSchemaCalls.database(parts);
@@ -2967,7 +3097,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
         // caller is back where it was afterwards, also when it was nowhere. The home is the schema the procedure
         // was found in, along the search path for a bare name. A body that runs with its CALLER's rights stays
         // where the caller is, and where it leaves the session is where the caller finds it (live-verified).
-        final String savedDb = catalog.getCurrentDatabase();
+        final String savedDb = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         final boolean callersRights = procedure.runsWithCallersRights();
         final String homeDb = callersRights ? null : schema.getDatabaseName();
@@ -2986,7 +3116,7 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 final DatabaseEngine host = queryExecutor.getDatabaseEngine();
                 // A handler may answer otherwise when called again (see CheckpointDebt).
                 CheckpointDebt.owe();
-                if (language == UdfLanguage.PYTHON && !PythonSnowparkPackage.isNamed(procedure.getPackages())) {
+                if (language == UdfLanguage.PYTHON && !PythonSnowparkPackage.isNamed(procedure.getAllPackages())) {
                     throw PythonSnowparkPackage.missing(procedure.getName(), procedure.getHandler());
                 }
                 if (language == UdfLanguage.JAVA || language == UdfLanguage.PYTHON || language == UdfLanguage.SCALA) {
@@ -3028,6 +3158,11 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             final SourcePosition callersOrigin = LeadingCommentOffset.begin(null);
             // A statement of a block that calls the procedure sees what the body lets out as its own failure.
             final boolean calledFromABlock = proceduralExecutor.isExecutingBlock();
+            final CallPlacement bindPlacement = calledFromABlock ? CallPlacement.BLOCK
+                : UserCallBinds.runsAsAText(ctx) ? CallPlacement.TEXT : CallPlacement.REQUEST;
+            final boolean bareCallName = ctx.callReference() == null && parts.length == 1;
+            final String callersSchema = catalog.getCurrentSchema();
+            FrostlakeParser.SqlScriptContext bodyNumbered = null;
             final ProcedureFrame callerFrame = proceduralExecutor.enterProcedureFrame();
             // The CALL made the body a transaction scope already: its top block opens none of its own.
             proceduralExecutor.markBodyScoped();
@@ -3053,6 +3188,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 parser.removeErrorListeners();
                 parser.addErrorListener(errorListener);
                 final FrostlakeParser.SqlScriptContext tree = parser.sqlScript();
+                // Its blocks number the binds of their user's calls from where the CALL sets them (see
+                // ProcedureBindStart).
+                UserCallBinds.bodyRuns(tree, ProcedureBindStart.of(ctx, params, bindPlacement, bareCallName,
+                    callersSchema),
+                    ProcedureBindStart.names(params));
+                bodyNumbered = tree;
                 // A body whose only faults are calls written as its statements is refused for them as it runs.
                 BlockCallStatementReading.requireBefore(body, errorListener, queryExecutor.getFunctionRegistry());
                 errorListener.throwIfErrors();
@@ -3168,6 +3309,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
                 final RuntimeException failure = StatementErrors.propagate(e);
                 throw calledFromABlock ? failureOfABody(failure) : failure;
             } finally {
+                if (bodyNumbered != null) {
+                    UserCallBinds.textRan(bodyNumbered);
+                }
                 proceduralExecutor.exitProcedureFrame(callerFrame, bodyFailed);
                 proceduralExecutor.restoreDeclaredReturn(outerReturn);
                 LeadingCommentOffset.end(callersOrigin);
@@ -3451,6 +3595,12 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             final ProcedureFrame enclosingBody = proceduralExecutor.enterProcedureFrame();
             boolean textFailed = true;
             scriptRuns = true;
+            // A block the text holds numbers the binds of its user's calls from the text's start (see
+            // UserCallBinds).
+            final boolean numbersItsBinds = ctx.FROM() == null && dynamicStatements.size() == 1;
+            if (numbersItsBinds) {
+                UserCallBinds.textRuns(sqlScriptCtx, runByABlock);
+            }
             try {
                 for (final FrostlakeParser.StatementContext stmtCtx : dynamicStatements) {
                     // Only the last statement's conditional branch may reach the status sentence.
@@ -3524,6 +3674,9 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
             } catch (final RuntimeException failed) {
                 throw runByABlock ? failureOfABody(failed) : failed;
             } finally {
+                if (numbersItsBinds) {
+                    UserCallBinds.textRan(sqlScriptCtx);
+                }
                 proceduralExecutor.exitProcedureFrame(enclosingBody, textFailed);
                 proceduralExecutor.exitScope();
                 proceduralExecutor.exitDynamicFrame(enclosingFrame);
@@ -3999,6 +4152,82 @@ public class SQLCommandVisitor extends FrostlakeBaseVisitor<Object> {
      * @param declared the declared type
      * @return the value
      */
+    /**
+     * Give a variable the value of a CALL of a procedure the CALL defines for itself (see AnonymousCallValues). A
+     * refusal is an expression's, placed at the value's opening parenthesis; a CALL naming another routine, given to
+     * a variable declared without a type, is refused as the block compiles, with no place.
+     *
+     * @param varName   the variable
+     * @param declared  the type the variable is declared or held as, or null
+     * @param declares  whether a LET or a DECLARE section declares the variable
+     * @param byLet     whether a LET declares it
+     * @param open      the value's opening parenthesis
+     * @param defined   the procedure the call defines
+     * @param called    the name the call calls
+     * @param arguments the call's arguments, or null
+     * @param close     the call's closing parenthesis
+     */
+    private void assignAnonymousCall(final String varName, final DataType declared, final boolean declares,
+                                     final boolean byLet, final Token open,
+                                     final FrostlakeParser.AnonymousProcedureContext defined,
+                                     final FrostlakeParser.QualifiedNameContext called,
+                                     final FrostlakeParser.CallArgumentsContext arguments, final Token close) {
+        final int line = open.getLine();
+        final int position = open.getCharPositionInLine();
+        final String unknown = AnonymousCallValues.unknownRoutine(defined, called);
+        if (unknown != null) {
+            if (!declares || declared != null) {
+                proceduralExecutor.recordExpressionFailure(line, position);
+            }
+            throw new RuntimeException(unknown);
+        }
+        final List<ResultSet> results;
+        try {
+            results = proceduralExecutor.issueCallValue(AnonymousCallValues.callText(defined, close));
+        } catch (final RuntimeException failed) {
+            proceduralExecutor.recordExpressionFailure(line, position);
+            throw failed;
+        }
+        final Object answer = ProceduralExecutor.procedureReturnValue(results);
+        final String wrapper = AnonymousCallValues.wrapper(answer, ProceduralExecutor.procedureAnswerType(results));
+        if (AnonymousCallValues.isObject(declared)) {
+            proceduralExecutor.recordExpressionFailure(line, position);
+            throw new RuntimeException(AnonymousCallValues.objectRefusal(called, arguments));
+        }
+        final boolean asText = AnonymousCallValues.takesText(declared, wrapper);
+        if (declares) {
+            final DeclareStatement stmt = new DeclareStatement(varName, asText ? null : wrapper,
+                declared != null ? declared : StringType.VARCHAR);
+            stmt.setInitializerAt(line, position);
+            proceduralExecutor.executeStatement(byLet ? stmt.writtenByLet() : stmt);
+        }
+        if (asText) {
+            proceduralExecutor.assignCallAnswer(varName, answer, ProceduralExecutor.procedureAnswerType(results));
+        } else if (!declares) {
+            final LiteralExpression assigned = new LiteralExpression(wrapper);
+            assigned.setSourcePosition(line, position);
+            proceduralExecutor.executeStatement(new SetStatement(varName, assigned));
+        }
+        logger.trace("Assigned variable {} from a call of its own procedure", varName);
+    }
+
+    /**
+     * The CALL of a procedure the CALL defines for itself that a value is written as, whole and in parentheses, or
+     * null.
+     *
+     * @param value the value, or null
+     * @return the CALL, or null
+     */
+    private static FrostlakeParser.AnonymousCallExprContext wholeAnonymousCall(
+            final FrostlakeParser.BooleanExprContext value) {
+        if (value instanceof FrostlakeParser.ValueExprContext
+                && ((FrostlakeParser.ValueExprContext) value).expression()
+                    instanceof FrostlakeParser.AnonymousCallExprContext) {
+            return (FrostlakeParser.AnonymousCallExprContext) ((FrostlakeParser.ValueExprContext) value).expression();
+        }
+        return null;
+    }
+
     private Object declaredInitialValue(final FrostlakeParser.BooleanExprContext ctx, final DataType declared) {
         if (NumericType.isDecfloat(declared) && ctx instanceof FrostlakeParser.ValueExprContext) {
             FrostlakeParser.ExpressionContext value = ((FrostlakeParser.ValueExprContext) ctx).expression();

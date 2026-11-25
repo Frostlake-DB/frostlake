@@ -36,8 +36,9 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * CREATE, ALTER and DROP of failover groups, their rows in SHOW FAILOVER GROUPS, and the databases and shares a
- * group lists. A group keeps what was declared - its object types, the databases, shares and integration types it
+ * CREATE, ALTER and DROP of failover and replication groups, their rows in SHOW FAILOVER GROUPS and SHOW REPLICATION
+ * GROUPS, and the databases and shares a group lists. The two kinds share the account's names, and each statement
+ * acts on a group of the kind it names. A group keeps what was declared - its object types, the databases, shares and integration types it
  * allows, the accounts it replicates to and its schedule; nothing is replicated, refreshed or failed over.
  */
 public final class FailoverGroupCommandHandler {
@@ -58,12 +59,13 @@ public final class FailoverGroupCommandHandler {
         return catalog.getFailoverGroups();
     }
 
-    /** Runs a CREATE or an ALTER of a failover group and answers its status. */
+    /** Runs a CREATE or an ALTER of a failover or a replication group and answers its status. */
     public ResultSet handle(final FrostlakeParser.AccountObjectStatementContext ctx) {
         final String name = SqlIdentifiers.canonical(ctx.identifier());
+        final String groupType = ctx.failoverWord.getText().toUpperCase(Locale.ROOT);
         final FailoverGroup standing = registry().find(name);
         if (ctx.ALTER() != null) {
-            if (standing == null) {
+            if (standing == null || !standing.getGroupType().equals(groupType)) {
                 if (ctx.if_exists() != null) {
                     return StatusResults.of(StatusResults.EXECUTED);
                 }
@@ -79,7 +81,7 @@ public final class FailoverGroupCommandHandler {
             throw new RuntimeException(SqlCompilationError.of("Object '" + SqlIdentifiers.spellCanonical(name)
                 + "' already exists."));
         }
-        final FailoverGroup group = new FailoverGroup(name);
+        final FailoverGroup group = new FailoverGroup(name, groupType);
         group.setOwner(catalog.currentRoleForOwner());
         if (ctx.qualifiedName() != null) {
             group.setPrimary(QualifiedName.join(ParseTreeText.qualifiedNameParts(ctx.qualifiedName())));
@@ -93,15 +95,21 @@ public final class FailoverGroupCommandHandler {
             }
         }
         registry().put(group);
-        return StatusResults.created("Failover group", name);
+        return StatusResults.created(group.isFailover() ? "Failover group" : "Replication group", name);
     }
 
     /**
-     * Drops the group of that name when there is one.
+     * Drops the group of that name when there is one of the kind the statement names.
      *
+     * @param name     the group's canonical name
+     * @param failover whether the statement names a failover group, rather than a replication group
      * @return whether one was dropped
      */
-    boolean drop(final String name) {
+    boolean drop(final String name, final boolean failover) {
+        final FailoverGroup standing = registry().find(name);
+        if (standing == null || standing.isFailover() != failover) {
+            return false;
+        }
         return registry().remove(name) != null;
     }
 
@@ -129,14 +137,14 @@ public final class FailoverGroupCommandHandler {
                 } else if ("OPTIMIZED_REFRESH".equals(key)) {
                     group.setOptimizedRefresh(false);
                 } else {
-                    throw invalidProperty(key);
+                    throw invalidProperty(group, key);
                 }
             }
         } else if (action.ADD() != null || action.REMOVE() != null) {
             final String key = ObjectProperties.key(action.optionKey(0));
             final List<String> list = list(group, key);
             if (list == null || list == group.getObjectTypes()) {
-                throw invalidProperty(key);
+                throw invalidProperty(group, key);
             }
             for (final FrostlakeParser.QualifiedNameContext written : action.qualifiedName()) {
                 final String value = QualifiedName.join(ParseTreeText.qualifiedNameParts(written));
@@ -178,7 +186,7 @@ public final class FailoverGroupCommandHandler {
                     && property.failoverGroupValue(0).booleanValue() != null) {
                 group.setOptimizedRefresh(property.failoverGroupValue(0).booleanValue().TRUE() != null);
             } else if (!"ALLOWED_EXTERNAL_VOLUMES".equals(key)) {
-                throw invalidProperty(key);
+                throw invalidProperty(group, key);
             }
         }
     }
@@ -218,8 +226,9 @@ public final class FailoverGroupCommandHandler {
         return words.toString();
     }
 
-    private static RuntimeException invalidProperty(final String key) {
-        return new RuntimeException(SqlCompilationError.of("invalid property '" + key + "' for 'FAILOVER_GROUP'"));
+    private static RuntimeException invalidProperty(final FailoverGroup group, final String key) {
+        return new RuntimeException(SqlCompilationError.of("invalid property '" + key + "' for '"
+            + group.getGroupType() + "_GROUP'"));
     }
 
     private static RuntimeException missing(final String name) {
@@ -227,17 +236,23 @@ public final class FailoverGroupCommandHandler {
     }
 
     /**
-     * The rows of SHOW FAILOVER GROUPS, by name: each a FAILOVER group of this account, primary unless it was
-     * declared a replica, never refreshed.
+     * The rows of SHOW FAILOVER GROUPS or SHOW REPLICATION GROUPS, by name: each a group of this account, of its
+     * kind, primary unless it was declared a replica, never refreshed. The failover groups list only failover
+     * groups, the replication groups both kinds.
+     *
+     * @param failoverOnly whether the listing is of the failover groups alone
      */
-    List<Row> rows() {
+    List<Row> rows(final boolean failoverOnly) {
         final List<Row> rows = new ArrayList<>();
         final String account = identity.getOrganization() + "." + identity.getAccountName();
         for (final FailoverGroup group : registry().all()) {
+            if (failoverOnly && !group.isFailover()) {
+                continue;
+            }
             final boolean primary = group.getPrimary() == null;
             rows.add(new Row(Arrays.asList((Object) identity.getRegion(),
                 ShowResultHelpers.createdOn(group.getCreatedTime()), identity.getAccountName(), group.getName(),
-                "FAILOVER", ShowResultHelpers.text(group.getComment()), primary ? "true" : "false",
+                group.getGroupType(), ShowResultHelpers.text(group.getComment()), primary ? "true" : "false",
                 primary ? account + "." + group.getName() : group.getPrimary(),
                 String.join(", ", group.getObjectTypes()), String.join(", ", group.getAllowedIntegrationTypes()),
                 String.join(", ", group.getAllowedAccounts()), identity.getOrganization(),

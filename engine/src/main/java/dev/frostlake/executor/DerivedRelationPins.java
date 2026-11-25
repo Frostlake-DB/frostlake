@@ -17,14 +17,17 @@
 package dev.frostlake.executor;
 
 import dev.frostlake.metastore.model.Table;
+import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.types.DecimalText;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -47,6 +50,18 @@ import java.util.Set;
  * </ul>
  *
  * <p>A call the account does not fold while it judges a bound, {@code LENGTH('ab')}, leaves the column varying.
+ *
+ * <p>Read for the outer names of a MERGE's correlated subqueries (see {@link #forOuterNames}) the account pins more:
+ * a NULL is one value, so {@code SELECT NULL UNION ALL SELECT NULL} is pinned where {@code NULL UNION ALL 2} varies; a
+ * call it does not fold is pinned to a value it does not know, {@code SQRT(4)} alone but not beside a 2 in a UNION;
+ * a FROM-less select keeps its items pinned under a WHERE; an EXCEPT, MINUS or INTERSECT keeps its first branch's
+ * value; a UNION BY NAME pairs its branches by name; GROUP BY ALL over aggregates alone is one row, and so is an
+ * aggregate over a table whose WHERE the statistics show holding on every row; a constant item is pinned whatever
+ * its FROM and grouping; a view is read
+ * as its body; and a join reads
+ * each item it does not make NULL as that item, {@code a.n} of {@code g1 a LEFT JOIN g2 b} being pinned where
+ * {@code b.n} of {@code g2 a LEFT JOIN g1 b} is not. RANDOM, the SEQ functions and UUID_STRING vary in either
+ * reading.
  */
 final class DerivedRelationPins {
 
@@ -59,19 +74,70 @@ final class DerivedRelationPins {
     /** The answer for a pinned column whose one value is not worked out here. */
     private static final Object UNKNOWN = new Object();
 
+    /** The answer for a column pinned to NULL, read for outer names alone. */
+    private static final Object NULL_VALUE = new Object();
+
     /** The aggregates whose answer over a whole table the statistics hold. */
     private static final Set<String> ANSWERED = Set.of("MAX", "MIN", "COUNT");
 
     private final QueryExecutor executor;
     private final StoredColumnValues values;
+    /** Whether the columns are read as a correlated subquery's outer names are, not as a bound. */
+    private final boolean outerNames;
 
     /**
      * @param executor the executor whose catalog and storage the relations are read from
      * @param values   the stored columns' summaries
      */
     DerivedRelationPins(final QueryExecutor executor, final StoredColumnValues values) {
+        this(executor, values, false);
+    }
+
+    private DerivedRelationPins(final QueryExecutor executor, final StoredColumnValues values,
+                                final boolean outerNames) {
         this.executor = executor;
         this.values = values;
+        this.outerNames = outerNames;
+    }
+
+    /**
+     * The pins a correlated subquery's outer names read, as the class comment lists them.
+     *
+     * @param executor the executor whose catalog and storage the relations are read from
+     * @return the reading
+     */
+    static DerivedRelationPins forOuterNames(final QueryExecutor executor) {
+        return new DerivedRelationPins(executor, new StoredColumnValues(executor), true);
+    }
+
+    /**
+     * Whether a query's column, by its name, holds one value on every row.
+     *
+     * @param query  the query
+     * @param column the column's name
+     * @return true where the statistics pin it
+     */
+    boolean pinsColumn(final FrostlakeParser.SelectStatementContext query, final String column) {
+        return queryValue(query, column, 0) != VARYING;
+    }
+
+    /**
+     * Whether a column of a query whose columns a list renames holds one value on every row. The name is read as the
+     * query's own column of that name where it has one, and as the column at the place the list gives it otherwise:
+     * over {@code (SELECT 2 sid, n o FROM g) s (o, sid)}, {@code s.sid} reads the 2 (live-verified).
+     *
+     * @param query  the query
+     * @param column the column's name as the list gives it
+     * @param index  the column's place in the list, from 0
+     * @return true where the statistics pin it
+     */
+    boolean pinsRenamedColumn(final FrostlakeParser.SelectStatementContext query, final String column,
+                              final int index) {
+        final FrostlakeParser.SelectClauseContext first = query.selectOperand(0).selectClause();
+        if (first != null && labelIndex(first, column) >= 0) {
+            return pinsColumn(query, column);
+        }
+        return queryValueAt(query, index, 0) != VARYING;
     }
 
     /**
@@ -170,6 +236,11 @@ final class DerivedRelationPins {
         if (cte != null) {
             return cteValue(cte, column, depth + 1);
         }
+        final FrostlakeParser.SelectStatementContext view = outerNames
+            ? viewBody(ParseTreeText.getQualifiedName(source.tableQualifiedName())) : null;
+        if (view != null) {
+            return queryValue(view, column, depth + 1);
+        }
         final Table table = catalogTable(ParseTreeText.getQualifiedName(source.tableQualifiedName()));
         if (table == null || !table.hasColumn(column)) {
             return VARYING;
@@ -179,7 +250,29 @@ final class DerivedRelationPins {
             final Object one = values.oneValueOf(table, declared);
             return one == null ? UNKNOWN : one;
         }
-        return values.holdsOnlyNulls(table, declared) ? UNKNOWN : VARYING;
+        if (values.holdsOnlyNulls(table, declared)) {
+            return outerNames ? NULL_VALUE : UNKNOWN;
+        }
+        return VARYING;
+    }
+
+    /**
+     * The body of the view a name reads, where its columns are its body's own.
+     *
+     * @param written the name as written
+     * @return the body, or null where the name reads no such view
+     */
+    FrostlakeParser.SelectStatementContext viewBody(final String written) {
+        try {
+            final View view = executor.getCatalog().resolveView(written);
+            if (view == null || view.getDefinition() == null
+                    || view.getColumnNames() != null && !view.getColumnNames().isEmpty()) {
+                return null;
+            }
+            return executor.subqueryStatement(view.getDefinition());
+        } catch (final RuntimeException notAView) {
+            return null;
+        }
     }
 
     private Table catalogTable(final String written) {
@@ -211,6 +304,9 @@ final class DerivedRelationPins {
         if (first.selectStatement() != null && query.selectOperand().size() == 1) {
             return queryValue(first.selectStatement(), column, depth + 1);
         }
+        if (outerNames && byName(query)) {
+            return byNameValue(query, column, depth);
+        }
         final FrostlakeParser.SelectClauseContext select = first.selectClause();
         if (select == null) {
             return VARYING;
@@ -233,10 +329,69 @@ final class DerivedRelationPins {
         return VARYING;
     }
 
+    /** Whether every set operator of a query is a UNION BY NAME. */
+    private static boolean byName(final FrostlakeParser.SelectStatementContext query) {
+        if (query.setOperator().isEmpty()) {
+            return false;
+        }
+        for (final FrostlakeParser.SetOperatorContext operator : query.setOperator()) {
+            if (operator.UNION() == null || operator.BY() == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A UNION BY NAME's column: one value where every branch's column of that name holds the same one. */
+    private Object byNameValue(final FrostlakeParser.SelectStatementContext query, final String column,
+                               final int depth) {
+        Object common = VARYING;
+        boolean first = true;
+        for (final FrostlakeParser.SelectOperandContext operand : query.selectOperand()) {
+            final Object value;
+            if (operand.selectStatement() != null) {
+                value = queryValue(operand.selectStatement(), column, depth + 1);
+            } else if (operand.selectClause() == null) {
+                return VARYING;
+            } else {
+                final int index = labelIndex(operand.selectClause(), column);
+                value = index < 0 ? VARYING : operandValueAt(operand, index, depth + 1);
+            }
+            if (value == VARYING || value == UNKNOWN || !first && !same(common, value)) {
+                return VARYING;
+            }
+            common = value;
+            first = false;
+        }
+        return common;
+    }
+
+    /** The place of a select's item of a name, or -1 where it has none or a star stands among its items. */
+    private static int labelIndex(final FrostlakeParser.SelectClauseContext select, final String column) {
+        final List<FrostlakeParser.SelectItemContext> items = select.selectList().selectItem();
+        int found = -1;
+        for (int i = 0; i < items.size(); i++) {
+            if (!(items.get(i) instanceof FrostlakeParser.ExprItemContext)) {
+                return -1;
+            }
+            if (column.equalsIgnoreCase(labelOf((FrostlakeParser.ExprItemContext) items.get(i)))) {
+                if (found >= 0) {
+                    return -1;
+                }
+                found = i;
+            }
+        }
+        return found;
+    }
+
     /** A query's column by its place: one value where every branch of a UNION holds the same one. */
     private Object queryValueAt(final FrostlakeParser.SelectStatementContext query, final int index, final int depth) {
         final List<FrostlakeParser.SelectOperandContext> operands = query.selectOperand();
         if (operands.size() == 1) {
+            return operandValueAt(operands.get(0), index, depth);
+        }
+        if (outerNames && subtractsOnly(query)) {
+            // Every row of an EXCEPT, a MINUS or an INTERSECT is a row of its first branch.
             return operandValueAt(operands.get(0), index, depth);
         }
         for (final FrostlakeParser.SetOperatorContext operator : query.setOperator()) {
@@ -253,6 +408,16 @@ final class DerivedRelationPins {
             common = value;
         }
         return common;
+    }
+
+    /** Whether every set operator of a query is an EXCEPT, a MINUS or an INTERSECT. */
+    private static boolean subtractsOnly(final FrostlakeParser.SelectStatementContext query) {
+        for (final FrostlakeParser.SetOperatorContext operator : query.setOperator()) {
+            if (operator.UNION() != null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Object operandValueAt(final FrostlakeParser.SelectOperandContext operand, final int index,
@@ -278,20 +443,20 @@ final class DerivedRelationPins {
         }
         final ParserRuleContext expression = ((FrostlakeParser.ExprItemContext) items.get(index)).booleanExpr();
         if (select.tableExpression() == null) {
-            return ParseTreeText.getWhereClause(select) != null || select.groupByClause() != null ? VARYING
-                : constantValue(expression);
+            return !outerNames && ParseTreeText.getWhereClause(select) != null || select.groupByClause() != null
+                ? VARYING : constantValue(expression);
         }
         final FrostlakeParser.TableReferenceContext source = singleSource(select);
         if (source == null) {
-            return VARYING;
+            return outerNames && !holdsAggregate(select.selectList()) && select.groupByClause() == null
+                ? joinedValue(expression, select.tableExpression(), depth) : VARYING;
         }
-        if (select.groupByClause() != null) {
+        if (select.groupByClause() != null && !(outerNames && aggregatesAlone(select))) {
             return groupedValue(select, expression, source, depth);
         }
         if (holdsAggregate(select.selectList())) {
             // One row the statistics answer: an aggregate over the whole table, no WHERE beside it.
-            return ParseTreeText.getWhereClause(select) == null && answeredAggregates(expression, source)
-                ? UNKNOWN : VARYING;
+            return keepsEveryRow(select, source) && answeredAggregates(expression, source) ? UNKNOWN : VARYING;
         }
         return projectedValue(expression, source, depth);
     }
@@ -335,23 +500,56 @@ final class DerivedRelationPins {
 
     /** A FROM-less item: the value it folds to before any row is read, or VARYING; a NULL is no pinned value. */
     private Object constantValue(final ParserRuleContext expression) {
-        if (readsAColumn(expression) || holdsQuery(expression) || !GeneratorBounds.foldsItsCalls(expression)) {
+        if (readsAColumn(expression) || holdsQuery(expression) || !folds(expression)) {
             return VARYING;
+        }
+        if (outerNames && !GeneratorBounds.foldsItsCalls(expression)) {
+            return UNKNOWN;
         }
         try {
             final ExpressionEvaluator evaluator = new ExpressionEvaluator(null, executor.getFunctionRegistry(),
                 executor.getCatalog(), executor);
             final Object value = evaluator.evaluate(ExpressionEvaluator.parse(
                 ParseTreeText.getOriginalText(expression)), null);
-            return value == null ? VARYING : value;
+            if (value == null) {
+                return outerNames ? NULL_VALUE : VARYING;
+            }
+            return value;
         } catch (final RuntimeException unfoldable) {
             return VARYING;
+        }
+    }
+
+    /**
+     * Whether a select's WHERE keeps every row of its table: it has none, or, read for outer names, the statistics
+     * show it holding on every row ({@code WHERE n >= 1} over n holding 1 and 2).
+     */
+    private boolean keepsEveryRow(final FrostlakeParser.SelectClauseContext select,
+                                  final FrostlakeParser.TableReferenceContext source) {
+        final FrostlakeParser.WhereClauseContext where = ParseTreeText.getWhereClause(select);
+        if (where == null) {
+            return true;
+        }
+        if (!outerNames || !wholeTable(source) || holdsQuery(where)) {
+            return false;
+        }
+        final Table table = catalogTable(ParseTreeText.getQualifiedName(source.tableSource().tableQualifiedName()));
+        final Map<String, Table> scope = new HashMap<>();
+        scope.put(GeneratorBounds.qualifierOf(source), table);
+        try {
+            return Boolean.TRUE.equals(new CorrelatedFilterFold(executor, scope)
+                .settles(ParseTreeText.getOriginalText(where.booleanExpr())));
+        } catch (final RuntimeException unsettled) {
+            return false;
         }
     }
 
     /** A grouped select's item: a grouping column keeps the value its source pins it to. */
     private Object groupedValue(final FrostlakeParser.SelectClauseContext select, final ParserRuleContext expression,
                                 final FrostlakeParser.TableReferenceContext source, final int depth) {
+        if (outerNames && !readsAColumn(expression) && !holdsAggregate(expression)) {
+            return constantValue(expression);
+        }
         final String[] parts = columnParts(expression);
         if (parts == null || !readsSource(parts, source)) {
             return VARYING;
@@ -369,11 +567,14 @@ final class DerivedRelationPins {
     /** A projected item: pinned where every column it reads is; its value where it is one such column. */
     private Object projectedValue(final ParserRuleContext expression,
                                   final FrostlakeParser.TableReferenceContext source, final int depth) {
-        if (holdsQuery(expression) || !GeneratorBounds.foldsItsCalls(expression) || callsWindow(expression)) {
+        if (holdsQuery(expression) || !folds(expression) || callsWindow(expression)) {
             return VARYING;
         }
         final List<FrostlakeParser.QualifiedNameExprContext> columns = new ArrayList<>();
         collectColumns(expression, columns);
+        if (outerNames && columns.isEmpty()) {
+            return constantValue(expression);
+        }
         Object only = UNKNOWN;
         for (final FrostlakeParser.QualifiedNameExprContext reference : columns) {
             final String[] parts = ParseTreeText.qualifiedNameParts(reference.qualifiedName());
@@ -416,7 +617,7 @@ final class DerivedRelationPins {
                 final String[] parts = columnParts(call.functionArgList().functionArg(0).booleanExpr());
                 return parts != null && readsSource(parts, source) && wholeTable(source);
             }
-            if (!GeneratorBounds.foldsItsCalls(call)) {
+            if (!folds(call)) {
                 return false;
             }
         }
@@ -426,6 +627,155 @@ final class DerivedRelationPins {
             }
         }
         return true;
+    }
+
+    /** Whether an expression's calls leave it a constant: per reading, see the class comment. */
+    private boolean folds(final ParseTree node) {
+        return outerNames ? !GeneratorBounds.callsPerRow(node) : GeneratorBounds.foldsItsCalls(node);
+    }
+
+    /** Whether a select groups by ALL and every item holds an aggregate: one group, as no GROUP BY makes. */
+    private boolean aggregatesAlone(final FrostlakeParser.SelectClauseContext select) {
+        if (select.groupByClause().ALL() == null) {
+            return false;
+        }
+        for (final FrostlakeParser.SelectItemContext item : select.selectList().selectItem()) {
+            if (!holdsAggregate(item)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A projected item over a FROM of several items: pinned where every column it reads is a pinned column of an item
+     * the joins do not make NULL; its value where it is one such column.
+     */
+    private Object joinedValue(final ParserRuleContext expression,
+                               final FrostlakeParser.TableExpressionContext from, final int depth) {
+        if (holdsQuery(expression) || !folds(expression) || callsWindow(expression)) {
+            return VARYING;
+        }
+        final List<FrostlakeParser.TableReferenceContext> items = fromItems(from);
+        final List<FrostlakeParser.QualifiedNameExprContext> columns = new ArrayList<>();
+        collectColumns(expression, columns);
+        if (outerNames && columns.isEmpty()) {
+            return constantValue(expression);
+        }
+        Object only = UNKNOWN;
+        for (final FrostlakeParser.QualifiedNameExprContext reference : columns) {
+            final String[] parts = ParseTreeText.qualifiedNameParts(reference.qualifiedName());
+            final FrostlakeParser.TableReferenceContext item = itemReading(parts, items);
+            if (item == null || nullExtended(from, item)) {
+                return VARYING;
+            }
+            final Object value = sourceValue(item, parts[parts.length - 1], depth + 1);
+            if (value == VARYING) {
+                return VARYING;
+            }
+            only = value;
+        }
+        return columns.size() == 1 && columnParts(expression) != null ? only : UNKNOWN;
+    }
+
+    /** The FROM item a column reads: the one its qualifier names, else the one item known to carry it, or null. */
+    private FrostlakeParser.TableReferenceContext itemReading(final String[] parts,
+                                                              final List<FrostlakeParser.TableReferenceContext> items) {
+        if (parts.length > 2) {
+            return null;
+        }
+        FrostlakeParser.TableReferenceContext found = null;
+        for (final FrostlakeParser.TableReferenceContext item : items) {
+            final boolean reads;
+            if (parts.length == 2) {
+                reads = parts[0].toUpperCase(Locale.ROOT).equals(GeneratorBounds.qualifierOf(item));
+            } else {
+                final Boolean carries = carries(item, parts[0]);
+                if (carries == null) {
+                    return null;
+                }
+                reads = carries.booleanValue();
+            }
+            if (reads) {
+                if (found != null) {
+                    return null;
+                }
+                found = item;
+            }
+        }
+        return found;
+    }
+
+    /** Whether a FROM item carries a column of the name; null where this cannot tell. */
+    private Boolean carries(final FrostlakeParser.TableReferenceContext item, final String column) {
+        final FrostlakeParser.TableSourceContext source = item.tableSource();
+        if (source == null || item.identifierList() != null || item.pivotClause() != null
+                || item.unpivotClause() != null || item.matchRecognizeClause() != null) {
+            return null;
+        }
+        FrostlakeParser.SelectStatementContext body = source.selectStatement();
+        if (body == null && source.tableQualifiedName() != null) {
+            final String[] parts = ParseTreeText.qualifiedNameParts(source.tableQualifiedName());
+            final FrostlakeParser.CteDefinitionContext cte = parts.length == 1 ? cteNamed(item, parts[0]) : null;
+            if (cte == null) {
+                final Table table = catalogTable(ParseTreeText.getQualifiedName(source.tableQualifiedName()));
+                return table == null ? null : Boolean.valueOf(table.hasColumn(column));
+            }
+            if (cte.columnListOptional() != null) {
+                for (final FrostlakeParser.NamePartContext name : cte.columnListOptional().namePart()) {
+                    if (column.equalsIgnoreCase(ParseTreeText.namePartText(name))) {
+                        return Boolean.TRUE;
+                    }
+                }
+                return Boolean.FALSE;
+            }
+            body = cte.selectStatement();
+        }
+        if (body == null || body.selectOperand(0).selectClause() == null) {
+            return null;
+        }
+        final List<FrostlakeParser.SelectItemContext> items = body.selectOperand(0).selectClause().selectList()
+            .selectItem();
+        for (final FrostlakeParser.SelectItemContext selectItem : items) {
+            if (!(selectItem instanceof FrostlakeParser.ExprItemContext)) {
+                return null;
+            }
+            if (column.equalsIgnoreCase(labelOf((FrostlakeParser.ExprItemContext) selectItem))) {
+                return Boolean.TRUE;
+            }
+        }
+        return Boolean.FALSE;
+    }
+
+    /**
+     * Whether a join of the FROM may make an item's columns NULL: the right of a LEFT or an ASOF join, the left of a
+     * RIGHT join - every item before it - and either side of a FULL join.
+     */
+    private static boolean nullExtended(final FrostlakeParser.TableExpressionContext from,
+                                        final FrostlakeParser.TableReferenceContext item) {
+        boolean seen = false;
+        for (int i = 0; i < from.getChildCount(); i++) {
+            final ParseTree child = from.getChild(i);
+            if (child == item) {
+                seen = true;
+                continue;
+            }
+            if (!(child instanceof FrostlakeParser.JoinClauseContext)) {
+                continue;
+            }
+            final FrostlakeParser.JoinClauseContext join = (FrostlakeParser.JoinClauseContext) child;
+            final FrostlakeParser.JoinTypeContext type = join.joinType();
+            final boolean full = type != null && type.FULL() != null;
+            if (join.tableReference() == item) {
+                if (full || join.ASOF() != null || type != null && type.LEFT() != null) {
+                    return true;
+                }
+                seen = true;
+            } else if (seen && (full || type != null && type.RIGHT() != null)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether a FROM item is a catalog table read whole, whose statistics answer an aggregate over it. */

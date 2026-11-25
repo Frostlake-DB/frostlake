@@ -18,6 +18,7 @@ package dev.frostlake.functions.aggregate;
 
 import dev.frostlake.executor.ValueComparisons;
 import dev.frostlake.functions.AggregateFunction;
+import dev.frostlake.values.FloatOriginNode;
 
 /** Accumulator for {@link Min}. */
 public class MinAccumulator implements AggregateFunction.Accumulator {
@@ -34,7 +35,8 @@ public class MinAccumulator implements AggregateFunction.Accumulator {
     }
 
     @Override
-    public Object getResult() { return min; }
+    /** The value kept; a folded FLOAT in a VARIANT leaves the aggregate as a computed double (live-verified). */
+    public Object getResult() { return FloatOriginNode.withoutOrigin(min); }
 
     @Override
     public void reset() { min = null; }

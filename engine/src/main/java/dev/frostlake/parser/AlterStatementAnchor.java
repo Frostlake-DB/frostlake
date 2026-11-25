@@ -58,7 +58,13 @@ import java.util.List;
  *   ALTER USER SET QUERY_TAG = 5 x       'SET' at 11          written without a name, the user's SET names itself
  *   ALTER ACCOUNT SET QUERY_TAG = 5 x    'QUERY_TAG' at 18    the account's SET names the first token after it:
  *   ALTER ACCOUNT SET , QUERY_TAG = 5    ',' at 18            a name, a comma, or the end of input
+ *   ALTER EVENT TABLE e SET COMMENT =    'TABLE' at 12        any fault in an event table's statement names its
+ *                                                            TABLE alone (see AlterEventLines)
  * </pre>
+ *
+ * <p>A whole statement run in after a complete ALTER of these kinds is such a fault too, whatever statement its word
+ * opens: {@code ALTER FILE FORMAT ff SET COMMENT = 'y' SET SKIP_HEADER = 1} names FILE and FORMAT, as {@code … SELECT
+ * 1} and {@code … UNSET COMMENT} do (see {@link #runInRefusal}).
  *
  * <p>Nothing more of the statement is reported after these lines. A sequence's RENAME followed by any word but TO
  * is refused at that word, as this parser already does.
@@ -106,8 +112,41 @@ public final class AlterStatementAnchor {
             alter = runOn.ddlStatement().alterStatement();
             after = true;
         }
-        final TokenStream stream = parser.getInputStream();
+        return linesOf(alter, parser.getInputStream(), reported, after);
+    }
+
+    /**
+     * The tokens live reports where a statement opens straight after a complete ALTER with no semicolon between
+     * them, at the word the statement opens with: for the kinds this class covers, the whole statement run in is
+     * the fault that ALTER's statement is given up at, whatever it is — {@code ALTER FILE FORMAT ff SET COMMENT =
+     * 'y' SET SKIP_HEADER = 1} names FILE and FORMAT, {@code ALTER STREAM st SET COMMENT = 'y' SELECT 1} STREAM and
+     * st, {@code ALTER MASKING POLICY mp SET COMMENT = 'y' SET COMMENT = 'z'} the first COMMENT (live-verified).
+     *
+     * @param statement the complete statement before the missing separator
+     * @param stream the token stream
+     * @param word the first token of the statement run in
+     * @return the tokens, or null when the statement before is no such ALTER
+     */
+    static List<Token> runInRefusal(final FrostlakeParser.StatementContext statement, final TokenStream stream,
+                                    final Token word) {
+        if (statement == null || statement.ddlStatement() == null
+                || statement.ddlStatement().alterStatement() == null) {
+            return null;
+        }
+        return linesOf(statement.ddlStatement().alterStatement(), stream, word, true);
+    }
+
+    /**
+     * The tokens live reports for a fault at {@code reported} in an ALTER statement, or straight after it when
+     * {@code after} holds; null when the fault is no case of this class.
+     */
+    private static List<Token> linesOf(final FrostlakeParser.AlterStatementContext alter, final TokenStream stream,
+                                       final Token reported, final boolean after) {
         final List<Token> lines = new ArrayList<>();
+        if (alter.EVENT() != null && alter.TABLE() != null) {
+            lines.add(alter.TABLE().getSymbol());
+            return lines;
+        }
         final TerminalNode kind = alter.ROLE() != null ? alter.ROLE()
             : alter.STREAM() != null ? alter.STREAM() : alter.FILE();
         if (kind != null) {

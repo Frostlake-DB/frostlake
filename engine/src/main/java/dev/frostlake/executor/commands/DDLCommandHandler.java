@@ -241,7 +241,7 @@ public class DDLCommandHandler implements CommandHandler {
         final boolean ifNotExists = ctx.if_not_exists() != null;
         if (ifNotExists && ctx.or_replace() != null) {
             // Live-verified Snowflake rejection, for every object type.
-            throw new RuntimeException("options IF NOT EXISTS and OR REPLACE are incompatible.");
+            throw new RuntimeException(SqlCompilationError.of("options IF NOT EXISTS and OR REPLACE are incompatible."));
         }
         // A template's query must read a table function, which is judged ahead of the properties (live-verified).
         if (ctx.TABLE() != null && ctx.TEMPLATE() != null) {
@@ -264,6 +264,9 @@ public class DDLCommandHandler implements CommandHandler {
             }
             if (ctx.DBT() != null) {
                 return new DbtProjects(catalog, queryExecutor).create(ctx);
+            }
+            if (ctx.SEMANTIC() != null) {
+                return new SemanticViewCommandHandler(catalog, queryExecutor).create(ctx, ifNotExists, this);
             }
             if (ctx.DATABASE() != null) {
                 return namespaceHandler.handleCreateDatabase(ctx, ifNotExists);
@@ -1529,6 +1532,9 @@ public class DDLCommandHandler implements CommandHandler {
             dt.setWarehouse(warehouse);
         } else if ("COMMENT".equals(name) && setting.STRING_LITERAL() != null) {
             dt.setComment(extractStringLiteral(setting.STRING_LITERAL()));
+        } else if ("COMMENT".equals(name) && setting.parenOptionList() != null) {
+            // A list of properties is taken, the comment holding the parser's word for it.
+            dt.setComment(ListValues.PROPERTY_LIST);
         } else if ("DATA_RETENTION_TIME_IN_DAYS".equals(name) && setting.INTEGER_LITERAL() != null
                 && setting.MINUS() == null) {
             dt.setDataRetentionDays(Integer.parseInt(setting.INTEGER_LITERAL().getText()));
@@ -1650,6 +1656,9 @@ public class DDLCommandHandler implements CommandHandler {
                 sequence.setIncrement(option.MINUS() != null ? -value : value);
             } else if (option.NOORDER() != null) {
                 sequence.setOrder(false);
+            } else if (option.propertyName() != null && option.parenOptionList() != null) {
+                // A list of properties is taken, the comment holding the parser's word for it (live-verified).
+                sequence.setComment(ListValues.PROPERTY_LIST);
             } else if (option.propertyName() != null) {
                 sequence.setComment(option.copyOptionValue() != null ? option.copyOptionValue().getText() : null);
             } else if (option.COMMENT() != null) {

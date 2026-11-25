@@ -30,12 +30,15 @@ public final class ClassNameWords {
      * Words live's lexer keeps as keywords where Frostlake's reads a plain name: the ODBC escape words of
      * {@code {d '…'}}, {@code {t '…'}}, {@code {ts '…'}}, {@code {fn …}} and {@code {oj …}}, object kinds
      * Frostlake has no statements for, and words of statements it has none for: {@code SHOW ALIAS} is refused at
-     * ALIAS, as {@code SHOW SOURCE} and {@code SHOW BRANCH} are at theirs.
+     * ALIAS, as {@code SHOW SOURCE} and {@code SHOW BRANCH} are at theirs, and the words of the user listings
+     * Frostlake reads as plain words in their own rule: {@code SHOW WORKLOAD} and {@code SHOW PAIRS} are refused at
+     * the word.
      */
     private static final String[] KEYWORDS = {
         "D", "T", "TS", "FN", "OJ",
         "ALERT", "DATASET", "EXTERNAL", "FAILOVER", "LISTING", "MODEL", "REPLICATION",
-        "ALIAS", "BRANCH", "SOURCE", "DATASETS", "CLASSES"
+        "ALIAS", "BRANCH", "SOURCE", "DATASETS", "CLASSES",
+        "WORKLOAD", "PROGRAMMATIC", "METHODS", "TOKENS", "PAIRS"
     };
 
     /**

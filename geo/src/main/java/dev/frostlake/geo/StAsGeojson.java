@@ -16,6 +16,7 @@
 
 package dev.frostlake.geo;
 
+import dev.frostlake.executor.GeoOutput;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.types.ObjectType;
 import dev.frostlake.values.GeoValue;
@@ -23,14 +24,17 @@ import dev.frostlake.values.VariantValue;
 
 import java.util.List;
 
-/** ST_ASGEOJSON — the value as its GeoJSON OBJECT. */
+/**
+ * ST_ASGEOJSON — the value as its GeoJSON OBJECT: a GEOGRAPHY's numbers as its input wrote them, a GEOMETRY's each a
+ * DOUBLE (live-verified).
+ */
 public class StAsGeojson extends BuiltInFunction {
     public StAsGeojson() { super("ST_ASGEOJSON", ObjectType.OBJECT); }
 
     @Override
     public Object evaluate(final List<Object> args) {
         final GeoValue geo = GeoShapes.asGeo(args.get(0));
-        return geo == null ? null : VariantValue.ofNode(geo.node());
+        return geo == null ? null : VariantValue.ofNode(GeoOutput.geoJsonNode(geo));
     }
 
     @Override

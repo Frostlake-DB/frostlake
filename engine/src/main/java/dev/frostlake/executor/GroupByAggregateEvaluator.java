@@ -21,7 +21,9 @@ import dev.frostlake.executor.expressions.AstPrinterVisitor;
 import dev.frostlake.executor.expressions.CollatedKey;
 import dev.frostlake.executor.expressions.CollationSpec;
 import dev.frostlake.executor.expressions.ColumnReferenceExpression;
+import dev.frostlake.executor.expressions.ConstantProductFold;
 import dev.frostlake.executor.expressions.Expression;
+import dev.frostlake.executor.expressions.ExpressionEvaluatorVisitor;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.GroupedElementReads;
 import dev.frostlake.executor.expressions.GroupingKeys;
@@ -55,6 +57,8 @@ import dev.frostlake.functions.aggregate.MaxByMinByAccumulator;
 import dev.frostlake.functions.aggregate.MedianAccumulator;
 import dev.frostlake.functions.aggregate.ObjectAggAccumulator;
 import dev.frostlake.functions.aggregate.PairStatisticAccumulator;
+import dev.frostlake.functions.aggregate.PinnedArgument;
+import dev.frostlake.functions.aggregate.PinnedArgumentAccumulator;
 import dev.frostlake.functions.aggregate.RegrAccumulator;
 import dev.frostlake.functions.aggregate.RegrKind;
 import dev.frostlake.metastore.model.Table;
@@ -67,6 +71,7 @@ import dev.frostlake.types.DecimalText;
 import dev.frostlake.types.NumericType;
 import dev.frostlake.types.StringType;
 import dev.frostlake.types.VariantType;
+import dev.frostlake.values.FloatOriginNode;
 import dev.frostlake.values.ValueRange;
 import dev.frostlake.values.VariantJsonNulls;
 import java.util.LinkedHashMap;
@@ -1463,6 +1468,7 @@ final class GroupByAggregateEvaluator {
             } finally {
                 ExpressionSource.end(displacedItem);
             }
+            executor.rejectWindowArgumentTypes(expr, table, aliasToTable, allTables, ctx);
             if (SelectItemAccessors.getItemAlias(item) != null) {
                 earlierOutputNames.add(SelectItemAccessors.getItemAlias(item));
             }
@@ -1699,6 +1705,11 @@ final class GroupByAggregateEvaluator {
         if (lateralAliases != null && !lateralAliases.isEmpty()) {
             final String bare = itemText.trim().toUpperCase(Locale.ROOT);
             if (lateralAliases.containsKey(bare) && (table == null || !table.hasColumn(bare))) {
+                if (valueExpr instanceof FrostlakeParser.QualifiedNameExprContext
+                        && !((FrostlakeParser.QualifiedNameExprContext) valueExpr).qualifiedName().namePart().isEmpty()) {
+                    // A qualified name is no alias: it reads the outer row's binding.
+                    ExpressionEvaluatorVisitor.noteOuterRowRead();
+                }
                 return lateralAliases.get(bare);
             }
         }
@@ -1869,8 +1880,18 @@ final class GroupByAggregateEvaluator {
         offerEarlierItems(ev, lateralAliases);
         final Row groupRow = representative != null ? representative
             : groupRows.isEmpty() ? new Row(new ArrayList<>()) : groupRows.get(0);
-        return itemCell ? heldValue(ev, ParseTreeText.getOriginalText(expr), groupRow)
-            : ev.evaluate(ParseTreeText.getOriginalText(expr), groupRow);
+        if (!itemCell) {
+            return ev.evaluate(ParseTreeText.getOriginalText(expr), groupRow);
+        }
+        // An item is placed where it is written, as the projection path places it: a subquery it holds is refused
+        // at its own place in the statement, (SELECT MAX(v) + (SELECT MAX(o.i) FROM g g2) FROM g) at the inner one.
+        final SourcePosition displacedItem = ExpressionSource.beginNested(
+            new SourcePosition(expr.getStart().getLine(), expr.getStart().getCharPositionInLine()));
+        try {
+            return heldValue(ev, ParseTreeText.getOriginalText(expr), groupRow);
+        } finally {
+            ExpressionSource.end(displacedItem);
+        }
     }
 
     /**
@@ -2250,7 +2271,8 @@ final class GroupByAggregateEvaluator {
             }
             // MIN and MAX compare through the same rule as their accumulators: a group's column can hold a
             // Long beside a BigDecimal (a conditional over two widths, a set operation's arms), and a raw
-            // Comparable would throw a ClassCastException on the pair. -0.0 and 0.0 tie, first seen kept.
+            // Comparable would throw a ClassCastException on the pair. -0.0 and 0.0 tie, first seen kept. A folded
+            // FLOAT in a VARIANT leaves either as a computed double, as from the accumulators.
             case MIN: {
                 Object min = null;
                 for (final Row r : groupRows) {
@@ -2259,7 +2281,7 @@ final class GroupByAggregateEvaluator {
                         min = v;
                     }
                 }
-                return min;
+                return FloatOriginNode.withoutOrigin(min);
             }
             case MAX: {
                 Object max = null;
@@ -2269,7 +2291,7 @@ final class GroupByAggregateEvaluator {
                         max = v;
                     }
                 }
-                return max;
+                return FloatOriginNode.withoutOrigin(max);
             }
             default:
                 throw new IllegalStateException("Unknown aggregate plan kind: " + plan.kind);
@@ -2448,7 +2470,8 @@ final class GroupByAggregateEvaluator {
                 }
                 case "MIN": {
                     // An extreme over a collated argument orders by the collation; values that TIE under
-                    // it are not replaced, so the first one seen is the one reported.
+                    // it are not replaced, so the first one seen is the one reported. A folded FLOAT in a VARIANT
+                    // leaves either extreme as a computed double (live-verified).
                     final CollationSpec minRules = argumentCollation(arg0, table, aliasToTable, allTables);
                     Object min = null;
                     for (final Object v : aggArgValues(funcName, arg0, aggregateInputRows, table, aliasToTable, allTables)) {
@@ -2456,7 +2479,7 @@ final class GroupByAggregateEvaluator {
                             min = v;
                         }
                     }
-                    return min;
+                    return FloatOriginNode.withoutOrigin(min);
                 }
                 case "MAX": {
                     final CollationSpec maxRules = argumentCollation(arg0, table, aliasToTable, allTables);
@@ -2466,7 +2489,7 @@ final class GroupByAggregateEvaluator {
                             max = v;
                         }
                     }
-                    return max;
+                    return FloatOriginNode.withoutOrigin(max);
                 }
                 case "PERCENTILE_CONT":
                 case "PERCENTILE_DISC": {
@@ -2838,6 +2861,27 @@ final class GroupByAggregateEvaluator {
         }
     }
 
+    /**
+     * Whether an aggregated expression is a constant to the planner: one value, never NULL, by its interval (see
+     * {@link ConstantProductFold#pins}).
+     */
+    private boolean isPinnedExpression(final String expressionText, final Table table,
+                                       final Map<String, Table> aliasToTable, final List<Table> allTables) {
+        if (expressionText == null || expressionText.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            final ExpressionEvaluator ranger = new ExpressionEvaluator(table,
+                executor.getFunctionRegistry(), executor.getCatalog(), executor);
+            if (allTables != null && !allTables.isEmpty()) {
+                ranger.setMultiTableContext(aliasToTable, allTables);
+            }
+            return ConstantProductFold.pins(ranger.inferStaticRange(ExpressionEvaluator.parse(expressionText)));
+        } catch (final RuntimeException unknown) {
+            return false;
+        }
+    }
+
     /** Whether an aggregated expression is declared APPROXIMATE — FLOAT, DOUBLE or REAL; see {@link #declaredTypeOf}. */
     private boolean isApproximateExpression(final String expressionText, final Table table,
                                             final Map<String, Table> aliasToTable,
@@ -2917,8 +2961,22 @@ final class GroupByAggregateEvaluator {
                                             final boolean perGroup) {
         final FrostlakeParser.OrderByClauseContext withinGroup = withinGroupOrder;
         final List<Row> aggRows = withinGroup != null
-            ? executor.sortRowsForWindow(groupRows, withinGroup, table) : groupRows;
+            ? executor.sortRowsWithinGroup(groupRows, withinGroup, table, aliasToTable, allTables) : groupRows;
         final AggregateFunction.Accumulator acc = aggFunc.createAccumulator();
+        if (acc instanceof PinnedArgumentAccumulator && args.size() == 1) {
+            final String pinnedText = args.get(0);
+            ((PinnedArgumentAccumulator) acc).setPinnedArgument(new PinnedArgument() {
+                private Boolean pinned;
+
+                @Override
+                public boolean isPinned() {
+                    if (pinned == null) {
+                        pinned = Boolean.valueOf(isPinnedExpression(pinnedText, table, aliasToTable, allTables));
+                    }
+                    return pinned.booleanValue();
+                }
+            });
+        }
         if (acc instanceof ApproximateAwareAccumulator || acc instanceof CoercedNumericArgumentAccumulator
                 || acc instanceof DeclaredArgumentAccumulator || acc instanceof DecfloatAwareAccumulator) {
             // The aggregated expression's DECLARED type, which its values cannot give: a FLOAT column

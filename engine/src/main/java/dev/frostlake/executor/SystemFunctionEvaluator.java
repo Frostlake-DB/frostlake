@@ -205,7 +205,7 @@ public class SystemFunctionEvaluator {
             case "SYSTEM$GENERATE_SCIM_ACCESS_TOKEN":
                 return "{\"token\": \"" + UUID.randomUUID() + "\", \"expires_at\": null}";
             case "SYSTEM$GET_TAG":
-                return TagReferencesFunction.systemGetTag(catalog, args);
+                return TagReferencesFunction.systemGetTag(catalog, args, sight);
             case "SYSTEM$GET_TAG_ALLOWED_VALUES":
                 return TagReferencesFunction.systemGetTagAllowedValues(catalog, args);
             case "SYSTEM$GET_TAG_ON_CURRENT_COLUMN":

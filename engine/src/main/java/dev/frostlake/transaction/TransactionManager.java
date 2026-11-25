@@ -22,10 +22,12 @@ import dev.frostlake.storage.StorageEngine;
 import dev.frostlake.stream.StreamManager;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -47,6 +49,8 @@ public class TransactionManager {
 
     /** How many tables were set aside for the transactions that wrote them (see setAsideIfWritten). */
     private final AtomicLong setAsideCount = new AtomicLong();
+    /** Set-aside storage of purged versions, kept until no open transaction has written it (see discardWhenUnwritten). */
+    private final Set<String> heldSetAside = ConcurrentHashMap.newKeySet();
     private StreamManager streamManager;
     private WalSink walSink;   // durability hook: receives a transaction's statements when it commits
 
@@ -320,6 +324,7 @@ public class TransactionManager {
         for (final Transaction txn : getActiveTransactions()) {
             txn.getWriteSet().retarget(moved);
             txn.retargetTableLocks(moved);
+            txn.retargetLogs(moved);
         }
     }
 
@@ -365,6 +370,39 @@ public class TransactionManager {
             }
         }
         return false;
+    }
+
+    /**
+     * Lets go of a table's storage set aside for the transactions that wrote it, whose dropped version is purged: at
+     * once when no open transaction has written it, else once the last that has ends — its COMMIT still applies its
+     * changes there.
+     *
+     * @param storageName the key the storage was set aside under
+     */
+    public void discardWhenUnwritten(final String storageName) {
+        if (isWrittenByOpenTransaction(storageName)) {
+            heldSetAside.add(storageName);
+        } else {
+            storageEngine.discardRetired(storageName);
+        }
+    }
+
+    /** Lets go of the held set-aside storage no open transaction has written any more (see discardWhenUnwritten). */
+    private void releaseHeldStorage() {
+        if (heldSetAside.isEmpty()) {
+            return;
+        }
+        for (final String held : new ArrayList<>(heldSetAside)) {
+            if (!isWrittenByOpenTransaction(held) && heldSetAside.remove(held)) {
+                storageEngine.discardRetired(held);
+            }
+        }
+    }
+
+    /** Removes an ended transaction from the open ones, and lets go of the storage only it held. */
+    private void ended(final Transaction txn) {
+        activeTransactions.remove(txn.getId());
+        releaseHeldStorage();
     }
 
     /**
@@ -440,7 +478,7 @@ public class TransactionManager {
             named.rollback();
             named.setState(TransactionState.ROLLED_BACK);
         } finally {
-            activeTransactions.remove(named.getId());
+            ended(named);
             if (own) {
                 currentTransaction.remove();
             }
@@ -523,7 +561,7 @@ public class TransactionManager {
                     txn.rollback();
                     txn.setState(TransactionState.ROLLED_BACK);
                 } finally {
-                    activeTransactions.remove(txn.getId());
+                    ended(txn);
                     currentTransaction.remove();
                     resumeOuter(txn);
                 }
@@ -549,7 +587,7 @@ public class TransactionManager {
             }
             throw new RuntimeException("Failed to commit transaction", e);
         } finally {
-            activeTransactions.remove(txn.getId());
+            ended(txn);
             currentTransaction.remove();
             resumeOuter(txn);
         }
@@ -569,7 +607,7 @@ public class TransactionManager {
             txn.rollback();
             txn.setState(TransactionState.ROLLED_BACK);
         } finally {
-            activeTransactions.remove(txn.getId());
+            ended(txn);
             currentTransaction.remove();
             resumeOuter(txn);
         }
@@ -587,7 +625,7 @@ public class TransactionManager {
             left.rollback();
             left.setState(TransactionState.ROLLED_BACK);
         } finally {
-            activeTransactions.remove(left.getId());
+            ended(left);
         }
     }
 
@@ -604,7 +642,7 @@ public class TransactionManager {
             txn.rollback();
             txn.setState(TransactionState.ROLLED_BACK);
         } finally {
-            activeTransactions.remove(txn.getId());
+            ended(txn);
             currentTransaction.remove();
             resumeOuter(txn);
         }

@@ -170,6 +170,19 @@ public class Procedure extends SqlObject implements Routine {
         return new ArrayList<>(packages);
     }
 
+    /**
+     * Every package the procedure names: those PACKAGES names, then those ARTIFACT_REPOSITORY_PACKAGES names. A
+     * Python procedure has its Snowpark package when either list names it (live-verified).
+     */
+    public List<String> getAllPackages() {
+        final List<String> all = new ArrayList<>(packages);
+        final List<String> fromRepository = environment == null ? null : environment.getArtifactRepositoryPackages();
+        if (fromRepository != null) {
+            all.addAll(fromRepository);
+        }
+        return all;
+    }
+
     /** What the routine is given to run with: repository, target path, integrations and secrets. */
     public RoutineEnvironment getEnvironment() { return environment; }
 

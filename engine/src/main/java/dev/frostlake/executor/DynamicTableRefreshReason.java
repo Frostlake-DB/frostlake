@@ -40,6 +40,8 @@ import java.util.Set;
  *
  * <pre>
  *   a LIMIT or FETCH, ahead of what its query holds  Change tracking is not supported on queries with LIMIT.
+ *   a LATERAL join to a subquery, ahead of what the  Change tracking is not supported on queries with joins of type
+ *   SELECT it is in holds, through its FROM          '[LATERAL]'.
  *   EXISTS, a scalar subquery, IN (SELECT …),        Change tracking is not supported on queries with subquery
  *   a quantified comparison                          expressions.
  *   a view whose query reads no relation             Change tracking is not supported on queries with row generators.
@@ -49,17 +51,20 @@ import java.util.Set;
  *                                                    supported on queries with non-deterministic functions. …
  * </pre>
  *
- * A plain projection, a GROUP BY, a join, UNION and UNION ALL, and FLATTEN are followed: the table stays INCREMENTAL.
+ * A plain projection, a GROUP BY, a join, UNION and UNION ALL, and FLATTEN (LATERAL FLATTEN too) are followed: the table stays INCREMENTAL.
  * A construct inside a view names the view it is in, {@code (inside view 'DB.SCHEMA.V')}, and a function the view the
  * query reads it through, {@code the function 'RANDOM' from view 'V'}; the row generators and the complex query name
- * none.
+ * none. A LATERAL join is found anywhere in the SELECT it is in, so it is named ahead of a LIMIT in a subquery or a view
+ * its FROM reads and ahead of what an earlier branch of a UNION does not hold, though not ahead of a LIMIT on the
+ * statement the SELECT is in or what an earlier branch of a UNION holds. A LATERAL join inside a subquery expression
+ * leaves the subquery expression the reason.
  *
  * <p>An INCREMENTAL table takes a complex query and a view's row generator; any other construct refuses its CREATE.
  * A function that answers a new value each call (RANDOM and the other generators, UUID_STRING without arguments,
  * CURRENT_SESSION) is refused first, the innermost first, as an invalid definition: {@code error line L at position
  * P} and {@code Non-deterministic function 'RANDOM' not allowed in definition.}. The rest are refused with the reason
  * above, placed at the function's name, at EXISTS, at a quantifier or at a scalar subquery's SELECT, and at no place
- * ({@code line 0 at position -1}) for a LIMIT and an IN; inside a view the place is counted in the view's own CREATE
+ * ({@code line 0 at position -1}) for a LIMIT, a LATERAL join and an IN; inside a view the place is counted in the view's own CREATE
  * statement.
  */
 public final class DynamicTableRefreshReason {
@@ -67,6 +72,7 @@ public final class DynamicTableRefreshReason {
     private static final String SUBQUERY = "Change tracking is not supported on queries with subquery expressions.";
     private static final String ROW_GENERATORS = "Change tracking is not supported on queries with row generators.";
     private static final String LIMIT = "Change tracking is not supported on queries with LIMIT.";
+    private static final String LATERAL = "Change tracking is not supported on queries with joins of type '[LATERAL]'.";
     private static final String COMPLEX = "This dynamic table contains a complex query. Refresh mode has been"
         + " automatically set to FULL for more predictable performance. To use INCREMENTAL, re-create the dynamic"
         + " table with REFRESH_MODE=INCREMENTAL. See"
@@ -82,6 +88,12 @@ public final class DynamicTableRefreshReason {
     private static final Map<String, String> MOVING = new HashMap<>();
     /** How deep views reading views are followed. */
     private static final int MAX_DEPTH = 32;
+    /** A view's query judged for the first construct its refresh does not follow. */
+    private static final int WALK = 0;
+    /** A view's query judged for a function that answers a new value each call. */
+    private static final int GENERATORS_ONLY = 1;
+    /** A view's query judged for a LATERAL join to a subquery. */
+    private static final int LATERAL_ONLY = 2;
 
     static {
         MOVING.put("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP");
@@ -203,6 +215,9 @@ public final class DynamicTableRefreshReason {
                     || ((FrostlakeParser.SelectStatementContext) node).fetchClause() != null)) {
             return LIMIT;
         }
+        if (node instanceof FrostlakeParser.SelectClauseContext && lateral(node)) {
+            return LATERAL;
+        }
         if (!incremental && node instanceof FrostlakeParser.SelectClauseContext
                 && ((FrostlakeParser.SelectClauseContext) node).groupByClause() == null
                 && UnreadColumnPruning.containsAggregate(((FrostlakeParser.SelectClauseContext) node).selectList(),
@@ -246,7 +261,7 @@ public final class DynamicTableRefreshReason {
         }
         if (node instanceof FrostlakeParser.TableSourceContext
                 && ((FrostlakeParser.TableSourceContext) node).tableQualifiedName() != null) {
-            final String within = viewReason(((FrostlakeParser.TableSourceContext) node).tableQualifiedName(), false);
+            final String within = viewReason(((FrostlakeParser.TableSourceContext) node).tableQualifiedName(), WALK);
             if (within != null) {
                 return within;
             }
@@ -300,9 +315,51 @@ public final class DynamicTableRefreshReason {
         }
         if (node instanceof FrostlakeParser.TableSourceContext
                 && ((FrostlakeParser.TableSourceContext) node).tableQualifiedName() != null) {
-            return viewReason(((FrostlakeParser.TableSourceContext) node).tableQualifiedName(), true) != null;
+            return viewReason(((FrostlakeParser.TableSourceContext) node).tableQualifiedName(), GENERATORS_ONLY)
+                != null;
         }
         return false;
+    }
+
+    /**
+     * Whether a SELECT joins a subquery LATERAL, in its own FROM or in what that reads, views included, kept with the
+     * view it is in when one holds it. A subquery expression is judged as one, whatever it joins.
+     */
+    private boolean lateral(final ParseTree node) {
+        if (node instanceof FrostlakeParser.SelectClauseContext) {
+            final FrostlakeParser.TableExpressionContext from = ((FrostlakeParser.SelectClauseContext) node)
+                .tableExpression();
+            return from != null && lateral(from);
+        }
+        if (node instanceof FrostlakeParser.ExistsExprContext
+                || node instanceof FrostlakeParser.ScalarSubqueryExprContext
+                || node instanceof FrostlakeParser.QuantifiedComparisonExprContext
+                || node instanceof FrostlakeParser.InSubqueryExprContext
+                || node instanceof FrostlakeParser.TupleInSubqueryExprContext) {
+            return false;
+        }
+        if (node instanceof FrostlakeParser.TableReferenceContext
+                && isLateralQuery((FrostlakeParser.TableReferenceContext) node)) {
+            return true;
+        }
+        if (node instanceof FrostlakeParser.TableSourceContext
+                && ((FrostlakeParser.TableSourceContext) node).tableQualifiedName() != null) {
+            return viewReason(((FrostlakeParser.TableSourceContext) node).tableQualifiedName(), LATERAL_ONLY) != null;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (lateral(node.getChild(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a FROM item is a subquery written after LATERAL, in a list or in a join. */
+    private static boolean isLateralQuery(final FrostlakeParser.TableReferenceContext reference) {
+        final boolean lateral = reference.LATERAL() != null || reference.getParent()
+            instanceof FrostlakeParser.JoinClauseContext
+            && ((FrostlakeParser.JoinClauseContext) reference.getParent()).LATERAL() != null;
+        return lateral && reference.tableSource() != null && reference.tableSource().selectStatement() != null;
     }
 
     private static String calledName(final FrostlakeParser.FunctionCallExprContext call) {
@@ -319,7 +376,7 @@ public final class DynamicTableRefreshReason {
      * The reason a view the query reads gives, judged by its own query, or null; what it found is kept, the view
      * named as the one it is read through and, where no view inside it holds it, as the one it is in.
      */
-    private String viewReason(final FrostlakeParser.TableQualifiedNameContext name, final boolean generators) {
+    private String viewReason(final FrostlakeParser.TableQualifiedNameContext name, final int judgement) {
         if (depth >= MAX_DEPTH || cteNames.contains(ParseTreeText.getQualifiedName(name).toUpperCase(Locale.ROOT))) {
             return null;
         }
@@ -334,8 +391,10 @@ public final class DynamicTableRefreshReason {
         final DynamicTableRefreshReason within = new DynamicTableRefreshReason(catalog, functions, viewDatabase,
             viewSchema, depth + 1, incremental, body);
         final String reason;
-        if (generators) {
+        if (judgement == GENERATORS_ONLY) {
             reason = within.generator(body) ? FUNCTION : null;
+        } else if (judgement == LATERAL_ONLY) {
+            reason = within.lateral(body) ? LATERAL : null;
         } else {
             reason = within.walk(body);
         }

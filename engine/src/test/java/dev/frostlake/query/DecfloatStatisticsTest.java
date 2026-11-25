@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The statistics of pairs either side of which is a DECFLOAT, and the moments of one, are DECFLOATs of 38
  * digits: the sums run in DECFLOAT arithmetic held to 38 digits at every step, the slope and CORR divide by the
- * correctly rounded VAR_POP and STDDEV_POPs, SKEW and KURTOSIS round their small-sample coefficients to twelve
+ * VAR_POP and STDDEV_POPs of the account's own formula, SKEW and KURTOSIS round their small-sample coefficients to twelve
  * fractional digits (and KURTOSIS's subtracted term to six), REGR_R2 is 1 where y does not vary, and a series
  * of no spread divides by zero (all live-verified).
  */

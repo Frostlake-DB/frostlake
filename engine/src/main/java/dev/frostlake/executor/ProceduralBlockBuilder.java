@@ -275,7 +275,7 @@ public class ProceduralBlockBuilder {
         if (ctx.letStatement() != null) {
             final FrostlakeParser.LetStatementContext lCtx = ctx.letStatement();
             final String varName = visitor.getText(lCtx.variableName());
-            if (lCtx.booleanExpr() == null && lCtx.dataTypeName() != null) {
+            if (lCtx.booleanExpr() == null && lCtx.anonymousCallValue() == null && lCtx.dataTypeName() != null) {
                 // A type and no value declares the variable NULL of its type (live-verified).
                 return new DeclareStatement(varName, null,
                     visitor.parseDataType(lCtx.dataTypeName(), lCtx.typeParameters())).writtenByLet();

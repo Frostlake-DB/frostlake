@@ -126,7 +126,7 @@ second plan, and destroy.
 | Pipelines | `task`, `stream_on_table`, `stream_on_view`, `stream_on_directory_table`, `stream_on_external_table`, `pipe`, `alert` |
 | Policies and tags | `masking_policy`, `row_access_policy`, `projection_policy`, `password_policy`, `authentication_policy`, `session_policy`, `network_policy`, `network_rule`, `network_policy_attachment`, `user_password_policy_attachment`, `account_authentication_policy_attachment`, `user_authentication_policy_attachment`, `account_session_policy_attachment`, `user_session_policy_attachment`, `account_password_policy_attachment`, `table_column_masking_policy_application`, `storage_lifecycle_policy`, `table_storage_lifecycle_policy_attachment`, `tag`, `tag_association` |
 | Integrations | `api_integration`, `api_integration_amazon_api_gateway`, `api_integration_azure_api_management`, `api_integration_google_cloud_api_gateway`, `api_integration_git_repository_github_app`, `api_integration_git_repository_oauth2`, `api_integration_git_repository_private_link`, `api_integration_git_repository_token`, `api_integration_external_mcp_dynamic_client`, `api_integration_external_mcp_oauth2`, `storage_integration`, `storage_integration_aws`, `storage_integration_azure`, `storage_integration_gcs`, `catalog_integration_object_storage`, `catalog_integration_aws_glue`, `catalog_integration_iceberg_rest`, `catalog_integration_open_catalog`, `notification_integration`, `email_notification_integration`, `external_access_integration`, `scim_integration`, `oauth_integration_for_custom_clients`, `oauth_integration_for_partner_applications`, `external_oauth_integration`, `saml2_integration`, `api_authentication_integration_with_client_credentials`, `api_authentication_integration_with_authorization_code_grant`, `api_authentication_integration_with_jwt_bearer` |
-| Account objects | `resource_monitor`, `share`, `failover_group`, `secondary_database`, `external_volume`, `compute_pool`, `image_repository`, `secret_with_generic_string`, `secret_with_basic_authentication`, `secret_with_client_credentials`, `secret_with_authorization_code_grant` |
+| Account objects | `resource_monitor`, `share`, `failover_group`, `replication_group_secondary`, `secondary_database`, `external_volume`, `compute_pool`, `image_repository`, `secret_with_generic_string`, `secret_with_basic_authentication`, `secret_with_client_credentials`, `secret_with_authorization_code_grant` |
 | Other | `streamlit`, `notebook`, `cortex_search_service`, `execute`, `account_parameter`, `object_parameter` |
 
 The data sources for these kinds (`snowflake_databases`, `snowflake_schemas`, `snowflake_tables`,
@@ -139,7 +139,8 @@ These resources fail at this provider version, each at the statement or the read
 | Resources | Why |
 | --- | --- |
 | `grant_privileges_to_share`, `shared_database`, `listing`, `managed_account` | a grant to a share does not find the share; `CREATE DATABASE … FROM SHARE`, `CREATE EXTERNAL LISTING` and `DROP MANAGED ACCOUNT IF EXISTS` are not read |
-| `replication_group`, `replication_group_secondary`, `primary_connection`, `secondary_connection` | `CREATE REPLICATION GROUP` and `CREATE CONNECTION` are not read |
+| `replication_group` | the provider leaves `COMMENT` out of `CREATE REPLICATION GROUP` and sets it only when it changes, so a group declared with a comment plans a change after its first apply, as it would against Snowflake |
+| `primary_connection`, `secondary_connection` | the provider looks a connection up by the `account_locator` and `is_primary` columns of `SHOW CONNECTIONS`, which the measured account's listing does not have (it answers `snowflake_region`, `created_on`, `account_name`, `name`, `comment`, `primary`, `replication_group`, `external_id`, `connection_url`), so a created connection is not found again |
 | `iceberg_table` and the four `iceberg_table_from_*` | the provider's quoted external volume name inside a string is not found; `CREATE ICEBERG TABLE` without columns is not read |
 | `warehouse_interactive`, `service`, `job_service`, `cortex_agent`, `mcp_server`, `code_bundle`, `grant_application_role`, `backup_policy`, `user_programmatic_access_token`, `postgres_*`, `openflow_*`, `current_account`, `current_organization_account` | the kind is not modelled |
 | `semantic_view` | `CREATE SEMANTIC VIEW` is not read |
@@ -157,9 +158,10 @@ These resources fail at this provider version, each at the statement or the read
 - **`snowflake_stage_external_s3_compatible` takes only an endpoint Snowflake knows** (an AWS S3, Wasabi, MinIO,
   Cloudflare R2, DigitalOcean Spaces or Backblaze B2 host); any other host is refused, `Endpoint … not allowed.`, as
   on Snowflake.
-- **Some objects are a catalog entry and nothing more.** A resource monitor, a share, a failover group and a
-  secondary database are stored and listed; no credit is counted and nothing is shared or replicated. An external
-  table is created and listed, and reads no rows. These objects are not written to a persistence snapshot.
+- **Some objects are a catalog entry and nothing more.** A resource monitor, a share, a failover or replication
+  group, a connection and a secondary database are stored and listed; no credit is counted and nothing is shared
+  or replicated. An external table is created and listed, and reads no rows. These objects are not written to a
+  persistence snapshot.
 - **`snowflake_git_repository`** is refused unless the server can reach the repository's origin.
 - **Two resources that manage one attribute drift on Frostlake as they do on Snowflake**: a stream or a dynamic
   table turns a table's `change_tracking` on, so declare `change_tracking = true` on the table.

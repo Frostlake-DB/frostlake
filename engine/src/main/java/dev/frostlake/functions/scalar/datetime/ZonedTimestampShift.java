@@ -18,6 +18,7 @@ package dev.frostlake.functions.scalar.datetime;
 
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.executor.expressions.IntervalUnit;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -109,7 +110,7 @@ public final class ZonedTimestampShift {
     public static Object shift(final Object zoned, final IntervalUnit unit, final long amount) {
         if (zoned instanceof ZonedDateTime) {
             final ZonedDateTime written = (ZonedDateTime) zoned;
-            return plus(written.toLocalDateTime(), unit, amount).atZone(written.getOffset());
+            return WideOffsetZone.atOffsetOf(plus(WideOffsetZone.wallClock(written), unit, amount), written);
         }
         final ZoneId zone = SessionZone.current();
         final Instant instant = ((OffsetDateTime) zoned).toInstant();

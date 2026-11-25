@@ -51,7 +51,7 @@ public class TryDecryptRaw extends BuiltInFunction {
     }
 
     @Override
-    public int getMinArgCount() { return 3; }
+    public int getMinArgCount() { return 2; }
     @Override
     public int getMaxArgCount() { return 6; }
 }

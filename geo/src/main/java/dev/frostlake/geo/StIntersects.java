@@ -32,6 +32,7 @@ public class StIntersects extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null) return null;
         GeoShapes.requireSameKind("ST_INTERSECTS", a, b);
+        GeoShapes.requireSameSrid(a, b);
         return Boolean.valueOf(GeoRelation.intersects(a, b));
     }
 

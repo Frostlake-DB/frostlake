@@ -37,6 +37,9 @@ import org.antlr.v4.runtime.Token;
  *   BEGIN SELECT 1 FROM t WHERE HASH(* REPLACE (1 AS a)) = 1; END;   'REPLACE', then the ')' after the name a
  *   BEGIN SELECT CASE CAST(1, 2) WHEN 1 THEN 1 END; END; ',', '1', then the block's END: the CASE's END closed it
  *   BEGIN SELECT 1 FROM t JOIN USING; END;               the ';' where a statement of its own ends
+ *   BEGIN SELECT 1 FROM zz (a, b); END;                  '(', then the ',': the bracket after a table's name is
+ *                                                        refused alone, and a is the name
+ *   BEGIN SELECT 1 FROM IDENTIFIER(f(a)); END;           '(', then the second '(': f is the name
  * </pre>
  *
  * <p>After the last of the query's own lines the account looks, from the token after it, for the first word it can
@@ -189,6 +192,13 @@ final class BlockQueryLines {
             }
             return afterScan(sql, spoken, lines, head + 1, stop, terminated);
         }
+        if (direct && leading == FrostlakeLexer.LPAREN && TableNameBracketLines.followsReference(spoken, head)) {
+            // A bracket after a FROM list's table name is refused alone, and the block takes the first name inside.
+            while (lines.size() > 1) {
+                lines.remove(lines.size() - 1);
+            }
+            return afterScan(sql, spoken, lines, head + 1, stop, terminated);
+        }
         final int depth = depthAt(spoken, start, last);
         if (direct && at.size() > 1 && at.get(at.size() - 2).intValue() == last && depth == 0) {
             // A token refused twice where it stands ends the report.
@@ -226,7 +236,14 @@ final class BlockQueryLines {
             }
             return lines;
         }
-        return afterScan(sql, spoken, lines, last + 1, stop, terminated);
+        final int told = lines.size();
+        final List<String> scanned = afterScan(sql, spoken, lines, last + 1, stop, terminated);
+        if (scanned.size() == told && type == FrostlakeLexer.LPAREN && at.size() == 1
+                && SyntaxErrorListener.isNameLike(spoken.get(last - 1))) {
+            // A bracket after an alias with no name inside it before the semicolon: the statements after are read.
+            return readOn(sql, spoken, scanned, start, stop, terminated);
+        }
+        return scanned;
     }
 
     /**

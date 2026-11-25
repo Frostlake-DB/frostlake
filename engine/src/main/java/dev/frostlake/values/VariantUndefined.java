@@ -240,6 +240,16 @@ public final class VariantUndefined {
         return node;
     }
 
+    /**
+     * Whether a parsed string is the placeholder {@link #markTokens(String)} wrote for a bare {@code undefined}.
+     *
+     * @param parsed the string as the parser read it
+     * @return whether it stands for {@code undefined}
+     */
+    public static boolean isMarkerText(final String parsed) {
+        return MARKER.equals(parsed);
+    }
+
     private static boolean isMarker(final JsonNode node) {
         return node.isTextual() && MARKER.equals(node.asString());
     }

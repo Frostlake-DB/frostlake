@@ -89,6 +89,14 @@ enum UnmodelledListing {
     DELEGATED_AUTHORIZATIONS("""
         created_on@ user_name role_name consented_roles integration_name integration_status can_switch_roles
         """, false),
+    USER_PROGRAMMATIC_ACCESS_TOKENS("""
+        name user_name role_restriction expires_at@ status comment created_on@ created_by
+        mins_to_bypass_network_policy_requirement rotated_to
+        """, false),
+    USER_KEY_PAIRS("""
+        name user_name fingerprint role_scope status comment created_on@ created_by last_used_on@ expires_at@
+        rotated_to
+        """, false),
     USER_WORKLOAD_IDENTITY_METHODS("""
         name type comment last_used@ created_on@ additional_info status
         """, false),

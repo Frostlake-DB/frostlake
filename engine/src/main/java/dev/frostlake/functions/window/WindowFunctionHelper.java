@@ -64,12 +64,34 @@ public final class WindowFunctionHelper {
      */
     public static Object ratioToReport(final Object currentValue, final List<Object> allValues) {
         if (currentValue == null) return null;
-        final double cur = summedNumber(currentValue);
+        final double cur = ratioNumber(currentValue);
+        return ratioOfTotal(cur, ratioTotal(allValues));
+    }
+
+    /**
+     * The sum a RATIO_TO_REPORT share divides by: every non-NULL value of the partition read as
+     * {@link #ratioNumber} reads it, added in partition order as doubles.
+     *
+     * @param allValues every value of the partition, in its order
+     * @return the sum, zero when the partition holds no value
+     */
+    public static double ratioTotal(final List<Object> allValues) {
         double sum = 0;
         for (final Object v : allValues) {
-            if (v != null) sum += summedNumber(v);
+            if (v != null) sum += ratioNumber(v);
         }
-        return sum == 0 ? null : cur / sum;
+        return sum;
+    }
+
+    /**
+     * One row's share of a partition total, or NULL when the total is zero.
+     *
+     * @param current the row's value, read by {@link #ratioNumber}
+     * @param total the partition's {@link #ratioTotal}
+     * @return the share, or null
+     */
+    public static Object ratioOfTotal(final double current, final double total) {
+        return total == 0 ? null : current / total;
     }
 
     /**
@@ -85,6 +107,16 @@ public final class WindowFunctionHelper {
         if (!(currentValue instanceof Number)) {
             return null;
         }
+        return decfloatRatioOfTotal(currentValue, decfloatRatioTotal(allValues));
+    }
+
+    /**
+     * The DECFLOAT sum a RATIO_TO_REPORT share divides by, added in partition order as DECFLOAT adds.
+     *
+     * @param allValues every value of the partition, in its order
+     * @return the sum, or null when the partition holds no number
+     */
+    public static BigDecimal decfloatRatioTotal(final List<Object> allValues) {
         BigDecimal sum = null;
         for (final Object v : allValues) {
             if (v instanceof Number) {
@@ -92,13 +124,31 @@ public final class WindowFunctionHelper {
                 sum = sum == null ? held : Decfloats.add(sum, held);
             }
         }
-        if (sum == null || sum.signum() == 0) {
-            return null;
-        }
-        return Decfloats.divide(Decfloats.of((Number) currentValue, "RATIO_TO_REPORT"), sum);
+        return sum;
     }
 
-    private static double summedNumber(final Object v) {
+    /**
+     * One row's DECFLOAT share of a partition total.
+     *
+     * @param currentValue the row's value, a number
+     * @param total the partition's {@link #decfloatRatioTotal}, or null
+     * @return the share, or null when the total is null or zero
+     */
+    public static Object decfloatRatioOfTotal(final Object currentValue, final BigDecimal total) {
+        if (total == null || total.signum() == 0) {
+            return null;
+        }
+        return Decfloats.divide(Decfloats.of((Number) currentValue, "RATIO_TO_REPORT"), total);
+    }
+
+    /**
+     * A non-NULL RATIO_TO_REPORT value as the double it is summed and divided as; a text that spells no number
+     * fails.
+     *
+     * @param v the value
+     * @return its double
+     */
+    public static double ratioNumber(final Object v) {
         if (v instanceof Number) return ((Number) v).doubleValue();
         if (v instanceof String) {
             // A text reads as a cast to FLOAT reads it, a hexadecimal number included: RATIO_TO_REPORT('0x10')

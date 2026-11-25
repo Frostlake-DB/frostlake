@@ -232,6 +232,10 @@ public final class ShowModifierProfile {
             // LIMIT 1 → 1 of 2 session policies, FROM the first name that one; TERSE keeps every column.
             return sorted(true, true, NO_TERSE, null, false).startingPage(ShowPageStart.IGNORED);
         }
+        if (ctx.EXTERNAL() != null && ctx.TABLES() != null) {
+            // TERSE names the kind EXTERNAL_TABLE (live-verified).
+            return sorted(true, true, STANDARD_TERSE, "EXTERNAL_TABLE", false);
+        }
         if (ctx.TABLES() != null) {
             // 6 tables, LIMIT 2 → the first 2 by name; STARTS WITH 'T' → the 4 uppercase ones, excluding
             // the quoted "t_lower" that STARTS WITH 't' finds instead. 27 columns → 5.

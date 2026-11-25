@@ -25,8 +25,13 @@ import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Stream;
 import dev.frostlake.metastore.model.StreamRecord;
 import dev.frostlake.metastore.model.StreamSourceType;
+import dev.frostlake.metastore.model.StreamVersionKind;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.storage.Row;
+import dev.frostlake.storage.StorageEngine;
+import dev.frostlake.storage.TableStorage;
+import dev.frostlake.transaction.ImmediateStatementChanges;
+import dev.frostlake.transaction.Transaction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,10 +55,60 @@ public class StreamManager {
 
     private final Catalog catalog;
     private final ConcurrentHashMap<String, AtomicLong> rowIdCounters;
+    /** The versions the running statement writes where DML applies at once (the name-based track calls). */
+    private final ImmediateStatementChanges immediateChanges = new ImmediateStatementChanges();
 
     public StreamManager(final Catalog catalog) {
         this.catalog = catalog;
         this.rowIdCounters = new ConcurrentHashMap<>();
+    }
+
+    /**
+     * Note the running statement, its DML applied at once, as one of the given kind writing a table, whether or not it
+     * changed a row, and write the versions it wrote of the tables streams read (see ImmediateStatementChanges).
+     *
+     * @param storage            the tables' storage
+     * @param qualifiedTableName the table written, DB.SCHEMA.NAME
+     * @param kind               INSERT, UPDATE, DELETE or MERGE
+     * @param rewritten          whether the statement rewrote the table though it may have changed no row
+     * @param lasting            the transaction that outlives the statement, or null where it commits alone
+     */
+    public void noteImmediateStatement(final StorageEngine storage, final String qualifiedTableName,
+                                       final StreamVersionKind kind, final boolean rewritten,
+                                       final Transaction lasting) {
+        final List<Stream> streams = capturingStreams(qualifiedTableName);
+        if (!streams.isEmpty()) {
+            immediateChanges.noteKind(qualifiedTableName, streams, kind, lasting == null, rewritten);
+        }
+        immediateChanges.writeVersions(storage, lasting);
+    }
+
+    /**
+     * Write the versions the statement that ends wrote, its DML applied at once, of the tables streams read.
+     *
+     * @param storage the tables' storage
+     * @param lasting the transaction that outlives the statement, or null where it commits alone
+     */
+    public void endImmediateStatement(final StorageEngine storage, final Transaction lasting) {
+        immediateChanges.writeVersions(storage, lasting);
+    }
+
+    /**
+     * Track a TRUNCATE applied at once: each row leaves as a DELETE, and the statement's version is a TRUNCATE.
+     *
+     * @param qualifiedTableName the table emptied, DB.SCHEMA.NAME
+     * @param emptied            its storage, still holding the rows
+     */
+    public void trackTruncate(final String qualifiedTableName, final TableStorage emptied) {
+        final List<Stream> streams = capturingStreams(qualifiedTableName);
+        if (streams.isEmpty()) {
+            return;
+        }
+        final int rows = emptied.getRowCount();
+        for (int i = 0; i < rows; i++) {
+            trackDelete(streams, qualifiedTableName, emptied.getRow(i).copy(), emptied.getRowId(i));
+        }
+        immediateChanges.addTruncated(qualifiedTableName, streams, rows);
     }
 
     /**
@@ -86,6 +141,9 @@ public class StreamManager {
                 );
                 stream.addRecord(record);
                 logger.debug("Tracked INSERT to stream: {}", stream.getName());
+            }
+            if (!streams.isEmpty()) {
+                immediateChanges.addInserted(qualifiedTableName, streams);
             }
         } catch (final Exception e) {
             logger.warn("Failed to track INSERT for streams: {}", e.getMessage());
@@ -232,6 +290,9 @@ public class StreamManager {
 
                 logger.debug("Tracked UPDATE to stream: {}", stream.getName());
             }
+            if (!streams.isEmpty()) {
+                immediateChanges.addUpdated(qualifiedTableName, streams);
+            }
         } catch (final Exception e) {
             logger.warn("Failed to track UPDATE for streams: {}", e.getMessage());
         }
@@ -265,6 +326,9 @@ public class StreamManager {
                 );
                 stream.addRecord(record);
                 logger.debug("Tracked DELETE to stream: {}", stream.getName());
+            }
+            if (!streams.isEmpty()) {
+                immediateChanges.addDeleted(qualifiedTableName, streams);
             }
         } catch (final Exception e) {
             logger.warn("Failed to track DELETE for streams: {}", e.getMessage());

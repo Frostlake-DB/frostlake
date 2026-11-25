@@ -92,7 +92,9 @@ public class GrantsFollowEveryKindTest {
             return false;
         } catch (final RuntimeException unseen) {
             // A database the reader does not see is refused as one that does not exist.
-            if (String.valueOf(unseen.getMessage()).contains("does not exist or not authorized")) {
+            // So is a session database it holds nothing in: the session has none.
+            if (String.valueOf(unseen.getMessage()).contains("does not exist or not authorized")
+                    || String.valueOf(unseen.getMessage()).contains("does not have a current database")) {
                 return false;
             }
             throw unseen;

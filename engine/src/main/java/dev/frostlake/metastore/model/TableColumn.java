@@ -28,7 +28,7 @@ import java.util.Map;
 
 public class TableColumn implements Taggable {
     private final String name;
-    private final DataType dataType;
+    private DataType dataType;
     private boolean nullable;
     private Object defaultValue;
     private final boolean primaryKey;
@@ -73,6 +73,8 @@ public class TableColumn implements Taggable {
     // identity instead — so the flag only ever ADDS a column the type rules may read, never removes one.
     private boolean staticallyTyped;
     private boolean heldToDeclaredWidth;
+    /** The SHOW COLUMNS descriptor a column of the SNOWFLAKE database's own views carries, or null. */
+    private String describedType;
 
     /** Whether the column belongs to a relation the plan has no statistics of: a VALUES clause's. */
     private boolean withoutStatistics;
@@ -95,6 +97,10 @@ public class TableColumn implements Taggable {
     // A DERIVED relation's column projecting a double live's compiler folds, which TO_VARIANT wraps keeping
     // its FLOAT origin (see isFoldedDouble); false for every other column.
     private boolean foldedDouble;
+
+    // A DERIVED relation's column projecting a text the plan folds to a constant, which a read as a FLOAT takes as the
+    // infinity when it is past the double's range (see isFoldedText); false for every other column.
+    private boolean foldedText;
     // A DERIVED relation's column projecting a number or boolean literal a select writes, which a wrap into a
     // VARIANT converts unchecked (see isLiteralConstant); false for every other column.
     private boolean literalConstant;
@@ -124,6 +130,10 @@ public class TableColumn implements Taggable {
     // account tells it back (see getVirtualText); null for every other column.
     private String virtualExpression;
     private String virtualText;
+    // The expression a query reading a virtual column computes (see getVirtualRead), and the type its definition
+    // wrote where the column reads at another (see getDefinedType); null for every other column.
+    private String virtualRead;
+    private DataType virtualDefinedType;
 
     public TableColumn(final String name, final DataType dataType, final boolean nullable,
                  final Object defaultValue, final boolean primaryKey, final boolean unique,
@@ -198,6 +208,21 @@ public class TableColumn implements Taggable {
 
     public void setHeldToDeclaredWidth(final boolean heldToDeclaredWidth) {
         this.heldToDeclaredWidth = heldToDeclaredWidth;
+    }
+
+    /**
+     * The {@code data_type} descriptor SHOW COLUMNS answers for a column of one of the SNOWFLAKE database's own
+     * views, whose descriptor follows the column's source rather than its type alone (see
+     * {@code ColumnTypeJson.renderSystemViewColumn}); null for every other column, whose descriptor its type gives.
+     *
+     * @return the descriptor, or null
+     */
+    public String getDescribedType() {
+        return describedType;
+    }
+
+    public void setDescribedType(final String describedType) {
+        this.describedType = describedType;
     }
 
     /**
@@ -293,6 +318,56 @@ public class TableColumn implements Taggable {
     public void setVirtualExpression(final String expression, final String text) {
         this.virtualExpression = expression;
         this.virtualText = text;
+    }
+
+    /**
+     * The expression a query reading a virtual column computes: the expression as told back (see
+     * {@link #getVirtualText()}), compiled again at the type it has then, {@code CAST(1 AS NUMBER(7,6)) / A} of a
+     * {@code NUMBER(7,6) AS (1 / a)} reading as a NUMBER(13,12) (live-verified). Where the engine cannot compile the
+     * told text it is the expression as written.
+     *
+     * @return the expression, or null for a column that is not virtual
+     */
+    public String getVirtualRead() {
+        return virtualRead != null ? virtualRead : virtualExpression;
+    }
+
+    /**
+     * Sets what a query reading a virtual column computes, and the type it reads at: {@link #getDataType()} answers
+     * that type from then on, and {@link #getDefinedType()} the type the definition wrote.
+     *
+     * @param read     the expression a read computes
+     * @param readType the type it reads at, or null to keep the defined type
+     */
+    public void readVirtualAs(final String read, final DataType readType) {
+        if (virtualDefinedType == null) {
+            virtualDefinedType = dataType;
+        }
+        this.virtualRead = read;
+        this.dataType = readType != null ? readType : virtualDefinedType;
+    }
+
+    /**
+     * Puts back a restored virtual column's read expression and the type its definition wrote, its
+     * {@link #getDataType()} being the type it reads at already.
+     *
+     * @param read    the expression a read computes
+     * @param defined the type the definition wrote, or null where it is the type the column reads at
+     */
+    public void restoreVirtualRead(final String read, final DataType defined) {
+        this.virtualRead = read;
+        this.virtualDefinedType = defined;
+    }
+
+    /**
+     * The type the column's definition wrote, which DESCRIBE TABLE, SHOW COLUMNS, GET_DDL and INFORMATION_SCHEMA tell:
+     * a virtual column's declared type where a query reads it at its expression's (see {@link #readVirtualAs}), else
+     * {@link #getDataType()}.
+     *
+     * @return the type
+     */
+    public DataType getDefinedType() {
+        return virtualDefinedType != null ? virtualDefinedType : dataType;
     }
 
     /**
@@ -426,6 +501,14 @@ public class TableColumn implements Taggable {
         this.foldedDouble = foldedDouble;
     }
 
+    public boolean isFoldedText() {
+        return foldedText;
+    }
+
+    public void setFoldedText(final boolean foldedText) {
+        this.foldedText = foldedText;
+    }
+
     /**
      * Whether this DERIVED relation's column projects a number or boolean literal a select writes, over a table, a
      * view, a CTE or another derived relation as over none: live folds the literal through the relation, so a wrap of
@@ -516,6 +599,7 @@ public class TableColumn implements Taggable {
         copy.spelledNumber = spelledNumber;
         copy.uncheckedConstant = uncheckedConstant;
         copy.foldedDouble = foldedDouble;
+        copy.foldedText = foldedText;
         copy.untypedNull = untypedNull;
         copy.nullText = nullText;
         copy.valuesNullable = valuesNullable;
@@ -523,6 +607,8 @@ public class TableColumn implements Taggable {
         copy.formatType = formatType;
         copy.virtualExpression = virtualExpression;
         copy.virtualText = virtualText;
+        copy.virtualRead = virtualRead;
+        copy.virtualDefinedType = virtualDefinedType;
         return copy;
     }
 
@@ -554,6 +640,7 @@ public class TableColumn implements Taggable {
         copy.spelledNumber = spelledNumber;
         copy.uncheckedConstant = uncheckedConstant;
         copy.foldedDouble = foldedDouble;
+        copy.foldedText = foldedText;
         copy.untypedNull = untypedNull;
         copy.nullText = nullText;
         copy.valuesNullable = valuesNullable;

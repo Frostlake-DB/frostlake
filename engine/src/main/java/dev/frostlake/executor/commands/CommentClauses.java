@@ -40,4 +40,21 @@ final class CommentClauses {
         }
         return clause.STRING_LITERAL() == null ? null : SqlStringLiterals.decode(clause.STRING_LITERAL().getText());
     }
+
+    /**
+     * The comment a column's {@code COMMENT '<text>'} writes.
+     *
+     * @param clause the clause, or null
+     * @return its text, or null when there is no clause
+     */
+    static String text(final FrostlakeParser.ColumnCommentClauseContext clause) {
+        if (clause == null) {
+            return null;
+        }
+        if (clause.DOLLAR_QUOTED_STRING() != null) {
+            final String raw = clause.DOLLAR_QUOTED_STRING().getText();
+            return raw.substring(2, raw.length() - 2);
+        }
+        return clause.STRING_LITERAL() == null ? null : SqlStringLiterals.decode(clause.STRING_LITERAL().getText());
+    }
 }

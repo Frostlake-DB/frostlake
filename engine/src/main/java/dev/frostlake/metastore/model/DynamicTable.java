@@ -83,6 +83,9 @@ public class DynamicTable extends SqlObject {
     private boolean transientTable;
     private String schedulingState;    // descriptive status returned by SHOW
     private String createText;
+    /** Where the name sits in {@link #createText}, from and to, or -1 when not known. */
+    private int createNameFrom = -1;
+    private int createNameTo = -1;
     private String bodyText;
     private boolean reclusterSuspended;
     private boolean clone;
@@ -488,7 +491,45 @@ public class DynamicTable extends SqlObject {
      * current settings.
      */
     public String getCreateText() { return createText; }
-    public void setCreateText(final String createText) { this.createText = createText; }
+    public void setCreateText(final String createText) {
+        this.createText = createText;
+        this.createNameFrom = -1;
+        this.createNameTo = -1;
+    }
+
+    /**
+     * Keeps the CREATE as written up to the options, with where its name sits in it.
+     *
+     * @param createText the CREATE as written up to the options
+     * @param nameFrom   where the name starts in it
+     * @param nameTo     where the name ends in it, exclusive
+     */
+    public void setCreateText(final String createText, final int nameFrom, final int nameTo) {
+        this.createText = createText;
+        this.createNameFrom = nameFrom;
+        this.createNameTo = nameTo;
+    }
+
+    /** Where the name starts in the CREATE as written, or -1 when not known. */
+    public int getCreateNameFrom() { return createNameFrom; }
+
+    /** Where the name ends in the CREATE as written, exclusive, or -1 when not known. */
+    public int getCreateNameTo() { return createNameTo; }
+
+    /**
+     * Puts another name in place of the one the CREATE as written names, as a clone re-prints its source's CREATE
+     * under its own name; nothing changes where the name's place is not known.
+     *
+     * @param spelled the name as the account spells it
+     */
+    public void renameInCreateText(final String spelled) {
+        if (createText == null || createNameFrom < 0 || createNameTo > createText.length()
+                || createNameFrom > createNameTo) {
+            return;
+        }
+        createText = createText.substring(0, createNameFrom) + spelled + createText.substring(createNameTo);
+        createNameTo = createNameFrom + spelled.length();
+    }
 
     /** The AS and the query after it, exactly as written. */
     public String getBodyText() { return bodyText; }
@@ -510,6 +551,7 @@ public class DynamicTable extends SqlObject {
     public DynamicTable copyAs(final String newName) {
         final DynamicTable copy = new DynamicTable(newName, query, targetLag, warehouse);
         copy.refreshMode = refreshMode;
+        copy.fullRefreshReason = fullRefreshReason;
         copy.initialize = initialize;
         copy.dataRetentionDays = dataRetentionDays;
         copy.dataRetentionSet = dataRetentionSet;
@@ -522,12 +564,39 @@ public class DynamicTable extends SqlObject {
         copy.refreshedRows = refreshedRows;
         copy.transientTable = transientTable;
         copy.createText = createText;
+        copy.createNameFrom = createNameFrom;
+        copy.createNameTo = createNameTo;
         copy.bodyText = bodyText;
         copy.lastRefreshedTime = lastRefreshedTime;
         copy.firstRefreshedSequence = firstRefreshedSequence;
         copy.firstRefreshedMillis = firstRefreshedMillis;
         copy.setComment(getComment());
         return copy;
+    }
+
+    /**
+     * Takes over the last refresh of another table, as a clone holds its source's rows: the rows a read answers, the
+     * rows the next refresh is compared with, and the inputs as that refresh read them.
+     *
+     * @param source the table whose last refresh is taken over
+     */
+    public void carryRefreshOf(final DynamicTable source) {
+        final DynamicTableRefresh last = source.lastRefresh();
+        if (last == null) {
+            return;
+        }
+        keepRefresh(last);
+        if (source.refreshImage != null) {
+            refreshImage = new ArrayList<>();
+            for (final List<Object> row : source.refreshImage) {
+                refreshImage.add(new ArrayList<>(row));
+            }
+        }
+        imagePartitions = source.imagePartitions == null ? null : new ArrayList<>(source.imagePartitions);
+        for (final Map.Entry<String, Map<Long, Long>> input : source.inputPartitions.entrySet()) {
+            inputPartitions.put(input.getKey(), new LinkedHashMap<>(input.getValue()));
+        }
+        inputCreatedTimes.putAll(source.inputCreatedTimes);
     }
 
     @Override

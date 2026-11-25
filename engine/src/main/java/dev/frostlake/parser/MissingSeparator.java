@@ -32,6 +32,7 @@ final class MissingSeparator {
     /** The index of the statement chain the second statement begins, or -1 when it is not known. */
     private int secondChain = -1;
     private boolean swallowed;
+    private boolean anchor;
 
     MissingSeparator(final int line, final int position, final List<String> lines) {
         this.line = line;
@@ -59,6 +60,21 @@ final class MissingSeparator {
     /** Whether the second statement's first word was swallowed as the first one's alias. */
     boolean swallows() {
         return swallowed;
+    }
+
+    /**
+     * Mark this fault as one given up further back than the statement run in, at the statement before it, which
+     * reports nothing of the statement run in.
+     *
+     * @return this fault
+     */
+    MissingSeparator anchored() {
+        this.anchor = true;
+        return this;
+    }
+
+    boolean isAnchored() {
+        return anchor;
     }
 
     /**

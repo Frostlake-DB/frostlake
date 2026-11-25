@@ -30,11 +30,31 @@ import tools.jackson.databind.node.DoubleNode;
  * exactly as one. The origin rides along in memory only; a value re-parsed from its text (a
  * persistence or wire round-trip, an extracted member re-wrapped) is a plain double again and takes
  * the FLOAT text, the same answer as before this node existed.
+ *
+ * <p>The origin is the compiler's: a stored value has lost it. A table cell written from a folded FLOAT
+ * (INSERT, CTAS, UPDATE, MERGE) reads back through {@code ::VARCHAR} as the FLOAT text {@code 1}, not
+ * {@code 1.0}, and so does one a UNION of different arms, MIN, MAX, ANY_VALUE, LAG, LEAD or NTH_VALUE hands on
+ * (live-verified); see {@link #withoutOrigin}.
  */
 public final class FloatOriginNode extends DoubleNode {
     private static final long serialVersionUID = 1L;
 
     public FloatOriginNode(final double value) {
         super(value);
+    }
+
+    /**
+     * A value with the FLOAT origin of a bare double dropped: a VARIANT whose whole value is a
+     * FloatOriginNode becomes the same double as a plain one, anything else comes back as it is. Only a
+     * whole value carries the origin anyone reads; a member's text is the conversion form either way.
+     *
+     * @param value any runtime value
+     * @return the value as a computed double reads, or {@code value} itself
+     */
+    public static Object withoutOrigin(final Object value) {
+        if (value instanceof VariantValue && ((VariantValue) value).node() instanceof FloatOriginNode) {
+            return VariantValue.ofNode(new DoubleNode(((VariantValue) value).node().doubleValue()));
+        }
+        return value;
     }
 }

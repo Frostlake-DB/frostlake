@@ -17,6 +17,7 @@
 package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.QueryExecutor;
+import dev.frostlake.executor.ShowResultHelpers;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
@@ -30,6 +31,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -49,6 +51,7 @@ import java.util.Set;
  *   a VARCHAR narrowed              … because reducing the byte-length of a varchar is not supported.
  *   a NUMBER's scale changed        … because changing the scale of a number is not supported.
  *   a DEFAULT on an existing column Unsupported feature 'Alter Column Set Default'.
+ *   a DEFAULT changed               Unsupported feature 'Alter Column Set Default'.
  *   a DEFAULT dropped               Dropping default value is not allowed for column 'B' because the column was added after table was created.
  *   a NOT NULL column added         Non-nullable column 'C' cannot be added to non-empty table 'S2' unless it has a non-null default value.
  * </pre>
@@ -162,7 +165,11 @@ final class CreateOrAlterTable {
 
     /** What a column that stays may become. */
     private static void rejectUnalterableColumn(final TableColumn before, final TableColumn after) {
-        if (after.getDefaultValue() != null && before.getDefaultValue() == null) {
+        if (after.getDefaultValue() != null && (before.getDefaultValue() == null
+                || !Objects.equals(ShowResultHelpers.renderDefaultExpression(before.getDefaultValue()),
+                    ShowResultHelpers.renderDefaultExpression(after.getDefaultValue())))) {
+            // A DEFAULT kept is judged as the table prints it: $$x$$ keeps 'x' and (1) keeps 1, while 0 + 1
+            // is another DEFAULT than 1 (live-verified).
             throw new RuntimeException("Unsupported feature 'Alter Column Set Default'.");
         }
         if (after.getDefaultValue() == null && before.getDefaultValue() != null) {

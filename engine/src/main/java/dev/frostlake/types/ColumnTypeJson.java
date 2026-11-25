@@ -77,7 +77,29 @@ public final class ColumnTypeJson {
             return null;
         }
         final StringBuilder out = new StringBuilder();
-        append(out, type, nullable, DESCRIBED_STRING_MAXIMUM);
+        append(out, type, nullable, DESCRIBED_STRING_MAXIMUM, BYTES_PER_CHARACTER, false);
+        return out.toString();
+    }
+
+    /**
+     * The descriptor of a column of one of the SNOWFLAKE database's own views, which follows the column's source
+     * there: some texts budget ONE byte per character, {@code {"type":"TEXT","length":16777216,"byteLength":16777216,
+     * ...}}, and some VARIANT, OBJECT and ARRAY columns carry {@code "fixed":false} after their nullability, which a
+     * user's view never shows (live-verified, column by column).
+     *
+     * @param type             the column's declared type
+     * @param nullable         whether it takes NULL
+     * @param bytePerCharacter whether a text's byte budget is one byte per character
+     * @param fixedKey         whether a VARIANT, OBJECT or ARRAY carries {@code "fixed":false}
+     * @return the descriptor
+     */
+    public static String renderSystemViewColumn(final DataType type, final boolean nullable,
+                                                final boolean bytePerCharacter, final boolean fixedKey) {
+        if (type == null) {
+            return null;
+        }
+        final StringBuilder out = new StringBuilder();
+        append(out, type, nullable, DESCRIBED_STRING_MAXIMUM, bytePerCharacter ? 1 : BYTES_PER_CHARACTER, fixedKey);
         return out.toString();
     }
 
@@ -97,7 +119,7 @@ public final class ColumnTypeJson {
             return null;
         }
         final StringBuilder out = new StringBuilder();
-        append(out, type, nullable, Long.MAX_VALUE);
+        append(out, type, nullable, Long.MAX_VALUE, BYTES_PER_CHARACTER, false);
         return collated(out.toString(), type, collation);
     }
 
@@ -125,6 +147,11 @@ public final class ColumnTypeJson {
 
     private static void append(final StringBuilder out, final DataType type, final boolean nullable,
                                final long widestString) {
+        append(out, type, nullable, widestString, BYTES_PER_CHARACTER, false);
+    }
+
+    private static void append(final StringBuilder out, final DataType type, final boolean nullable,
+                               final long widestString, final int bytesPerCharacter, final boolean fixedKey) {
         if (type instanceof IntervalDayTimeType || type instanceof IntervalYearMonthType) {
             appendInterval(out, type, nullable);
             return;
@@ -142,7 +169,7 @@ public final class ColumnTypeJson {
             // A UUID is no string here: live's descriptor is {"type":"UUID","nullable":true}.
             final long length = Math.min(((StringType) type).getMaxLength(), widestString);
             out.append(",\"length\":").append(length)
-               .append(",\"byteLength\":").append(Math.min(length * BYTES_PER_CHARACTER, WIDEST_BYTE_LENGTH));
+               .append(",\"byteLength\":").append(Math.min(length * bytesPerCharacter, WIDEST_BYTE_LENGTH));
         } else if (type instanceof BinaryType) {
             final long length = ((BinaryType) type).getMaxLength();
             out.append(",\"length\":").append(length).append(",\"byteLength\":").append(length);
@@ -156,6 +183,9 @@ public final class ColumnTypeJson {
             out.append(",\"fixed\":false");
         } else if (type instanceof BinaryType) {
             out.append(",\"fixed\":").append(((BinaryType) type).isFixed());
+        } else if (fixedKey
+                && (type instanceof VariantType || type instanceof ObjectType || type instanceof ArrayType)) {
+            out.append(",\"fixed\":false");
         }
         appendContained(out, type, widestString);
         out.append('}');

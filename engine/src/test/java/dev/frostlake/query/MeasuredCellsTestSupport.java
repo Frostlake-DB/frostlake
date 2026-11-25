@@ -48,6 +48,17 @@ public abstract class MeasuredCellsTestSupport extends BaseDatabaseTest {
         defaultResults = true;
     }
 
+    /**
+     * Acts as ACCOUNTADMIN, the role the live harness's session runs as: a role below it, as the embedded session's
+     * SYSADMIN is, sees only part of the SNOWFLAKE database. The live session already acts as it, and is sent no USE
+     * ROLE (see {@link dev.frostlake.LiveAccountStatements}).
+     */
+    protected void actAsAccountAdministrator() {
+        if (!isLiveSnowflake()) {
+            engine.execute("USE ROLE ACCOUNTADMIN");
+        }
+    }
+
     /** Puts a session that {@link #readDefaultResults} moved back on the JSON results the live harness reads. */
     @AfterEach
     public void restoreResultFormat() {

@@ -36,8 +36,9 @@ import java.util.Set;
  * <ol>
  *   <li>an argument type no SQL value converts to — {@code Object}, {@code char}, {@code byte}, a
  *       {@code java.time} class, a {@code HashMap}, an array other than {@code byte[]}, {@code String[]},
- *       {@code int[]} and {@code float[]} — is refused by name: {@code Unsupported argument type:
- *       java.lang.Object};</li>
+ *       {@code int[]}, {@code long[]}, {@code short[]}, {@code float[]}, {@code double[]} and {@code boolean[]} — is
+ *       refused by name:
+ *       {@code Unsupported argument type: java.lang.Object};</li>
  *   <li>then such a return type: {@code Unsupported return type: java.util.List};</li>
  *   <li>then each argument in order, then the return: an integral Java type for a SQL type with a scale (a
  *       NUMBER with decimals, a TIME or a timestamp with a fractional precision) cannot carry it —
@@ -52,8 +53,14 @@ import java.util.Set;
  * after it are the SQL arguments, numbered from 0 without it. A pair the account fails on internally (a
  * {@code java.sql.Time} for most types, a {@code java.sql.Timestamp} for a DATE) is taken, as is any type the
  * account was not seen to judge, so the check refuses only what live refuses.
+ *
+ * <p>A Scala handler is judged by the same rules over its erased JVM types (see {@link #checkScala}): Scala's
+ * immutable {@code Map} pairs as a {@code java.util.Map} does and is named
+ * {@code scala.collection.immutable.Map[String, String]}, and any other Scala class - a {@code BigDecimal}, a
+ * {@code Seq}, a {@code List}, a mutable {@code Map} - is refused by name; so is an {@code Option}, which the
+ * account fails on internally.
  */
-final class JavaHandlerSignature {
+public final class JavaHandlerSignature {
 
     /** The Java types the account converts SQL values to and from, as its sentences name them. */
     private static final Map<String, String> SUPPORTED = Map.ofEntries(
@@ -66,9 +73,23 @@ final class JavaHandlerSignature {
         Map.entry("java.math.BigInteger", "java.math.BigInteger"), Map.entry("java.sql.Date", "java.sql.Date"),
         Map.entry("java.sql.Time", "java.sql.Time"), Map.entry("java.sql.Timestamp", "java.sql.Timestamp"),
         Map.entry("[B", "byte[]"), Map.entry("[Ljava.lang.String;", "String[]"), Map.entry("[I", "int[]"),
-        Map.entry("[F", "float[]"), Map.entry("java.util.Map", "java.util.Map<String, String>"),
+        Map.entry("[F", "float[]"), Map.entry("[J", "long[]"), Map.entry("[D", "double[]"),
+        Map.entry("[S", "short[]"), Map.entry("[Z", "boolean[]"),
+        Map.entry("java.util.Map", "java.util.Map<String, String>"),
         Map.entry("com.snowflake.snowpark_java.types.Variant", "com.snowflake.snowpark_java.types.Variant"),
         Map.entry("com.snowflake.snowpark_java.types.Geography", "com.snowflake.snowpark_java.types.Geography"));
+
+    /** What a Scala handler may declare besides the Java types, as the sentences name it. */
+    private static final Map<String, String> SCALA_SUPPORTED = Map.of("scala.collection.immutable.Map",
+        "scala.collection.immutable.Map[String, String]");
+
+    /**
+     * Scala's own collections as a Scala 2.12 handler declares them, where the bundled compiler erases the same
+     * source name to a class of another package.
+     */
+    private static final Map<String, String> SCALA_212_NAMES = Map.of(
+        "scala.collection.immutable.Seq", "scala.collection.Seq",
+        "scala.collection.immutable.IndexedSeq", "scala.collection.IndexedSeq");
 
     /** The integral types a scaled number cannot be encoded as. */
     private static final Set<String> INTEGRAL = Set.of("int", "long", "short", "Integer", "Long", "Short");
@@ -101,45 +122,68 @@ final class JavaHandlerSignature {
      */
     static void check(final Method handler, final List<DataType> argumentTypes, final DataType returnType,
                       final String routineName, final String handlerName, final boolean procedure) {
+        check(handler, argumentTypes, returnType, routineName, handlerName, procedure, false);
+    }
+
+    /**
+     * Judges a Scala handler as {@link #check} judges a Java one, over its erased JVM types, Scala's immutable
+     * {@code Map} among the types taken (live-verified).
+     *
+     * @param handler       the resolved handler method
+     * @param argumentTypes the routine's declared argument types, or null to judge none
+     * @param returnType    the declared result, or null to judge none (a table result)
+     * @param routineName   the routine's name, as the refusals spell it
+     * @param handlerName   the handler as declared
+     * @param procedure     whether the routine is a procedure, whose handler takes a Session first
+     */
+    public static void checkScala(final Method handler, final List<DataType> argumentTypes, final DataType returnType,
+                                  final String routineName, final String handlerName, final boolean procedure) {
+        check(handler, argumentTypes, returnType, routineName, handlerName, procedure, true);
+    }
+
+    private static void check(final Method handler, final List<DataType> argumentTypes, final DataType returnType,
+                              final String routineName, final String handlerName, final boolean procedure,
+                              final boolean scala) {
         final String where = " in function " + routineName + " with handler " + handlerName;
         final Class<?>[] declared = handler.getParameterTypes();
         if (procedure && declared.length > 0 && !SESSIONS.contains(declared[0].getName())) {
-            throw new RuntimeException("Invalid first argument type for stored procs: " + javaName(declared[0])
+            throw new RuntimeException("Invalid first argument type for stored procs: " + javaName(declared[0], scala)
                 + " Expected com.snowflake.snowpark.Session or com.snowflake.snowpark_java.Session" + where);
         }
         final Class<?>[] parameters = procedure && declared.length > 0
             ? Arrays.copyOfRange(declared, 1, declared.length) : declared;
         if (argumentTypes != null) {
             for (final Class<?> parameter : parameters) {
-                if (!SUPPORTED.containsKey(parameter.getName()) && !takenAsArgument(parameter)) {
-                    throw new RuntimeException("Unsupported argument type: " + javaName(parameter) + where);
+                if (supported(parameter, scala) == null && !takenAsArgument(parameter)) {
+                    throw new RuntimeException("Unsupported argument type: " + javaName(parameter, scala) + where);
                 }
             }
         }
-        if (returnType != null && !SUPPORTED.containsKey(handler.getReturnType().getName())) {
-            throw new RuntimeException("Unsupported return type: " + javaName(handler.getReturnType()) + where);
+        if (returnType != null && supported(handler.getReturnType(), scala) == null) {
+            throw new RuntimeException("Unsupported return type: " + javaName(handler.getReturnType(), scala)
+                + where);
         }
         if (argumentTypes != null) {
             for (int i = 0; i < parameters.length && i < argumentTypes.size(); i++) {
                 // A list is paired as a map is: an OBJECT's alone, and any other type is refused in the words the
                 // account has for the map (live-verified).
                 final Class<?> judged = "java.util.List".equals(parameters[i].getName()) ? Map.class : parameters[i];
-                final String refusal = refusal(argumentTypes.get(i), judged, true);
+                final String refusal = refusal(argumentTypes.get(i), judged, true, scala);
                 if (refusal != null) {
                     throw new RuntimeException(refusal.isEmpty()
                         ? "Snowflake type " + storage(argumentTypes.get(i)) + "{nullable} is not supported as input"
-                            + " to argument at index " + i + " with Java type " + SUPPORTED.get(judged.getName())
+                            + " to argument at index " + i + " with Java type " + supported(judged, scala)
                             + where
                         : refusal + where);
                 }
             }
         }
         if (returnType != null) {
-            final String refusal = refusal(returnType, handler.getReturnType(), false);
+            final String refusal = refusal(returnType, handler.getReturnType(), false, scala);
             if (refusal != null) {
                 throw new RuntimeException(refusal.isEmpty()
                     ? "Snowflake type " + storage(returnType) + "{nullable} is not supported for Java return type "
-                        + SUPPORTED.get(handler.getReturnType().getName()) + where
+                        + supported(handler.getReturnType(), scala) + where
                     : refusal + where);
             }
         }
@@ -154,8 +198,9 @@ final class JavaHandlerSignature {
      * Why a SQL type and a Java type do not pair: the scale sentence, an empty string for the not-supported one
      * (spelled by the caller, which knows the direction), or null when they pair or the pair is not judged.
      */
-    private static String refusal(final DataType sqlType, final Class<?> javaType, final boolean argument) {
-        final String java = SUPPORTED.get(javaType.getName());
+    private static String refusal(final DataType sqlType, final Class<?> javaType, final boolean argument,
+                                  final boolean scala) {
+        final String java = supported(javaType, scala);
         final ReturnTypeFamily family = sqlType == null || StructuredTypes.isStructured(sqlType) ? null
             : ReturnTypeFamily.of(sqlType);
         if (java == null || family == null || storage(sqlType) == null) {
@@ -197,9 +242,17 @@ final class JavaHandlerSignature {
             case "com.snowflake.snowpark_java.types.Variant":
                 return family == ReturnTypeFamily.VARIANT || family == ReturnTypeFamily.GEOGRAPHY;
             case "java.util.Map<String, String>":
+            case "scala.collection.immutable.Map[String, String]":
                 return family == ReturnTypeFamily.OBJECT
                     || (argument ? family == ReturnTypeFamily.BINARY : family == ReturnTypeFamily.TIMESTAMP_TZ);
             case "String[]":
+                return family == ReturnTypeFamily.ARRAY;
+            case "int[]":
+            case "long[]":
+            case "float[]":
+            case "double[]":
+            case "short[]":
+            case "boolean[]":
                 return family == ReturnTypeFamily.ARRAY;
             case "byte[]":
                 return family == ReturnTypeFamily.BINARY;
@@ -278,8 +331,21 @@ final class JavaHandlerSignature {
         return precision == 0 && scale == 0 ? "" : "(" + precision + "," + scale + ")";
     }
 
-    /** A Java type as the unsupported-type sentences name it: {@code java.lang.Integer[]}, {@code char}. */
-    private static String javaName(final Class<?> type) {
-        return type.isArray() ? javaName(type.getComponentType()) + "[]" : type.getName();
+    /** The name a sentence gives a type the account takes, or null for one it does not. */
+    private static String supported(final Class<?> type, final boolean scala) {
+        final String java = SUPPORTED.get(type.getName());
+        return java == null && scala ? SCALA_SUPPORTED.get(type.getName()) : java;
+    }
+
+    /**
+     * A Java type as the unsupported-type sentences name it: {@code java.lang.Integer[]}, {@code char}; a Scala
+     * collection as Scala 2.12 erases it, {@code scala.collection.Seq}.
+     */
+    private static String javaName(final Class<?> type, final boolean scala) {
+        if (type.isArray()) {
+            return javaName(type.getComponentType(), scala) + "[]";
+        }
+        final String renamed = scala ? SCALA_212_NAMES.get(type.getName()) : null;
+        return renamed != null ? renamed : type.getName();
     }
 }

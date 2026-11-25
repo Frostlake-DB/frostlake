@@ -177,7 +177,7 @@ public final class TemporaryObjects {
                 for (final FileFormat format : schema.allFileFormats()) {
                     if (format.isTemporary() && (session == null || session.equals(format.getCreatedInSession()))
                             && !kept.contains(format)) {
-                        schema.dropFileFormat(format.getName());
+                        schema.removeFileFormat(format);
                         dropped++;
                         LOGGER.debug("Dropped temporary file format: {}", format.getName());
                     }

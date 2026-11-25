@@ -16,6 +16,7 @@
 package dev.frostlake.http;
 
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
@@ -406,7 +407,7 @@ final class SnowflakeRowset {
             offsetMinutes = ((OffsetDateTime) cell).getOffset().getTotalSeconds() / 60;
         } else if (cell instanceof ZonedDateTime) {
             moment = ((ZonedDateTime) cell).toInstant();
-            offsetMinutes = ((ZonedDateTime) cell).getOffset().getTotalSeconds() / 60;
+            offsetMinutes = WideOffsetZone.offsetSeconds((ZonedDateTime) cell) / 60;
         } else if (cell instanceof Instant) {
             moment = (Instant) cell;
         } else {

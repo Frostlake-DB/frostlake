@@ -39,6 +39,8 @@ import org.antlr.v4.runtime.TokenStream;
  *   BEGIN SHOW TABLES IN DATASET y; SELECT 1; END;     'y', then 'END'     rest read outside the block cannot take
  *   BEGIN SHOW TABLES IN DATASET y END;                'y' alone          END straight after the name
  *   IF (TRUE) THEN SHOW TABLES IN USER x y; END IF;    'x', then what the rest refuses once the IF is given up
+ *   IF (TRUE) THEN SHOW TABLES IN DATASET y; ELSE SELECT 1; SELECT 2; END IF;
+ *                                                      'y', then 'ELSE', then the 'END' of END IF
  * </pre>
  *
  * <p>Past the statement's semicolon the rest is read from the construct around the statement's own, which is given
@@ -108,18 +110,86 @@ final class KeywordScopeLines {
         if (owner == null || name == null) {
             return null;
         }
+        return new KeywordScopeLines(refused, afterName(stream, (ParserRuleContext) e.getCtx(), name));
+    }
+
+    /**
+     * The lines stacked after the refused word once the first name of the scope has been read: the token after the
+     * name in a block's own statement, or the rest read on past the statement's semicolon (see the class comment).
+     * In a block of another block's own list the reading goes one token further: the token after that one, or, past
+     * the statement's semicolon, the token after the plain queries that follow ({@code BEGIN BEGIN SHOW TABLES IN USER
+     * x y; END; END;} is 'x', 'y', then the first END). In an IF's body one word after the name and then an ELSE or
+     * an ELSEIF after the semicolon stack nothing ({@code … IN USER x y; ELSE …} is 'x' alone).
+     *
+     * @param stream the parse's tokens
+     * @param ctx    the context the fault was met in
+     * @param name   the first name of the scope
+     * @return the lines, or null outside every block
+     */
+    static List<String> afterName(final TokenStream stream, final ParserRuleContext ctx, final Token name) {
+        final ParserRuleContext owner = statementListOwner(ctx);
+        if (owner == null) {
+            return null;
+        }
         final Token after = nextSpoken(stream, name.getTokenIndex());
         if (after == null || after.getType() == Token.EOF || after.getType() == FrostlakeLexer.END) {
-            return new KeywordScopeLines(refused, new ArrayList<String>());
+            return new ArrayList<String>();
         }
         final boolean block = owner instanceof FrostlakeParser.BeginEndBlockContext
             || owner instanceof FrostlakeParser.ExceptionHandlerContext;
+        final Token following = after.getType() == FrostlakeLexer.SEMI ? null
+            : nextSpoken(stream, after.getTokenIndex());
         if (after.getType() != FrostlakeLexer.SEMI && block) {
             final List<String> pair = new ArrayList<>();
             pair.add(SyntaxErrorListener.sentence(after));
-            return new KeywordScopeLines(refused, pair);
+            if (nestedBlock(owner) && following != null && following.getType() != Token.EOF) {
+                if (following.getType() != FrostlakeLexer.SEMI) {
+                    pair.add(SyntaxErrorListener.sentence(following));
+                } else {
+                    final List<Token> spoken = BlockReadOn.spoken(stream);
+                    final int semicolon = BlockReadOn.indexAt(spoken, following.getStartIndex());
+                    final Token end = semicolon < 0 ? null
+                        : ShowScopeReadBackLines.afterQueries(spoken, semicolon + 1, 0);
+                    if (end != null) {
+                        pair.add(SyntaxErrorListener.sentence(end));
+                    }
+                }
+            }
+            return pair;
         }
-        return new KeywordScopeLines(refused, BlockReadOn.linesAfter(stream, after));
+        if (owner instanceof FrostlakeParser.IfStatementContext && following != null
+                && following.getType() == FrostlakeLexer.SEMI) {
+            final Token branch = nextSpoken(stream, following.getTokenIndex());
+            if (branch != null && (branch.getType() == FrostlakeLexer.ELSE
+                    || branch.getType() == FrostlakeLexer.ELSEIF)) {
+                return new ArrayList<String>();
+            }
+        }
+        final List<String> rest = BlockReadOn.linesAfter(stream, after);
+        final Token end = after.getType() == FrostlakeLexer.SEMI && !rest.isEmpty()
+                && owner instanceof FrostlakeParser.IfStatementContext
+            ? BlockReadOn.endAfterElseQueries(stream, after) : null;
+        if (end != null) {
+            // ★ AN ELSE OPENING TWO QUERIES OR MORE is refused, and then the END after the queries.
+            final List<String> pair = new ArrayList<>();
+            pair.add(rest.get(0));
+            pair.add(SyntaxErrorListener.sentence(end));
+            return pair;
+        }
+        return rest;
+    }
+
+    /** Whether a block is a statement of another block's own list. */
+    private static boolean nestedBlock(final ParserRuleContext owner) {
+        if (!(owner instanceof FrostlakeParser.BeginEndBlockContext)) {
+            return false;
+        }
+        for (ParserRuleContext up = owner.getParent(); up != null; up = up.getParent()) {
+            if (up instanceof FrostlakeParser.StatementListContext) {
+                return up.getParent() instanceof FrostlakeParser.BeginEndBlockContext;
+            }
+        }
+        return false;
     }
 
     /**

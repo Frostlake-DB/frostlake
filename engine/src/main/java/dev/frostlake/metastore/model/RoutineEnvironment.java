@@ -36,6 +36,7 @@ public final class RoutineEnvironment implements Serializable {
 
     private List<String> packages = new ArrayList<>();
     private String artifactRepository;
+    private List<String> artifactRepositoryPackages;
     private String targetPath;
     private List<String> externalAccessIntegrations = new ArrayList<>();
     private Map<String, String> secrets = new LinkedHashMap<>();
@@ -59,6 +60,37 @@ public final class RoutineEnvironment implements Serializable {
     /** Records the artifact repository as written. */
     public void setArtifactRepository(final String artifactRepository) {
         this.artifactRepository = artifactRepository;
+    }
+
+    /**
+     * The packages the ARTIFACT_REPOSITORY_PACKAGES clause names, in the order written, or null when the routine
+     * writes no such clause.
+     */
+    public List<String> getArtifactRepositoryPackages() {
+        return artifactRepositoryPackages == null ? null : new ArrayList<>(artifactRepositoryPackages);
+    }
+
+    /** Records the packages the ARTIFACT_REPOSITORY_PACKAGES clause names; null for a routine that writes none. */
+    public void setArtifactRepositoryPackages(final List<String> artifactRepositoryPackages) {
+        this.artifactRepositoryPackages = artifactRepositoryPackages == null ? null
+            : new ArrayList<>(artifactRepositoryPackages);
+    }
+
+    /**
+     * The packages a Python routine takes from its artifact repository: those ARTIFACT_REPOSITORY_PACKAGES names
+     * when the routine writes that clause, else those PACKAGES names (live-verified).
+     */
+    public List<String> repositoryPackages() {
+        return artifactRepositoryPackages != null ? new ArrayList<>(artifactRepositoryPackages)
+            : new ArrayList<>(packages);
+    }
+
+    /**
+     * The packages a Python routine takes from outside its artifact repository: those PACKAGES names when the
+     * routine also writes ARTIFACT_REPOSITORY_PACKAGES, else none (live-verified).
+     */
+    public List<String> plainPackages() {
+        return artifactRepositoryPackages != null ? new ArrayList<>(packages) : new ArrayList<String>();
     }
 
     /**
@@ -147,6 +179,7 @@ public final class RoutineEnvironment implements Serializable {
         final RoutineEnvironment copy = new RoutineEnvironment();
         copy.setPackages(packages);
         copy.setArtifactRepository(artifactRepository);
+        copy.setArtifactRepositoryPackages(artifactRepositoryPackages);
         copy.setTargetPath(targetPath);
         copy.setExternalAccessIntegrations(externalAccessIntegrations);
         copy.setSecrets(secretsDeclared ? secrets : null);

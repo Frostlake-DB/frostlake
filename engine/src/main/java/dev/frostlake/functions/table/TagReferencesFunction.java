@@ -23,23 +23,29 @@ import dev.frostlake.executor.commands.DropCommandHandler;
 import dev.frostlake.functions.TableFunction;
 import dev.frostlake.functions.scalar.context.DefinitionOwnership;
 import dev.frostlake.metastore.Catalog;
+import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.SqlObject;
 import dev.frostlake.metastore.TagAssignment;
 import dev.frostlake.metastore.TagAssignments;
 import dev.frostlake.metastore.Taggable;
+import dev.frostlake.metastore.model.ContainerService;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DatabaseRole;
 import dev.frostlake.metastore.model.DynamicTable;
 import dev.frostlake.metastore.model.Function;
+import dev.frostlake.metastore.model.ImageRepository;
 import dev.frostlake.metastore.model.MaterializedView;
 import dev.frostlake.metastore.model.Parameter;
 import dev.frostlake.metastore.model.Procedure;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObjectKind;
+import dev.frostlake.metastore.model.Stream;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
+import dev.frostlake.metastore.model.Task;
 import dev.frostlake.metastore.model.View;
+import dev.frostlake.metastore.model.Warehouse;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
@@ -190,6 +196,25 @@ public class TagReferencesFunction extends TableFunction {
         }
     }
 
+    /**
+     * Refuses a name whose database or schema the session neither uses nor sees as that container not being there,
+     * before anything is said about the object: the database first (live-verified), then the schema.
+     *
+     * @param databaseName the database the name places its object in
+     * @param schemaName   the schema the name places its object in
+     */
+    private void requireSeenContainers(final String databaseName, final String schemaName) {
+        final String missed = ownership == null || databaseName == null || schemaName == null ? null
+            : ownership.missedContainer(databaseName, schemaName);
+        if ("DATABASE".equals(missed)) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Database", databaseName));
+        }
+        if ("SCHEMA".equals(missed)) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Schema",
+                QualifiedName.join(databaseName, schemaName)));
+        }
+    }
+
     /** The kind a table-like object's privileges are recorded under. */
     private static String grantKindOf(final Taggable relation) {
         if (relation instanceof View) {
@@ -199,6 +224,23 @@ public class TagReferencesFunction extends TableFunction {
             return "MATERIALIZED_VIEW";
         }
         return relation instanceof DynamicTable ? "DYNAMIC_TABLE" : "TABLE";
+    }
+
+    /** The role that owns an object of a schema, or null where it records none. */
+    private static String ownerOfSchemaObject(final Object object) {
+        if (object instanceof SqlObject) {
+            return ((SqlObject) object).getOwner();
+        }
+        if (object instanceof Stream) {
+            return ((Stream) object).getOwner();
+        }
+        if (object instanceof Task) {
+            return ((Task) object).getOwner();
+        }
+        if (object instanceof ContainerService) {
+            return ((ContainerService) object).getOwner();
+        }
+        return object instanceof ImageRepository ? ((ImageRepository) object).getOwner() : null;
     }
 
     /** The role that owns a table-like object, or null where it records none. */
@@ -289,6 +331,9 @@ public class TagReferencesFunction extends TableFunction {
 
     /** The schema a tag lives in; a tag that is not there is refused. */
     private Schema homeOfTag(final String[] written) {
+        // A tag in a container the session does not see is refused as that container (live-verified).
+        requireSeenContainers(written.length >= SCHEMA_OBJECT_PARTS ? written[0] : catalog.getCurrentDatabase(),
+            written.length >= 2 ? written[written.length - 2] : catalog.getCurrentSchema());
         final Schema home = catalog.resolveOwningSchema(QualifiedName.join(written));
         final String name = written[written.length - 1];
         if (!home.hasTagExact(name)) {
@@ -689,13 +734,16 @@ public class TagReferencesFunction extends TableFunction {
         final String[] name = qualify(written, 3, kind, objectName);
         final Schema schema = resolveSchema(name[0], name[1], kind, objectName);
         final Object found = schemaObject(schema, domain, name[2]);
+        // A stage, a pipe and a password policy are named by the full path; a stream, a task and an alert as
+        // a table is, by the name as written when it was written bare (live-verified).
+        final String spelled = written.length > 1 || FULL_PATH_DOMAINS.contains(domain)
+            ? schema.qualifiedName(name[2]) : objectName;
         if (found == null) {
-            // A stage, a pipe and a password policy are named by the full path; a stream, a task and an alert as
-            // a table is, by the name as written when it was written bare (live-verified).
-            throw new RuntimeException(SqlCompilationError.doesNotExist(kind,
-                written.length > 1 || FULL_PATH_DOMAINS.contains(domain) ? schema.qualifiedName(name[2])
-                    : objectName));
+            throw new RuntimeException(SqlCompilationError.doesNotExist(kind, spelled));
         }
+        // One the session does not see is refused as one that is not there, as DESCRIBE refuses it.
+        requireSeen(domain.replace(' ', '_'), schema.qualifiedName(name[2]),
+            ownerOfSchemaObject(found), kind, spelled);
         final Taggable object = found instanceof Taggable ? (Taggable) found : null;
         final String cell = CONTAINER_DOMAINS.contains(domain) ? domain.replace(' ', '_') : domain;
         addLineage(rows, new Taggable[] {object, schema, catalog.getDatabase(name[0])},
@@ -733,7 +781,10 @@ public class TagReferencesFunction extends TableFunction {
         } catch (final RuntimeException missing) {
             found = null;
         }
-        if (found == null) {
+        // One the session does not see is refused as one that is not there, its privileges being its signature's.
+        if (found == null || ownership != null && !ownership.sees(domain, GrantNames.routine(schema, found.getName(),
+                found instanceof Function ? ((Function) found).getParameters() : ((Procedure) found).getParameters()),
+                found.getOwner())) {
             throw new RuntimeException(SqlCompilationError.of(nounOf(domain) + " '" + writtenName
                 + "' does not exist or not authorized."));
         }
@@ -807,6 +858,11 @@ public class TagReferencesFunction extends TableFunction {
             // Each kind is refused as a statement over it refuses it, the privilege it asks for included.
             throw new RuntimeException(SqlCompilationError.doesNotExist(kind, objectName));
         }
+        if (found instanceof Warehouse) {
+            // A warehouse the session does not see is refused as one that is not there; a role, the session's own
+            // user and an integration are answered whatever the session holds (live-verified).
+            requireSeen("WAREHOUSE", ((Warehouse) found).getName(), ((Warehouse) found).getOwner(), kind, objectName);
+        }
         final Taggable object = found instanceof Taggable ? (Taggable) found : null;
         addLineage(rows, new Taggable[] {object}, new String[] {domain}, null, null, simpleName, domain, null);
     }
@@ -815,9 +871,16 @@ public class TagReferencesFunction extends TableFunction {
     private void addDatabaseRoleTags(final String[] written, final String objectName, final List<Row> rows) {
         final String[] name = qualify(written, 2, "Database role", objectName);
         final Database database = catalog.getDatabase(name[0]);
+        if (database != null && ownership != null
+                && !ownership.sees("DATABASE", database.getName(), database.getOwner())) {
+            // One of a database the session does not see is refused as that database (live-verified).
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Database", database.getName()));
+        }
         final DatabaseRole role = database == null ? null : database.getDatabaseRole(name[1]);
-        if (role == null) {
-            // Named with its database, however it was written (live-verified).
+        if (role == null || ownership != null
+                && !ownership.seesDatabaseRole(role.getQualifiedName(), role.getOwner())) {
+            // One the session neither holds nor sees is refused as one that is not there, named with its database
+            // however it was written (live-verified).
             throw new RuntimeException(SqlCompilationError.doesNotExist("Database role",
                 QualifiedName.join(name[0], name[1])));
         }
@@ -944,6 +1007,9 @@ public class TagReferencesFunction extends TableFunction {
         if (database == null || schemaName == null) {
             throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint(kind, objectName));
         }
+        // An object of a database the session does not see is refused as that database, whatever the object, and
+        // whether it is there or not (live-verified); one of a schema it does not see, as that schema.
+        requireSeenContainers(database.getName(), schemaName);
         if (!database.hasSchema(schemaName)) {
             // The schema the name places its object in is what is missing, and is refused as such (live-verified).
             throw new RuntimeException(SqlCompilationError.doesNotExist("Schema",

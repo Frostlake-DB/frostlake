@@ -308,7 +308,10 @@ public class ColumnDefinitionParser implements CommandHandler {
             return NumericLiteralTypes.forDecimal(DecimalText.parse(literal.INTEGER_LITERAL().getText()));
         }
         if (literal.FLOAT_LITERAL() != null) {
-            return NumericLiteralTypes.forDecimal(DecimalText.parse(literal.FLOAT_LITERAL().getText()));
+            // Past the exact range a literal is a DOUBLE, as it is anywhere else: 1e38 and 1.5e-50 are FLOAT.
+            final BigDecimal exact = NumericLiteralTypes.exactValue(literal.FLOAT_LITERAL().getText());
+            return NumericLiteralTypes.exceedsExactRange(exact) ? NumericType.FLOAT
+                : NumericLiteralTypes.forDecimal(exact);
         }
         if (literal.TRUE() != null || literal.FALSE() != null) {
             return BooleanType.BOOLEAN;
@@ -332,6 +335,7 @@ public class ColumnDefinitionParser implements CommandHandler {
      *       {@code VARCHAR DEFAULT CURRENT_DATE()} are both out, while {@code UPPER('a')} is fine.</li>
      *   <li>BOOLEAN and VARIANT refuse a number and nothing else — {@code BOOLEAN DEFAULT 'true'} is
      *       legal, and so is {@code BOOLEAN DEFAULT CURRENT_DATE()}.</li>
+     *   <li>A numeric column refuses a number of another numeric family ({@link #numericDefaultFits}).</li>
      *   <li>The numeric family refuses a string, so {@code NUMBER DEFAULT '7'} and
      *       {@code NUMBER DEFAULT UPPER('a')} are out while {@code LENGTH('abc')} is fine, and
      *       {@code DATE DEFAULT 7} is legal in the other direction.</li>
@@ -471,7 +475,7 @@ public class ColumnDefinitionParser implements CommandHandler {
             return !(source instanceof NumericType);
         }
         if (dataType instanceof NumericType) {
-            return !(source instanceof StringType);
+            return !(source instanceof StringType) && numericDefaultFits(dataType, source);
         }
         if (dataType instanceof DateTimeType) {
             if (source instanceof StringType) {
@@ -481,6 +485,26 @@ public class ColumnDefinitionParser implements CommandHandler {
                 || temporalDefaultFits((DateTimeType) dataType, (DateTimeType) source);
         }
         return true;
+    }
+
+    /**
+     * Whether a numeric column takes a DEFAULT of {@code source}, by numeric family (live-verified): a NUMBER
+     * column takes a NUMBER only, so {@code INT DEFAULT 2.5::FLOAT}, {@code INT DEFAULT SQRT(4)} and
+     * {@code INT DEFAULT 2.5::DECFLOAT} are out while {@code INT DEFAULT 1.5e0} - a NUMBER(2,1) literal - is
+     * fine; a FLOAT column takes a NUMBER or a FLOAT but no DECFLOAT; a DECFLOAT column takes a DECFLOAT only,
+     * not even {@code DEFAULT 1}. A source of no numeric family is judged by the table above.
+     */
+    private static boolean numericDefaultFits(final DataType column, final DataType source) {
+        if (!(source instanceof NumericType)) {
+            return true;
+        }
+        if (NumericType.isDecfloat(column)) {
+            return NumericType.isDecfloat(source);
+        }
+        if (NumericType.isApproximate(column)) {
+            return !NumericType.isDecfloat(source);
+        }
+        return NumericType.isExactNumber(source);
     }
 
     /**

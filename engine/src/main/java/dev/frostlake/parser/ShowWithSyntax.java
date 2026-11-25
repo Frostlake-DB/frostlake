@@ -108,6 +108,58 @@ final class ShowWithSyntax {
     }
 
     /**
+     * The lines of a SHOW listing refused at the word after a WITH that opens no privilege list, when that word ends
+     * the statement and the statement stands in a control construct's body (all live-verified): the word, and then the next statement is
+     * passed over and the rest read once the construct around it is given up ({@link BlockReadOn}) — nothing when the
+     * statement passed over closes a construct. A block's own statement is read on as the parse reads it.
+     *
+     * <pre>
+     *   BEGIN LOOP SHOW TABLES WITH x; SELECT 1; END LOOP; END;                        'x', then the last END
+     *   BEGIN IF (TRUE) THEN SHOW TABLES WITH x; ELSE SELECT 1; SELECT 2; END IF; END;   'x', then the last END
+     *   BEGIN IF (TRUE) THEN SHOW TABLES WITH x; END IF; END;                          'x' alone
+     * </pre>
+     *
+     * @param spoken     the text's default-channel tokens, end of input included
+     * @param faultIndex the token index of the token the parse's first line names, or -1
+     * @return the lines, or null for any other fault
+     */
+    static List<String> wordAfterWithInBlock(final List<Token> spoken, final int faultIndex) {
+        int at = -1;
+        for (int i = 0; i < spoken.size(); i++) {
+            if (spoken.get(i).getTokenIndex() == faultIndex) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 2 || at + 2 >= spoken.size() || spoken.get(at - 1).getType() != FrostlakeLexer.WITH
+                || spoken.get(at + 1).getType() != FrostlakeLexer.SEMI || !SyntaxErrorListener.isNameLike(spoken.get(at))) {
+            return null;
+        }
+        int show = at - 2;
+        while (show >= 0 && spoken.get(show).getType() != FrostlakeLexer.SHOW) {
+            final int type = spoken.get(show).getType();
+            if (type == FrostlakeLexer.SEMI || type == FrostlakeLexer.STARTS || type == FrostlakeLexer.IN) {
+                return null;
+            }
+            show--;
+        }
+        if (show < 0 || !BlockReadOn.standsInBlock(spoken, at + 1)
+                || BlockReadOn.standsDirectlyInBlock(spoken, at + 1)) {
+            return null;
+        }
+        final List<String> lines = new ArrayList<>();
+        lines.add(SyntaxErrorListener.sentence(spoken.get(at)));
+        if (spoken.get(at + 2).getType() == FrostlakeLexer.END) {
+            return lines;
+        }
+        final int next = BlockReadOn.semicolonFrom(spoken, at + 2);
+        if (next >= 0) {
+            lines.addAll(BlockReadOn.linesAfter(spoken, next));
+        }
+        return lines;
+    }
+
+    /**
      * The token that ends the statement — its semicolon, or the end of the input — when the fault is a dot written
      * after a name and nothing but dots follows it; null otherwise.
      */

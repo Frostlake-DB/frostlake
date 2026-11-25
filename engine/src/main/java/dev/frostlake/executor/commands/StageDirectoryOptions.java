@@ -91,6 +91,8 @@ final class StageDirectoryOptions {
         final String written;
         if (value != null) {
             written = ParseTreeText.getOriginalText(value);
+        } else if (option.NULL() != null) {
+            written = option.NULL().getText();
         } else {
             written = "(" + (option.stringLiteralList() != null
                 ? ParseTreeText.getOriginalText(option.stringLiteralList()) : "") + ")";

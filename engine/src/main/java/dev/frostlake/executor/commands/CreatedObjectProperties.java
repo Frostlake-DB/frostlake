@@ -17,10 +17,13 @@
 
 package dev.frostlake.executor.commands;
 
+import dev.frostlake.executor.FileFormatClause;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.SqlAccessControlError;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlStringLiterals;
+import dev.frostlake.metastore.model.FileFormat;
+import dev.frostlake.parser.DollarStringLiterals;
 import dev.frostlake.parser.FrostlakeParser;
 
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -130,12 +133,33 @@ final class CreatedObjectProperties {
     }
 
     /**
+     * Judges a table's ON COMMIT clause before its properties and its name: only a temporary table takes one, and of
+     * the two a temporary table takes only PRESERVE ROWS, which is what it does anyway (live-verified).
+     */
+    private static void requireOnCommitOfTemporaryTable(final FrostlakeParser.CreateStatementContext ctx) {
+        final boolean temporary = ctx.TEMPORARY() != null || ctx.TEMP() != null || ctx.VOLATILE() != null;
+        for (final FrostlakeParser.TableTailOptionContext tail : ctx.tableTailOption()) {
+            if (tail.COMMIT() == null) {
+                continue;
+            }
+            if (!temporary) {
+                throw new RuntimeException(SqlCompilationError.of(
+                    "'ON COMMIT' can only be used with temporary object"));
+            }
+            if (tail.DELETE() != null) {
+                throw new RuntimeException("Unsupported feature 'ON COMMIT DELETE ROWS'.");
+            }
+        }
+    }
+
+    /**
      * Judges the properties written around a CREATE TABLE's columns, or an event table's: an event table takes a
      * table's properties but ROW_TIMESTAMP and ERROR_LOGGING, is refused BASE_LOCATION and ENABLE_SCHEMA_EVOLUTION as
      * features, reads a CATALOG as an integration's name, and refuses a parameter at 'EVENT_TABLE', but the log and
      * trace levels at 'TABLE' (live-verified).
      */
     static void requireTableProperties(final FrostlakeParser.CreateStatementContext ctx) {
+        requireOnCommitOfTemporaryTable(ctx);
         final boolean event = ctx.EVENT() != null;
         final List<String> names = new ArrayList<String>();
         final List<FrostlakeParser.CopyOptionValueContext> values =
@@ -350,6 +374,15 @@ final class CreatedObjectProperties {
             }
         }
         rejectListsOfAnotherType(names, constants, lists, order);
+        for (final Integer i : order) {
+            // A staged format's or copy options' list is judged as a table's is (live-verified).
+            final String key = ParameterRegistry.canonical(names.get(i));
+            if ("STAGE_FILE_FORMAT".equals(key) && lists.get(i) != null) {
+                FileFormatClause.read(lists.get(i), new FileFormat("WRITTEN", "CSV"), true);
+            } else if ("STAGE_COPY_OPTIONS".equals(key) && lists.get(i) != null) {
+                StageCopyOptions.read(lists.get(i));
+            }
+        }
         final Set<String> unread = new HashSet<String>();
         for (final String name : names) {
             final String key = ParameterRegistry.canonical(name);
@@ -451,6 +484,30 @@ final class CreatedObjectProperties {
             values.add(property.copyOptionValue());
         }
         requireViewKindProperties(names, values, schemaName, false);
+        for (final FrostlakeParser.ViewPropertyContext property : ctx.viewProperty()) {
+            requireViewList(ParameterRegistry.canonical(property.propertyName().getText()), property);
+        }
+    }
+
+    /**
+     * A list a view's own property is given, judged as a table's is (live-verified): change tracking refuses a list
+     * of properties as {@code invalid value [TOK_PROPERTY_LIST]} and an empty list or a list of constants as an
+     * invalid value specified; the comment takes a list of properties, and refuses a list of constants by its first
+     * element that is no text.
+     */
+    private static void requireViewList(final String key, final FrostlakeParser.ViewPropertyContext property) {
+        final FrostlakeParser.ParenOptionListContext list = property.parenOptionList();
+        final FrostlakeParser.TablePropertyConstantContext constant = property.tablePropertyConstant();
+        final boolean constants = constant != null && constant.LPAREN() != null;
+        if ("CHANGE_TRACKING".equals(key) && (constants || list != null && list.parenOption().isEmpty())) {
+            throw new RuntimeException("Invalid value specified for property '" + key + "'");
+        }
+        if ("CHANGE_TRACKING".equals(key) && list != null) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.PROPERTY_LIST, key));
+        }
+        if ("COMMENT".equals(key) && constants) {
+            throw listedTextValue(key, constant.propertyListConstant());
+        }
     }
 
     /**
@@ -582,7 +639,7 @@ final class CreatedObjectProperties {
         final List<FrostlakeParser.CopyOptionValueContext> values =
             new ArrayList<FrostlakeParser.CopyOptionValueContext>();
         for (final FrostlakeParser.SequenceOptionContext option : ctx.sequenceOptions().sequenceOption()) {
-            if (option.propertyName() != null) {
+            if (option.propertyName() != null && !commentList(option)) {
                 names.add(option.propertyName().getText());
                 values.add(option.copyOptionValue());
             }
@@ -602,6 +659,19 @@ final class CreatedObjectProperties {
         if (!names.isEmpty()) {
             throw cannotSet(ParameterRegistry.canonical(names.get(0)), "SEQUENCE");
         }
+    }
+
+    /**
+     * Whether a CREATE SEQUENCE's option gives the comment a list of properties, which the sequence takes as its
+     * comment (live-verified).
+     *
+     * @param option the option as written
+     * @return whether it does
+     */
+    static boolean commentList(final FrostlakeParser.SequenceOptionContext option) {
+        return option.propertyName() != null && option.parenOptionList() != null
+            && !option.parenOptionList().parenOption().isEmpty()
+            && "COMMENT".equals(ParameterRegistry.canonical(option.propertyName().getText()));
     }
 
     /**
@@ -753,7 +823,8 @@ final class CreatedObjectProperties {
                 fits = number && value.MINUS() == null;
             }
             if (!fits) {
-                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.getText(), key));
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                    DollarStringLiterals.asWritten(value), key));
             }
         }
     }
@@ -815,6 +886,9 @@ final class CreatedObjectProperties {
             if (type != null && STRING.equals(type) && !TABLE_PROPERTIES.containsKey(key)) {
                 return ListValues.CONSTANT_LIST;
             }
+            if (TABLE_PROPERTIES.containsKey(key) && STRING.equals(type)) {
+                throw listedTextValue(key, property.constantList().propertyListConstant());
+            }
             throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.CONSTANT_LIST, key));
         }
         final FrostlakeParser.ParenOptionListContext list = property.parenOptionList();
@@ -869,12 +943,30 @@ final class CreatedObjectProperties {
         if (!text) {
             throw new RuntimeException("Invalid value specified for property '" + key + "'");
         }
-        for (final FrostlakeParser.CopyOptionValueContext element : constant.copyOptionValue()) {
-            if (element.INTEGER_LITERAL() != null || element.booleanValue() != null) {
-                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(element.getText(), key));
+        throw listedTextValue(key, constant.propertyListConstant());
+    }
+
+    /**
+     * A list of constants a text property of a table is given, refused by its first element that is no text - a
+     * number or a switch value as written, NULL as {@code invalid value 'null' for property} - or else by the
+     * parser's word for the list (live-verified).
+     *
+     * @param key      the property's name, canonical
+     * @param elements the list's constants
+     * @return the refusal
+     */
+    static RuntimeException listedTextValue(final String key,
+                                                    final List<FrostlakeParser.PropertyListConstantContext> elements) {
+        for (final FrostlakeParser.PropertyListConstantContext element : elements) {
+            if (element.NULL() != null) {
+                return new RuntimeException(SqlCompilationError.invalidValueForProperty("null", key));
+            }
+            final FrostlakeParser.CopyOptionValueContext value = element.copyOptionValue();
+            if (value.INTEGER_LITERAL() != null || value.booleanValue() != null) {
+                return new RuntimeException(SqlCompilationError.invalidValueForParameter(value.getText(), key));
             }
         }
-        throw new RuntimeException(SqlCompilationError.invalidValueForParameter(CONSTANT_LIST, key));
+        return new RuntimeException(SqlCompilationError.invalidValueForParameter(CONSTANT_LIST, key));
     }
 
     /**
@@ -903,7 +995,8 @@ final class CreatedObjectProperties {
     static void requireSwitchValue(final String name, final FrostlakeParser.CopyOptionValueContext value) {
         final String key = ParameterRegistry.canonical(name);
         if (value != null && BOOLEAN.equals(TABLE_PROPERTIES.get(key)) && value.booleanValue() == null) {
-            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.getText(), key));
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                DollarStringLiterals.asWritten(value), key));
         }
     }
 

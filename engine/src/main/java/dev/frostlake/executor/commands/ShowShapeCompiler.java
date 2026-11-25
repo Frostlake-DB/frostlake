@@ -20,6 +20,7 @@ import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.parser.BlockReadOn;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.parser.ShowScopeReadBackLines;
 import java.util.ArrayList;
 import java.util.List;
 import org.antlr.v4.runtime.CharStream;
@@ -62,6 +63,10 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  *   BEGIN IF (a) THEN SHOW TABLES IN DATASET IDENTIFIER('y'); END IF; END;    'IDENTIFIER', then the last 'END'
  *   BEGIN SHOW TABLES WITH PRIVILEGES USAGE STARTS WITH 'a'; END;             'STARTS' alone
  * </pre>
+ *
+ * <p>A token that is no name, refused in the scope of a SHOW among the outermost block's own statements, names a
+ * token back in the scope next ({@link ShowScopeReadBackLines}): {@code BEGIN SHOW TABLES IN COMPUTE POOL; END;} is
+ * the ';', then 'POOL' (live-verified).
  */
 final class ShowShapeCompiler {
 
@@ -178,6 +183,11 @@ final class ShowShapeCompiler {
         final List<Token> tokens = BlockReadOn.spoken(source.getText(Interval.of(0, source.size() - 1)));
         final int keyword = BlockReadOn.indexOfLine(tokens, first);
         final int type = keyword < 0 ? Token.EOF : tokens.get(keyword).getType();
+        final List<String> readBack = keyword < 0 ? null
+            : ShowScopeReadBackLines.readBack(tokens, keyword, ShowScopeReadBackLines.placement(statement));
+        if (readBack != null) {
+            return new RuntimeException(SqlCompilationError.of(String.join("\n", readBack)));
+        }
         if (type != FrostlakeLexer.LIMIT && type != FrostlakeLexer.STARTS && type != FrostlakeLexer.ROOT
                 && type != FrostlakeLexer.PRIVILEGES && type != FrostlakeParser.KW_IDENTIFIER_REF) {
             return refused;

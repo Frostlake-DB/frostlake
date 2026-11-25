@@ -19,6 +19,7 @@ package dev.frostlake.executor.commands;
 import dev.frostlake.executor.ExpressionEvaluator;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.RoutineOverloads;
+import dev.frostlake.executor.RowPatternDefinitionReferences;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.expressions.DoubledSigns;
 import dev.frostlake.executor.expressions.ParsedEchoPrinter;
@@ -106,6 +107,9 @@ final class ScriptingUdfBodyValidator {
         // What no expression may write is refused before any statement or call is judged: a caret between two
         // values, and a sign written straight after a sign (live-verified).
         DoubledSigns.rejectWithOperators(block);
+        // A row pattern definition reading a column it may not is refused before the body's expressions are judged.
+        RowPatternDefinitionReferences.reject(block,
+            queryExecutor == null ? null : queryExecutor.getFunctionRegistry());
         walk(block, null);
     }
 

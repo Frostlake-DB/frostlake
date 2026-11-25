@@ -73,6 +73,10 @@ final class RowPatternExpressions {
         "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE", "PERCENT_RANK", "CUME_DIST");
 
     private boolean defining;
+    /** The symbol the definition being written defines. */
+    private String definedSymbol;
+    /** How many NEXT and LAST calls of a definition enclose what is being written. */
+    private int neighbors;
     private boolean finalNow;
     /**
      * The symbols the columns of the argument being written are predicated by — {@link #NO_SYMBOL} for a column
@@ -112,11 +116,14 @@ final class RowPatternExpressions {
     /**
      * A symbol's definition as an expression over the rows the clause reads.
      *
+     * @param symbol    the symbol it defines, upper-cased
      * @param condition the definition's condition
      * @return its text
      */
-    String definition(final ParserRuleContext condition) {
+    String definition(final String symbol, final ParserRuleContext condition) {
         defining = true;
+        definedSymbol = symbol;
+        neighbors = 0;
         finalNow = false;
         argumentSymbols = null;
         final StringBuilder out = new StringBuilder();
@@ -253,7 +260,12 @@ final class RowPatternExpressions {
                 out.append("OVER ( ").append(partitionWindow).append(" ) ");
                 return true;
             case "NEXT":
-                writeCall("LEAD", arguments, out);
+                neighbors++;
+                try {
+                    writeCall("LEAD", arguments, out);
+                } finally {
+                    neighbors--;
+                }
                 out.append("OVER ( ").append(partitionWindow).append(" ) ");
                 return true;
             case "FIRST_VALUE":
@@ -267,7 +279,12 @@ final class RowPatternExpressions {
                     return false;
                 }
                 out.append("( ");
-                write(arguments.get(0), out);
+                neighbors++;
+                try {
+                    write(arguments.get(0), out);
+                } finally {
+                    neighbors--;
+                }
                 out.append(") ");
                 return true;
             case "PREV":
@@ -595,7 +612,17 @@ final class RowPatternExpressions {
             return false;
         }
         if (defining) {
-            throw new RuntimeException("Unsupported feature 'Correlated pattern definitions'.");
+            // A definition reads its own symbol's columns as the row it judges; any other qualifier, or any inside a
+            // NEXT or a LAST, is refused (see RowPatternDefinitionReferences).
+            if (neighbors > 0) {
+                throw new RuntimeException(RowPatternDefinitionReferences.WINDOWED);
+            }
+            final FrostlakeParser.QualifiedNameContext own = reference.qualifiedName();
+            if (parts.length != 2 || own.namePart().size() != 1 || !parts[0].equals(definedSymbol)) {
+                throw new RuntimeException(RowPatternDefinitionReferences.CORRELATED);
+            }
+            out.append(ParseTreeText.getOriginalText(own.namePart(0))).append(' ');
+            return true;
         }
         // The qualifier is read as any identifier is — "up" is not the symbol UP — where the pattern's own
         // symbols are named without regard to case (live-verified).

@@ -18,6 +18,7 @@ package dev.frostlake.functions.scalar.datetime;
 
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.executor.expressions.IntervalUnit;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 
 import java.time.DateTimeException;
 import java.time.LocalDateTime;
@@ -96,7 +97,7 @@ public final class FinePartShift {
         }
         if (value instanceof ZonedDateTime) {
             final ZonedDateTime written = (ZonedDateTime) value;
-            return plus(written.toLocalDateTime(), unit, count).atZone(written.getOffset());
+            return WideOffsetZone.atOffsetOf(plus(WideOffsetZone.wallClock(written), unit, count), written);
         }
         if (value instanceof OffsetDateTime) {
             final LocalDateTime utc = LocalDateTime.ofInstant(((OffsetDateTime) value).toInstant(), ZoneOffset.UTC);

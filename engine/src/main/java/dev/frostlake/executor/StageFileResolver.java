@@ -66,21 +66,22 @@ public class StageFileResolver implements StageFileLocator, NamedStageLocator {
         if (path == null) {
             return null;
         }
+        final boolean clientEncrypted = executor.clientEncryptedStage(location);
         if (location.startsWith("@~")) {
-            return new StagedFile(path, "@\"~\"", stripLeadingSlash(location.substring(2)));
+            return new StagedFile(path, "@\"~\"", stripLeadingSlash(location.substring(2)), clientEncrypted);
         }
         if (location.startsWith("@%")) {
             final String reference = location.substring(2);
             final int slash = reference.indexOf('/');
             final String tableName = slash >= 0 ? reference.substring(0, slash) : reference;
             final String relative = slash >= 0 ? reference.substring(slash) : "";
-            return new StagedFile(path, "@" + canonical(lastPart(tableName)), stripLeadingSlash(relative));
+            return new StagedFile(path, "@" + canonical(lastPart(tableName)), stripLeadingSlash(relative), clientEncrypted);
         }
         final String reference = location.substring(1);
         final int slash = reference.indexOf('/');
         final String stageName = slash >= 0 ? reference.substring(0, slash) : reference;
         final String relative = slash >= 0 ? reference.substring(slash + 1) : "";
-        return new StagedFile(path, "@" + qualifiedStageName(stageName), relative);
+        return new StagedFile(path, "@" + qualifiedStageName(stageName), relative, clientEncrypted);
     }
 
     @Override

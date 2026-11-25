@@ -25,6 +25,7 @@ import dev.frostlake.metastore.model.AccountTags;
 import dev.frostlake.metastore.model.AggregationPolicy;
 import dev.frostlake.metastore.model.CloneContent;
 import dev.frostlake.metastore.model.ComputePool;
+import dev.frostlake.metastore.model.Connection;
 import dev.frostlake.metastore.model.Contact;
 import dev.frostlake.metastore.model.CortexSearchService;
 import dev.frostlake.metastore.model.Database;
@@ -101,6 +102,7 @@ public class Catalog {
     private final AccountObjectRegistry<ResourceMonitor> resourceMonitors = new AccountObjectRegistry<>();
     private final AccountObjectRegistry<Share> shares = new AccountObjectRegistry<>();
     private final AccountObjectRegistry<FailoverGroup> failoverGroups = new AccountObjectRegistry<>();
+    private final AccountObjectRegistry<Connection> connections = new AccountObjectRegistry<>();
     private final Map<String, User> users;
     private final Map<String, Role> roles;
     private final AccountDirectory accountDirectory = new AccountDirectory();
@@ -630,10 +632,13 @@ public class Catalog {
         setCurrentSchemaName(schemaName);
     }
 
-    /** Two schemas of the SNOWFLAKE database are listed and not reached by a USE, which fails as any USE fails. */
+    /**
+     * Two schemas of the SNOWFLAKE database are listed and not reached by a USE, which fails as any USE fails; so
+     * does a USE of one the session's roles do not see (see {@link SystemDatabaseSight}).
+     */
     private static void requireUsable(final String databaseName, final String schemaName) {
         final SystemSchema system = SystemSchema.of(databaseName, schemaName);
-        if (system != null && !system.isUsable()) {
+        if (system != null && (!system.isUsable() || SystemDatabaseSight.hidesSchema(schemaName))) {
             throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
         }
     }
@@ -683,7 +688,24 @@ public class Catalog {
         return resolvedName == null || HiddenDatabases.hides(resolvedName) ? null : databases.get(resolvedName);
     }
 
+    /**
+     * The session's current database, or null: also null to a statement whose roles do not see the database the
+     * session holds (see {@link UnseenCurrentDatabase}).
+     *
+     * @return the current database's name, or null
+     */
     public String getCurrentDatabase() {
+        final String held = heldDatabaseName();
+        return UnseenCurrentDatabase.hides(held) ? null : held;
+    }
+
+    /**
+     * The name of the database the session holds as its current one, whether or not the running statement's roles
+     * see it: what a saved context keeps.
+     *
+     * @return the held name, or null
+     */
+    public String heldDatabaseName() {
         final String[] scope = sessionScope.get();
         return scope != null ? scope[0] : currentDatabase;
     }
@@ -699,6 +721,9 @@ public class Catalog {
         final String[] scope = sessionScope.get();
         final String database = scope != null ? scope[0] : currentDatabase;
         final String schema = scope != null ? scope[1] : currentSchema;
+        if (UnseenCurrentDatabase.hides(database)) {
+            return null;
+        }
         if (schema == null || database == null) {
             return schema;
         }
@@ -1313,6 +1338,11 @@ public class Catalog {
     /** The account's failover groups. */
     public AccountObjectRegistry<FailoverGroup> getFailoverGroups() {
         return failoverGroups;
+    }
+
+    /** The account's connections. */
+    public AccountObjectRegistry<Connection> getConnections() {
+        return connections;
     }
 
     /** The account's external volumes. */
@@ -2451,6 +2481,45 @@ public class Catalog {
 
         // ORGADMIN sits OUTSIDE the hierarchy: it holds no role grants at all (live-verified:
         // SHOW GRANTS TO ROLE ORGADMIN lists no roles).
+
+        // No role owns a system role: every listing gives it no owner (live-verified).
+        for (final Role role : Arrays.asList(orgAdmin, accountAdmin, securityAdmin, userAdmin, sysAdmin, publicRole)) {
+            role.setOwner(null);
+        }
+        for (final Role role : Arrays.asList(sysAdmin, userAdmin, securityAdmin)) {
+            for (final Privilege privilege : accountGrantsFromStart(role.getName())) {
+                role.grantPrivilege("ACCOUNT", "ACCOUNT", privilege, "");
+                role.setGrantOption("ACCOUNT", "ACCOUNT", privilege, "", true);
+            }
+        }
+    }
+
+    /**
+     * The privileges a system role holds on the account from the account's start: each with the grant option, granted
+     * by no role, as SHOW GRANTS lists them (live-verified for SYSADMIN, USERADMIN and SECURITYADMIN). A snapshot
+     * records which of them a REVOKE took back, so a restart does not give them back.
+     *
+     * @param roleName the role's canonical name
+     * @return its privileges on the account from the start; none for a role that is no such system role
+     */
+    public static List<Privilege> accountGrantsFromStart(final String roleName) {
+        if ("SYSADMIN".equals(roleName)) {
+            return Arrays.asList(Privilege.CREATE_COMPUTE_POOL, Privilege.CREATE_DATABASE, Privilege.CREATE_WAREHOUSE);
+        }
+        if ("USERADMIN".equals(roleName)) {
+            return Arrays.asList(Privilege.CREATE_ROLE, Privilege.CREATE_USER);
+        }
+        if ("SECURITYADMIN".equals(roleName)) {
+            return Arrays.asList(Privilege.APPLY_AUTHENTICATION_POLICY, Privilege.APPLY_FEATURE_POLICY,
+                Privilege.APPLY_INGRESS_POLICY, Privilege.APPLY_MAINTENANCE_POLICY,
+                Privilege.APPLY_MULTI_PARTY_APPROVAL_POLICY, Privilege.APPLY_PACKAGES_POLICY,
+                Privilege.APPLY_PASSWORD_POLICY, Privilege.APPLY_SESSION_POLICY, Privilege.ATTACH_POLICY,
+                Privilege.BIND_SERVICE_ENDPOINT, Privilege.CREATE_NETWORK_POLICY,
+                Privilege.MANAGE_APPLICATION_SPECIFICATIONS, Privilege.MANAGE_CALLER_GRANTS, Privilege.MANAGE_GRANTS,
+                Privilege.MANAGE_ORGANIZATION_ACCESS, Privilege.MANAGE_SERVICE_CALLER_ACCESS,
+                Privilege.MANAGE_VISIBILITY);
+        }
+        return new ArrayList<>();
     }
 
     /**
@@ -2629,6 +2698,18 @@ public class Catalog {
             || "USERADMIN".equals(roleName)
             || "SYSADMIN".equals(roleName)
             || "PUBLIC".equals(roleName);
+    }
+
+    /**
+     * Whether a system role holds another as part of the account's own role hierarchy rather than through a GRANT
+     * ROLE: such a grant carries the grant option and was granted by no role (live-verified).
+     *
+     * @param holder  the role holding it
+     * @param granted the canonical name of the role held
+     * @return whether the hierarchy grants it
+     */
+    public boolean isSystemRoleGrant(final Role holder, final String granted) {
+        return isSystemRole(holder.getName()) && isSystemRole(granted) && !holder.hasExplicitRoleGrant(granted);
     }
 
     /**

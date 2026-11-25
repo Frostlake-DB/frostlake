@@ -16,6 +16,13 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.expressions.BinaryOperationExpression;
+import dev.frostlake.executor.expressions.BinaryOperator;
+import dev.frostlake.executor.expressions.CastExpression;
+import dev.frostlake.executor.expressions.Expression;
+import dev.frostlake.executor.expressions.LiteralExpression;
+import dev.frostlake.executor.expressions.UnaryOperationExpression;
+import dev.frostlake.executor.expressions.UnaryOperator;
 import dev.frostlake.functions.FunctionRegistry;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.KeyContexts;
@@ -106,6 +113,39 @@ final class UnreadColumnPruning {
     }
 
     /**
+     * {@link #namesRead(ParserRuleContext, ParseTree)} with the statement's own ORDER BY keys left out as well: a
+     * column read only there and holding a constant orders nothing, and live drops such a key before it prunes, so
+     * {@code SELECT y FROM (SELECT <constant> AS x, 1 AS y) ORDER BY x} never computes x (live-verified).
+     *
+     * @param reference where the statement names the relation
+     * @param exclude   the body to leave out
+     * @return the names read outside the ORDER BY keys, or null when the statement can read a column unnamed
+     */
+    static Set<String> namesReadOutsideOrder(final ParserRuleContext reference, final ParseTree exclude) {
+        ParseTree root = reference;
+        while (root.getParent() != null) {
+            root = root.getParent();
+        }
+        final Set<String> names = new HashSet<String>();
+        final Set<ParseTree> skipped = new HashSet<ParseTree>();
+        skipped.add(exclude);
+        statementOrderKeys(root, skipped);
+        return collect(root, names, skipped) ? names : null;
+    }
+
+    /** Adds every query's own ORDER BY clause under {@code node}; a window's or WITHIN GROUP's is not one. */
+    private static void statementOrderKeys(final ParseTree node, final Set<ParseTree> found) {
+        if (node instanceof FrostlakeParser.OrderByClauseContext
+                && node.getParent() instanceof FrostlakeParser.SelectStatementContext) {
+            found.add(node);
+            return;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            statementOrderKeys(node.getChild(i), found);
+        }
+    }
+
+    /**
      * {@code text}, a view's body, with every select item the reader never reads blanked, or null when none
      * can be.
      *
@@ -115,6 +155,18 @@ final class UnreadColumnPruning {
      */
     static String pruned(final String text, final FrostlakeParser.SelectStatementContext body,
                          final List<String> names, final Set<String> read, final FunctionRegistry functions) {
+        return pruned(text, body, names, read, null, functions);
+    }
+
+    /**
+     * As above, an item holding a constant in every arm also blanked where the reader names it only as an ORDER
+     * BY key (see {@link #namesReadOutsideOrder}).
+     *
+     * @param readOutsideOrder what the reader reads outside its ORDER BY keys, or null to keep every key
+     */
+    static String pruned(final String text, final FrostlakeParser.SelectStatementContext body,
+                         final List<String> names, final Set<String> read, final Set<String> readOutsideOrder,
+                         final FunctionRegistry functions) {
         if (!prunable(body, functions)) {
             return null;
         }
@@ -124,7 +176,10 @@ final class UnreadColumnPruning {
         final List<String> unreadNames = new ArrayList<String>();
         for (int i = 0; i < heads.size(); i++) {
             final String name = names != null ? (i < names.size() ? names.get(i) : null) : nameOf(heads.get(i));
-            if (name != null && !read.contains(name.toUpperCase(Locale.ROOT)) && expressionInEveryArm(arms, i)
+            if (name != null && (!read.contains(name.toUpperCase(Locale.ROOT))
+                    || readOutsideOrder != null && !readOutsideOrder.contains(name.toUpperCase(Locale.ROOT))
+                        && constantInEveryArm(arms, i))
+                    && expressionInEveryArm(arms, i)
                     && !windowForQualify(arms, i)) {
                 unread.add(i);
                 unreadNames.add(name);
@@ -435,6 +490,48 @@ final class UnreadColumnPruning {
             if (holdsWindow(node.getChild(i))) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /** Whether the item at {@code index} is a constant of literals in every arm. */
+    private static boolean constantInEveryArm(final List<FrostlakeParser.SelectOperandContext> arms, final int index) {
+        for (final FrostlakeParser.SelectOperandContext arm : arms) {
+            final ParserRuleContext item = itemAt(arm, index);
+            if (!(item instanceof FrostlakeParser.ExprItemContext)) {
+                return false;
+            }
+            try {
+                if (!literalTree(ExpressionEvaluator.parse(
+                        ParseTreeText.getOriginalText(((FrostlakeParser.ExprItemContext) item).booleanExpr())))) {
+                    return false;
+                }
+            } catch (final RuntimeException unreadable) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether an expression is literals alone: casts, signs, sums, differences and products of them. */
+    private static boolean literalTree(final Expression expr) {
+        if (expr instanceof LiteralExpression) {
+            return true;
+        }
+        if (expr instanceof CastExpression) {
+            return literalTree(((CastExpression) expr).getExpression());
+        }
+        if (expr instanceof UnaryOperationExpression) {
+            final UnaryOperator operator = ((UnaryOperationExpression) expr).getOperator();
+            return (operator == UnaryOperator.NEGATE || operator == UnaryOperator.PLUS)
+                && literalTree(((UnaryOperationExpression) expr).getOperand());
+        }
+        if (expr instanceof BinaryOperationExpression) {
+            final BinaryOperator operator = ((BinaryOperationExpression) expr).getOperator();
+            return (operator == BinaryOperator.ADD || operator == BinaryOperator.SUBTRACT
+                    || operator == BinaryOperator.MULTIPLY)
+                && literalTree(((BinaryOperationExpression) expr).getLeft())
+                && literalTree(((BinaryOperationExpression) expr).getRight());
         }
         return false;
     }

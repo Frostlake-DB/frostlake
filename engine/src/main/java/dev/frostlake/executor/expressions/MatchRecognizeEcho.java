@@ -17,6 +17,7 @@
 package dev.frostlake.executor.expressions;
 
 import dev.frostlake.executor.ParseTreeText;
+import dev.frostlake.executor.RowPatternDefinitionReferences;
 import dev.frostlake.executor.SelectItemAccessors;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.parser.FrostlakeParser;
@@ -25,6 +26,7 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -50,7 +52,9 @@ import java.util.Set;
  * and a LAST the LAST_VALUE over the clause's partitions and order. A pattern of more than one term is in
  * parentheses, an anchor the terms beside it in parentheses of their own ({@code ^ x $} is {@code (^(X)$)}), a group
  * of one term that term, and a count quantifier both its bounds, {@code {2}} being {@code {2,2}}, {@code {,3}}
- * {@code {0,3}} and an open upper bound 0.
+ * {@code {0,3}} and an open upper bound 0. A pattern's symbol is its word upper-cased, a quoted one too; only the
+ * definitions of the symbols it names are printed, a column qualified by the definition's own symbol as the column
+ * alone, and the word DEFINE not at all where none is left. An order key is printed as written, its qualifier too.
  */
 final class MatchRecognizeEcho {
 
@@ -110,7 +114,7 @@ final class MatchRecognizeEcho {
             text.append(' ');
         }
         text.append(rowsPerMatch(rows)).append(' ').append(afterMatch(clause.afterMatchSkip()))
-            .append(" PATTERN (").append(pattern(clause.rowPattern())).append(") DEFINE ")
+            .append(" PATTERN (").append(pattern(clause.rowPattern())).append(')')
             .append(definitions(clause, window(keys, order))).append(')');
         final String read = input + " " + text;
         final String named = alias != null ? alias : "values";
@@ -146,12 +150,11 @@ final class MatchRecognizeEcho {
         return keys;
     }
 
-    /** The order keys, each a plain name with its direction and where its nulls sort. */
+    /** The order keys, each a name as written with its direction and where its nulls sort. */
     private List<String> order(final FrostlakeParser.MatchRecognizeClauseContext clause) {
         final List<String> order = new ArrayList<>();
         for (final FrostlakeParser.RowPatternOrderItemContext item : clause.rowPatternOrderItem()) {
-            unmodelled = unmodelled || !(item.expression() instanceof FrostlakeParser.QualifiedNameExprContext)
-                || item.expression().getText().indexOf('.') >= 0;
+            unmodelled = unmodelled || !(item.expression() instanceof FrostlakeParser.QualifiedNameExprContext);
             order.add(written(item.expression()) + ParsedEchoPrinter.sortSuffix(item.DESC() == null,
                 item.NULLS() == null ? null : Boolean.valueOf(item.FIRST() != null)));
         }
@@ -222,7 +225,12 @@ final class MatchRecognizeEcho {
         return "AFTER MATCH SKIP TO " + (target.FIRST() != null ? "FIRST " : "LAST ") + symbol(target.identifier());
     }
 
-    /** A pattern symbol's name; a quoted one is not modelled. */
+    /** A pattern symbol's name as a pattern names it: its word upper-cased, a quoted one too. */
+    private static String patternSymbol(final FrostlakeParser.IdentifierContext name) {
+        return ParseTreeText.getIdentifier(name).toUpperCase(Locale.ROOT);
+    }
+
+    /** A skip target's symbol; a quoted one is not modelled. */
     private String symbol(final FrostlakeParser.IdentifierContext name) {
         unmodelled = unmodelled || name.getText().startsWith("\"");
         return ParseTreeText.getIdentifier(name);
@@ -293,7 +301,7 @@ final class MatchRecognizeEcho {
             return pattern(ctx.rowPattern(0));
         }
         if (ctx.identifier() != null) {
-            return symbol(ctx.identifier());
+            return patternSymbol(ctx.identifier());
         }
         unmodelled = true;
         return "";
@@ -333,8 +341,22 @@ final class MatchRecognizeEcho {
             + String.join(", ", order);
     }
 
+    /**
+     * The definitions of the symbols the pattern names, after the word DEFINE, or nothing where there are none. A
+     * column qualified by the definition's own symbol is that column alone.
+     */
     private String definitions(final FrostlakeParser.MatchRecognizeClauseContext clause, final String window) {
+        final Set<String> symbols = new HashSet<>();
+        RowPatternDefinitionReferences.collectSymbols(clause.rowPattern(), symbols);
+        final String[] symbol = new String[1];
         final ParsedEchoPrinter defining = ParsedEchoPrinter.inQuery(queries, new CallEcho() {
+            @Override
+            public String spellColumn(final ColumnReferenceExpression column, final ParsedEchoPrinter printer) {
+                return column.isQualified() && column.getPositionalOrdinal() <= 0
+                    && symbol[0].equals(column.getTableName()) ? SqlIdentifiers.spellCanonical(column.getColumnName())
+                    : null;
+            }
+
             @Override
             public String spell(final FunctionCallExpression call, final ParsedEchoPrinter printer) {
                 final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
@@ -350,10 +372,13 @@ final class MatchRecognizeEcho {
             }
         });
         final StringBuilder text = new StringBuilder();
-        final List<FrostlakeParser.RowPatternDefinitionContext> definitions = clause.rowPatternDefinition();
-        for (int i = 0; i < definitions.size(); i++) {
-            final FrostlakeParser.RowPatternDefinitionContext definition = definitions.get(i);
-            text.append(i > 0 ? ", " : "").append(symbol(definition.identifier())).append(" AS RUNNING IFNULL((")
+        for (final FrostlakeParser.RowPatternDefinitionContext definition : clause.rowPatternDefinition()) {
+            symbol[0] = ParseTreeText.getIdentifier(definition.identifier());
+            if (!symbols.contains(symbol[0])) {
+                continue;
+            }
+            text.append(text.length() == 0 ? " DEFINE " : ", ").append(SqlIdentifiers.spellCanonical(symbol[0]))
+                .append(" AS RUNNING IFNULL((")
                 .append(new ExpressionAstBuilder().build(definition.booleanExpr()).accept(defining))
                 .append(") = TRUE, FALSE)");
         }

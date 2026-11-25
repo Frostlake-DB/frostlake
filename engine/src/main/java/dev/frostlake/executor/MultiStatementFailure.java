@@ -39,6 +39,10 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  * <p>Only a failure DURING EXECUTION is spelled this way. A script whose text will not parse is
  * refused as a whole before any of it runs, with an ordinary syntax error that names no statement,
  * and a request carrying a single statement answers with that statement's own error unadorned.
+ *
+ * <p>Whatever the statement failed with — a compilation error, a runtime error, a block's uncaught exception — the
+ * failure carries the helper's code {@value #CODE} and SQLSTATE {@value #STATE}, not the statement's own
+ * (live-verified).
  */
 public final class MultiStatementFailure extends RuntimeException {
 
@@ -46,6 +50,19 @@ public final class MultiStatementFailure extends RuntimeException {
 
     /** The account's helper, named in the sentence a failing statement produces. */
     private static final String HELPER = "SYSTEM$MULTISTMT";
+
+    /** How the sentence starts, whatever statement failed. */
+    public static final String PREFIX =
+        "JavaScript execution error: Uncaught Execution of multiple statements failed on statement \"";
+
+    /**
+     * The code every such failure carries, whatever the statement failed with: the helper's own, which a client
+     * reads, a block's handler reads as SQLCODE and the query history records (live-verified).
+     */
+    public static final int CODE = 100132;
+
+    /** The SQLSTATE every such failure carries (live-verified). */
+    public static final String STATE = "P0000";
 
     private MultiStatementFailure(final String message, final RuntimeException cause) {
         super(message, cause);
@@ -175,8 +192,7 @@ public final class MultiStatementFailure extends RuntimeException {
     /** The account's sentence for the statement quoted at its place, carrying its own error inside. */
     private static String sentence(final String quoted, final RuntimeException failure, final int[] at) {
         final String inner = failure.getMessage() != null ? failure.getMessage() : failure.toString();
-        return "JavaScript execution error: Uncaught Execution of multiple statements failed on statement \""
-            + quoted + "\" (at line " + at[0] + ", position " + at[1] + ").\n"
+        return PREFIX + quoted + "\" (at line " + at[0] + ", position " + at[1] + ").\n"
             + inner
             + " in " + HELPER + " at '    throw `Execution of multiple statements failed on statement"
             + " {0} (at line {1}, position {2}).`.replace('{1}', LINES[i])' position 4\n"

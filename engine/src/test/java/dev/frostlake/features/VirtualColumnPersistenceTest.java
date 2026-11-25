@@ -23,6 +23,7 @@ import dev.frostlake.storage.ResultSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.io.File;
 import java.io.IOException;
@@ -30,10 +31,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A virtual column survives a reload: the engine that reopens the directory tells its expression back and computes
- * it for the rows written after.
+ * it for the rows written after, and a row whose virtual value faulted keeps the fault for the statements that read
+ * the column.
  */
 public class VirtualColumnPersistenceTest {
 
@@ -78,6 +82,32 @@ public class VirtualColumnPersistenceTest {
         final ResultSet described = engine2.executeQuery("DESCRIBE TABLE v");
         assertEquals("VIRTUAL", described.getRows().get(1).getValue(2));
         assertEquals("A + 1", described.getRows().get(1).getValue(8));
+        engine2.shutdown();
+    }
+
+    @Test
+    public void aFaultedVirtualValueSurvivesAReload() {
+        final DatabaseEngine engine1 = new DatabaseEngine(config);
+        engine1.execute("CREATE DATABASE IF NOT EXISTS test_db");
+        engine1.execute("USE DATABASE test_db");
+        engine1.execute("CREATE SCHEMA IF NOT EXISTS test_schema");
+        engine1.execute("USE SCHEMA test_schema");
+        engine1.execute("CREATE TABLE vz (a INT, b NUMBER(7,6) AS (1 / a))");
+        engine1.execute("INSERT INTO vz (a) VALUES (0), (2)");
+        engine1.shutdown();
+
+        final DatabaseEngine engine2 = new DatabaseEngine(config);
+        engine2.execute("USE DATABASE test_db");
+        engine2.execute("USE SCHEMA test_schema");
+        final ResultSet rows = engine2.executeQuery("SELECT a FROM vz ORDER BY a");
+        assertEquals(2, rows.getRows().size());
+        final RuntimeException fault = assertThrows(RuntimeException.class, new Executable() {
+            @Override
+            public void execute() {
+                engine2.executeQuery("SELECT a, b FROM vz ORDER BY a");
+            }
+        });
+        assertTrue(fault.getMessage().contains("Division by zero"), fault.getMessage());
         engine2.shutdown();
     }
 

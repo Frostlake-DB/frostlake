@@ -28,10 +28,11 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * SUM, AVG and the interpolating percentiles over a DECFLOAT argument, in DECFLOAT's own terms: every value adds to
- * 38 significant digits whatever its magnitude, so SUM over 1e1000, -2.47e999 and 22e-75 is 7.53e999 and their AVG
- * 2.51e999 (live-verified), where the fixed-point paths refuse a total past 38 digits. NULLs are skipped; no value at
- * all is NULL.
+ * SUM, AVG and the interpolating percentiles over a DECFLOAT argument, in DECFLOAT's own terms: the values add
+ * exactly whatever their magnitudes and the total is held to 38 significant digits once, so SUM over 1e1000,
+ * -2.47e999 and 22e-75 is 7.53e999 and their AVG 2.51e999, SUM over 1e100, 1e-100 and -1e100 is 1e-100, and AVG is
+ * the held SUM over the count (live-verified), where the fixed-point paths refuse a total past 38 digits. NULLs are
+ * skipped; no value at all is NULL.
  */
 public final class DecfloatAggregates {
 
@@ -42,16 +43,31 @@ public final class DecfloatAggregates {
     }
 
     /**
-     * A running total plus a value; a total past DECFLOAT's range is the aggregate's own overflow, "Value overflow in
-     * a SUM aggregate" (live-verified).
+     * A running total plus a value, exactly: the total is held to 38 digits only when the sum is read (see
+     * {@link #held}). A total that would pass DECFLOAT's range at any step is the aggregate's own overflow, "Value
+     * overflow in a SUM aggregate", even where a later value would bring it back: the largest DECFLOAT twice and then
+     * once less is refused (live-verified).
      *
-     * @param total the running total
+     * @param total the exact running total
      * @param value the value
-     * @return the new total
+     * @return the new exact total
      */
     static BigDecimal added(final BigDecimal total, final BigDecimal value) {
+        final BigDecimal sum = total.add(value);
+        held(sum);
+        return sum;
+    }
+
+    /**
+     * An exact total as the DECFLOAT SUM answers it: held to 38 significant digits, half away from zero; one past
+     * DECFLOAT's range is "Value overflow in a SUM aggregate".
+     *
+     * @param total the exact total
+     * @return the total held
+     */
+    static BigDecimal held(final BigDecimal total) {
         try {
-            return Decfloats.held(total.add(value));
+            return Decfloats.held(total);
         } catch (final DecfloatRangeException outOfRange) {
             throw new AggregateRangeRefusal("Value overflow in a SUM aggregate");
         }
@@ -71,11 +87,11 @@ public final class DecfloatAggregates {
                 sum = sum == null ? held : added(sum, held);
             }
         }
-        return sum;
+        return sum == null ? null : held(sum);
     }
 
     /**
-     * The DECFLOAT average of the values: their sum over their count, to 38 significant digits.
+     * The DECFLOAT average of the values: their held sum over their count, to 38 significant digits.
      *
      * @param values the values, NULLs skipped
      * @return the average, or null when no value is given
@@ -90,7 +106,7 @@ public final class DecfloatAggregates {
                 count++;
             }
         }
-        return sum == null ? null : Decfloats.divide(sum, BigDecimal.valueOf(count));
+        return sum == null ? null : Decfloats.divide(held(sum), BigDecimal.valueOf(count));
     }
 
     /**

@@ -206,9 +206,21 @@ final class CallShapeRules {
         return new RuntimeException(SqlCompilationError.of("invalid function '" + name + "'"));
     }
 
-    /** The quantifier's refusal: the call echoed from the plan with the quantifier as written. */
+    /**
+     * The quantifier's refusal: the call echoed from the plan with the quantifier as written. DIV, the name of an
+     * operator, is echoed as the operator over its operands, with no quantifier: {@code DIV(DISTINCT 1, 2)} is
+     * {@code '1 DIV 2'} (live-verified).
+     */
     private RuntimeException quantifierRefusal(final String name, final String quantifier,
                                                final List<Expression> arguments) {
+        if ("DIV".equalsIgnoreCase(name)) {
+            final StringBuilder operands = new StringBuilder();
+            for (final Expression argument : arguments) {
+                operands.append(operands.length() > 0 ? " DIV " : "").append(context.strictQuantifierText(argument));
+            }
+            return new RuntimeException(SqlCompilationError.of("invalid use of '"
+                + quantifier.toLowerCase(Locale.ROOT) + "' for function '" + operands + "'"));
+        }
         final StringBuilder echo = new StringBuilder(echoedName(name)).append('(').append(quantifier).append(' ');
         final int unitSlot = DateTimeUnitSlot.positionIn(name);
         for (int i = 0; i < arguments.size(); i++) {

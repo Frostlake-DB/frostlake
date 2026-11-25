@@ -22,6 +22,7 @@ import dev.frostlake.executor.DerivedColumnLineage;
 import dev.frostlake.executor.DmlWriteTarget;
 import dev.frostlake.executor.EqualityCorrelation;
 import dev.frostlake.executor.ExpressionEvaluator;
+import dev.frostlake.executor.NestedSubqueryRefusalPlace;
 import dev.frostlake.executor.OuterNameConstancy;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.PrivilegeRefusal;
@@ -36,6 +37,8 @@ import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.StoredColumnValues;
 import dev.frostlake.executor.SubqueryAhead;
 import dev.frostlake.executor.SubqueryCompilation;
+import dev.frostlake.executor.UnfoldedBody;
+import dev.frostlake.executor.UnreadExistsSubqueries;
 import dev.frostlake.executor.UnreadRowItems;
 import dev.frostlake.functions.CollationMatching;
 import dev.frostlake.metastore.model.Function;
@@ -43,11 +46,16 @@ import dev.frostlake.metastore.model.JoinedRelations;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.parser.KeyContexts;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
+import dev.frostlake.types.NumericType;
+import dev.frostlake.types.VariantType;
 import dev.frostlake.values.ValueRange;
+import dev.frostlake.values.VariantValue;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.math.BigDecimal;
@@ -84,8 +92,16 @@ final class SubqueryEvaluator {
     private final Set<String> judgedCorrelations = new HashSet<>();
     /** Each EXISTS met, by its copy's key, as it is run (see {@link #countedBody}). */
     private final Map<String, SubqueryExpression> countedBodies = new HashMap<>();
+    /** The subqueries left unread in each EXISTS body's select items, by the EXISTS's key. */
+    private final Map<String, Set<String>> unreadItems = new HashMap<>();
     /** Scalar subqueries by key, each as it is run (see {@link #statisticsBody}). */
     private final Map<String, SubqueryExpression> statisticsBodies = new HashMap<>();
+    /** Each subquery's columns as the statistics tell their NULLs (see {@link #heldColumns}), null where unread. */
+    private final Map<String, List<ResultSetColumn>> heldShapes = new HashMap<>();
+    /** Whether each correlated subquery reads the outer row only in conditions the statistics settle. */
+    private final Map<String, Boolean> settledCorrelations = new HashMap<>();
+    /** Each subquery's places that are one value on every row (see {@link QueryExecutor#placeIsConstant}). */
+    private final Map<String, boolean[]> constantPlaces = new HashMap<>();
     /** Each copy's equality correlation, by key, as analyzed once (see {@link #equalityCorrelationOf}). */
     private final Map<String, EqualityCorrelation> equalityCorrelations = new HashMap<>();
     /** The outer keys of each copy's equality correlation, parsed, by key. */
@@ -98,6 +114,12 @@ final class SubqueryEvaluator {
     private final Map<String, Expression> residuals = new HashMap<>();
     /** The evaluator of each copy's residual over its keyed rows, by its residual key, built once. */
     private final Map<String, ExpressionEvaluator> residualEvaluators = new HashMap<>();
+    /** The relation each copy's keyed rows form, by its residual key, built once. */
+    private final Map<String, Table> residualTables = new HashMap<>();
+    /** Each copy's aggregate item over its arguments' columns, by its residual key, parsed once. */
+    private final Map<String, FrostlakeParser.ExpressionContext> residualAggregates = new HashMap<>();
+    /** Whether the quantified comparison being judged is an ALL whose operator is no inequality. */
+    private boolean orderedUniversal;
 
     /** What a copy's memo key is followed by in the keys of its residual's analysis and rows. */
     private static final String RESIDUAL = "\u0000residual";
@@ -119,25 +141,39 @@ final class SubqueryEvaluator {
             return false;
         }
         final String unread = unreadSelectList(expr);
+        final Set<String> unreadItems = unreadItemSubqueries(expr);
         String waived = unread != null ? UnreadRowItems.begin(unread) : null;
+        Set<String> waivedItems = unreadItems.isEmpty() ? null : UnreadExistsSubqueries.begin(unreadItems);
+        // A select list nobody reads holds no constant the plan folds (see UnfoldedBody).
+        final boolean unfolded = unread != null ? UnfoldedBody.begin() : UnfoldedBody.isActive();
         final Boolean answered;
         try {
             answered = probedExists(expr, body);
         } finally {
+            if (!unreadItems.isEmpty()) {
+                UnreadExistsSubqueries.end(waivedItems);
+            }
             if (unread != null) {
                 UnreadRowItems.end(waived);
+                UnfoldedBody.end(unfolded);
             }
         }
         if (answered != null) {
             return answered;
         }
         waived = unread != null ? UnreadRowItems.begin(unread) : null;
+        waivedItems = unreadItems.isEmpty() ? null : UnreadExistsSubqueries.begin(unreadItems);
+        final boolean unfoldedRows = unread != null ? UnfoldedBody.begin() : UnfoldedBody.isActive();
         final List<ResultSet> results;
         try {
             results = countedSubquery(body);
         } finally {
+            if (!unreadItems.isEmpty()) {
+                UnreadExistsSubqueries.end(waivedItems);
+            }
             if (unread != null) {
                 UnreadRowItems.end(waived);
+                UnfoldedBody.end(unfoldedRows);
             }
         }
 
@@ -146,6 +182,27 @@ final class SubqueryEvaluator {
         }
 
         return results.get(0).getRowCount() > 0;
+    }
+
+    /**
+     * The subqueries in the select items of an EXISTS's body whose value no row of the body reads (see
+     * {@link CorrelatedSubqueryRule#unreadItemSubqueries}), by their text; empty for any other subquery.
+     */
+    private Set<String> unreadItemSubqueries(final SubqueryExpression expr) {
+        final String key = memoKey(expr);
+        Set<String> texts = unreadItems.get(key);
+        if (texts == null) {
+            texts = Collections.emptySet();
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            final FrostlakeParser.SelectStatementContext parsed = expr.isExistence()
+                ? queryExecutor.subqueryStatement(expr.getSubquery()) : null;
+            if (parsed != null) {
+                texts = new CorrelatedSubqueryRule(queryExecutor, Collections.<String>emptySet(),
+                    visitor.scopeRelations()).unreadItemSubqueries(parsed);
+            }
+            unreadItems.put(key, texts);
+        }
+        return texts;
     }
 
     /**
@@ -325,6 +382,12 @@ final class SubqueryEvaluator {
         // An aggregate over an equality correlation reads its value by the outer row's key from values computed once
         // for every key; a row no key equals runs the subquery once, and its value is the one every such row reads.
         final PreparedKeyedValues keyed = keyedValuesOf(expr);
+        if (keyed == null) {
+            final Object residual = residualAggregate(expr);
+            if (residual != NOT_KEYED) {
+                return residual;
+            }
+        }
         boolean missed = false;
         if (keyed != null) {
             final List<Object> probe = preparedProbe(memoKey(expr), preparedQueries.get(memoKey(expr)));
@@ -447,17 +510,7 @@ final class SubqueryEvaluator {
         if (group.isEmpty()) {
             return Boolean.FALSE;
         }
-        ExpressionEvaluator evaluator = residualEvaluators.get(key);
-        if (evaluator == null) {
-            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
-            final List<TableColumn> columns = new ArrayList<>();
-            for (final ResultSetColumn column : rows.itemColumns()) {
-                columns.add(new TableColumn(column.getName(), column.getDataType(), true, null, false, false, false));
-            }
-            evaluator = new ExpressionEvaluator(new Table(RESIDUAL_ROWS, columns, false),
-                queryExecutor.getFunctionRegistry(), queryExecutor.getCatalog(), queryExecutor);
-            residualEvaluators.put(key, evaluator);
-        }
+        final ExpressionEvaluator evaluator = residualEvaluatorOf(key, rows);
         evaluator.setOuterLateralContext(buildLateralContext());
         final Expression residual = residuals.get(key);
         for (final Row row : group) {
@@ -613,6 +666,15 @@ final class SubqueryEvaluator {
      * outer name it reads carries a collation.
      */
     private EqualityCorrelation analyzedResidual(final String key, final SubqueryExpression body) {
+        return analyzedResidual(key, body, false);
+    }
+
+    /**
+     * As above, for a subquery answering one row per row it keeps or, where {@code aggregated} is set, for a subquery
+     * whose one select item aggregates them.
+     */
+    private EqualityCorrelation analyzedResidual(final String key, final SubqueryExpression body,
+                                                 final boolean aggregated) {
         final QueryExecutor queryExecutor = visitor.getQueryExecutor();
         final FrostlakeParser.SelectStatementContext parsed = queryExecutor.subqueryStatement(body.getSubquery());
         if (parsed == null) {
@@ -624,7 +686,8 @@ final class SubqueryEvaluator {
         }
         final EqualityCorrelation correlation =
             new CorrelatedSubqueryRule(queryExecutor, outerNames).residualCorrelation(parsed);
-        if (correlation == null || !correlation.answersARowPerKeptRow()) {
+        if (correlation == null || (aggregated ? correlation.getAggregateItem() == null
+                : !correlation.answersARowPerKeptRow())) {
             return null;
         }
         try {
@@ -1069,7 +1132,13 @@ final class SubqueryEvaluator {
         // A query that reads the row around it is matched row against row, as a join is: its IN is TRUE for a
         // match and FALSE for everything else, a NULL probe and a NULL in the set included, where its NOT IN keeps
         // the three values (live-verified).
-        final boolean twoValued = !not && subqueryMemo != null && subqueryMemo.isCorrelated(subquery);
+        // Not where the query reads that row only in filters the statistics settle: the plan folds them away and the
+        // IN is three-valued as an uncorrelated one is, while its NOT IN reads a set of NULLs alone as empty (see
+        // correlationSettledAway).
+        final boolean correlated = subqueryMemo != null && subqueryMemo.isCorrelated(subquery);
+        final boolean settledAway = correlated && correlationSettledAway(expr);
+        final boolean twoValued = !not && correlated && !settledAway;
+        final boolean nullsPassed = not && settledAway;
         // A NULL probe that reads no column is folded with its membership, which is UNKNOWN whatever the set
         // holds: NULL IN (…) over an empty set and over a query reading the row around it (live-verified).
         if (value == null && nullBeforeAnyRow(subject)) {
@@ -1084,7 +1153,10 @@ final class SubqueryEvaluator {
         // ExpressionEvaluatorVisitor.visitIn: a NULL probe is UNKNOWN, and a miss over a set that contains a
         // NULL member is UNKNOWN for both.
         if (value == null) {
-            return twoValued ? Boolean.FALSE : null;
+            // A NOT IN is FALSE for a NULL probe over a set that holds no NULL and cannot answer one, as an ALL is.
+            return twoValued || nullsPassed
+                || not && !holdsNullMember(resultSet) && answersNoNull(expr, resultSet)
+                && !queryExecutor.aggregatesToOneRow(expr.getSubquery()) ? Boolean.FALSE : null;
         }
         // Uncorrelated subquery (result cached, identical for every outer row): build a membership
         // index once and probe O(1) per outer row, instead of an O(subqueryRows) linear scan per row.
@@ -1109,7 +1181,13 @@ final class SubqueryEvaluator {
         // that does not read refuses the statement wherever the match stands: 2 IN ('02', 'x') raises for 'x'
         // (live-verified).
         final boolean convertsEvery = !(value instanceof String);
+        // A DATE, TIME, timestamp or BINARY a VARIANT holds arrives bare; beside a VARIANT or a text member it is
+        // the VARIANT it is, never equal to the string of its text (live-verified).
+        final VariantValue typedProbe = subject != null && ExpressionEvaluatorVisitor.typedVariantScalar(value)
+            && visitor.inferStaticType(subject) instanceof VariantType
+            ? ExpressionEvaluatorVisitor.asVariantValue(value) : null;
         boolean anyNull = false;
+        boolean anyValue = false;
         boolean matched = false;
         for (final Row subRow : resultSet.getRows()) {
             final Object subValue = DeferredFault.read(subRow.getValue(0));
@@ -1117,8 +1195,11 @@ final class SubqueryEvaluator {
                 anyNull = true;
                 continue;
             }
-            if (collation != null ? CollationMatching.equalUnder(collation, value, subValue)
-                    : ExpressionArithmetic.equals(value, subValue)) {
+            anyValue = true;
+            final Object probe = typedProbe != null
+                && (subValue instanceof VariantValue || subValue instanceof CharSequence) ? typedProbe : value;
+            if (collation != null ? CollationMatching.equalUnder(collation, probe, subValue)
+                    : ExpressionArithmetic.keyEquals(probe, subValue)) {
                 matched = true;
                 if (!convertsEvery) {
                     break;
@@ -1128,7 +1209,7 @@ final class SubqueryEvaluator {
         if (matched) {
             return !not;
         }
-        return anyNull && !twoValued ? null : not;
+        return anyNull && !twoValued && !(nullsPassed && !anyValue) ? null : not;
     }
 
     /**
@@ -1143,7 +1224,10 @@ final class SubqueryEvaluator {
         final SubqueryMemo memo = visitor.getSubqueryMemo();
         final String key = memoKey(expr);
         final EqualityCorrelation correlation = memo == null ? null : equalityCorrelationOf(key, settledBody(expr));
-        if (correlation == null || !correlation.answersARowPerKeptRow() || correlation.getMemberItem() == null) {
+        if (correlation == null) {
+            return memo == null ? NOT_KEYED : residualMembership(value, expr, not, subjectCollation, subject, memo);
+        }
+        if (!correlation.answersARowPerKeptRow() || correlation.getMemberItem() == null) {
             return NOT_KEYED;
         }
         final String membersQuery = correlation.membersQuery(heldKeysConjunct(correlation, key));
@@ -1189,7 +1273,7 @@ final class SubqueryEvaluator {
                 continue;
             }
             if (collation != null ? CollationMatching.equalUnder(collation, value, member)
-                    : ExpressionArithmetic.equals(value, member)) {
+                    : ExpressionArithmetic.keyEquals(value, member)) {
                 matched = true;
                 if (!convertsEvery) {
                     break;
@@ -1200,6 +1284,287 @@ final class SubqueryEvaluator {
             return !not;
         }
         return anyNull && !twoValued ? null : not;
+    }
+
+    /**
+     * An IN whose subquery reads the outer row through equalities and through other conjuncts as well (see
+     * {@link CorrelatedSubqueryRule#residualCorrelation}), answered from the members of the inner rows of the outer
+     * row's keys whose residual holds, those rows computed once for the statement with the residual's columns and the
+     * member: the answer running the subquery for the row gives, in time that grows with the rows of each key rather
+     * than with the whole inner relation. {@link #NOT_KEYED} where it cannot be settled that way, and the subquery
+     * runs.
+     *
+     * <p>The rows are computed over every inner row the subquery's other conjuncts keep. Which of those rows the
+     * account computes a fault over depends on the outer query's filters and on the membership's negation, so where
+     * the computation meets a fault the copy runs for each row instead, which raises what those rows raise.
+     */
+    private Object residualMembership(final Object value, final SubqueryExpression expr, final boolean not,
+                                      final ExpressionCollation subjectCollation, final Expression subject,
+                                      final SubqueryMemo memo) {
+        final String key = memoKey(expr) + RESIDUAL;
+        if (perRowOnly.contains(key)) {
+            return NOT_KEYED;
+        }
+        EqualityCorrelation correlation = equalityCorrelations.get(key);
+        if (correlation == null) {
+            correlation = Boolean.FALSE.equals(memo.cachedComputedOnceVerdict(key)) ? null
+                : analyzedResidual(key, settledBody(expr));
+            if (correlation == null || correlation.getMemberItem() == null
+                    || writesOrUnparsed(correlation.getMemberItem())) {
+                return runsPerRow(key, memo);
+            }
+            equalityCorrelations.put(key, correlation);
+        }
+        final String rowsQuery = correlation.residualMembersQuery();
+        final int keys = correlation.keyCount();
+        final int memberColumn = correlation.residualItemCount();
+        PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
+        if (rows == null) {
+            final ResultSet computed = computedOnce(key, rowsQuery, keys + memberColumn + 1, keys);
+            if (computed == null || residualColumnsCollate(computed, keys) || holdsAFault(computed.getRows())) {
+                return runsPerRow(key, memo);
+            }
+            memo.recordComputedOnceVerdict(key, true);
+            final ExpressionCollation[] collations = keyCollations(computed, keys);
+            rows = PreparedKeyedRows.build(collatedRows(computed.getRows(), collations), keys, computed.getColumns());
+            memo.recordKeyedRows(rowsQuery, rows);
+            memo.recordKeyCollations(rowsQuery, collations);
+        }
+        final List<Object> outer = preparedProbe(key, rowsQuery);
+        if (outer == null || !holdsNull(outer) && !rows.answers(outer)) {
+            return NOT_KEYED;
+        }
+        memo.recordCorrelated(memoKey(expr));
+        final List<Object> held = new ArrayList<>();
+        if (!holdsNull(outer)) {
+            final List<Row> group = rows.rowsOf(outer);
+            if (!group.isEmpty()) {
+                final ExpressionEvaluator evaluator = residualEvaluatorOf(key, rows);
+                evaluator.setOuterLateralContext(buildLateralContext());
+                final Expression residual = residuals.get(key);
+                for (final Row row : group) {
+                    if (SqlTruth.isTrue(evaluator.evaluate(residual, row))) {
+                        held.add(row.getValue(memberColumn));
+                    }
+                }
+            }
+        }
+        // As the subquery's own rows answer (see keyedMembership): it reads the row around it, so a positive
+        // membership is two-valued, where NOT IN keeps the three values.
+        if (value == null && nullBeforeAnyRow(subject)) {
+            return null;
+        }
+        if (held.isEmpty()) {
+            return not;
+        }
+        if (value == null) {
+            return not ? null : Boolean.FALSE;
+        }
+        // The member's column carries no collation (see residualColumnsCollate): the probe's own settles it.
+        final CollationSpec collation = ExpressionCollation.combine(ExpressionCollation.NONE, subjectCollation)
+            .toRules();
+        final boolean convertsEvery = !(value instanceof String);
+        boolean anyNull = false;
+        boolean matched = false;
+        for (final Object member : held) {
+            if (member == null) {
+                anyNull = true;
+                continue;
+            }
+            if (collation != null ? CollationMatching.equalUnder(collation, value, member)
+                    : ExpressionArithmetic.equals(value, member)) {
+                matched = true;
+                if (!convertsEvery) {
+                    break;
+                }
+            }
+        }
+        if (matched) {
+            return !not;
+        }
+        return anyNull && not ? null : not;
+    }
+
+    /**
+     * Notes that a copy runs for each row, here and for every evaluator of the statement, which then skips judging it
+     * again.
+     *
+     * @return {@link #NOT_KEYED}
+     */
+    private Object runsPerRow(final String key, final SubqueryMemo memo) {
+        perRowOnly.add(key);
+        memo.recordComputedOnceVerdict(key, false);
+        return NOT_KEYED;
+    }
+
+    /** The evaluator of a copy's residual over its keyed rows, built once. */
+    private ExpressionEvaluator residualEvaluatorOf(final String key, final PreparedKeyedRows rows) {
+        ExpressionEvaluator evaluator = residualEvaluators.get(key);
+        if (evaluator == null) {
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            evaluator = new ExpressionEvaluator(residualRowsOf(key, rows), queryExecutor.getFunctionRegistry(),
+                queryExecutor.getCatalog(), queryExecutor);
+            residualEvaluators.put(key, evaluator);
+        }
+        return evaluator;
+    }
+
+    /** The relation a copy's keyed rows form, its columns those of the rows, built once. */
+    private Table residualRowsOf(final String key, final PreparedKeyedRows rows) {
+        Table table = residualTables.get(key);
+        if (table == null) {
+            final List<TableColumn> columns = new ArrayList<>();
+            for (final ResultSetColumn column : rows.itemColumns()) {
+                columns.add(new TableColumn(column.getName(), column.getDataType(), true, null, false, false, false));
+            }
+            table = new Table(RESIDUAL_ROWS, columns, false);
+            residualTables.put(key, table);
+        }
+        return table;
+    }
+
+    /**
+     * A scalar aggregate whose subquery reads the outer row through equalities and through other conjuncts as well
+     * (see {@link CorrelatedSubqueryRule#residualCorrelation}), answered by aggregating the inner rows of the outer
+     * row's keys whose residual holds, those rows computed once for the statement with the residual's columns and the
+     * aggregates' arguments: the value running the subquery for the row gives, the aggregate computed as a grouped
+     * query computes it over a group, in time that grows with the rows of each key rather than with the whole inner
+     * relation. {@link #NOT_KEYED} where it cannot be settled that way, and the subquery runs.
+     *
+     * <p>The first outer row runs the subquery, whose answer tells whether its value is one the plan folds (see
+     * {@link #scalarSubqueryValue}); and where computing the rows meets a fault the copy runs for each row, which raises
+     * what those rows raise.
+     */
+    private Object residualAggregate(final SubqueryExpression expr) {
+        final SubqueryMemo memo = visitor.getSubqueryMemo();
+        final String key = memoKey(expr) + RESIDUAL;
+        if (memo == null || perRowOnly.contains(key) || statisticsBody(expr) != expr) {
+            return NOT_KEYED;
+        }
+        EqualityCorrelation correlation = equalityCorrelations.get(key);
+        if (correlation == null) {
+            final Boolean verdict = memo.cachedComputedOnceVerdict(key);
+            correlation = Boolean.FALSE.equals(verdict) ? null : analyzedResidual(key, expr, true);
+            final FrostlakeParser.ExpressionContext aggregate = correlation == null
+                || correlation.getAggregateOverArguments() == null ? null
+                : aggregateOverArgumentsOf(correlation.getAggregateOverArguments());
+            if (aggregate == null || verdict == null && !answersAsComputed(expr)) {
+                return runsPerRow(key, memo);
+            }
+            residualAggregates.put(key, aggregate);
+            equalityCorrelations.put(key, correlation);
+        }
+        final String rowsQuery = correlation.residualAggregateRowsQuery();
+        final int keys = correlation.keyCount();
+        PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
+        if (rows == null) {
+            final ResultSet computed = computedOnce(key, rowsQuery,
+                keys + correlation.residualItemCount() + correlation.aggregateArgumentCount(), keys);
+            if (computed == null || residualColumnsCollate(computed, keys) || holdsAFault(computed.getRows())
+                    || readsADecfloat(computed, keys)) {
+                return runsPerRow(key, memo);
+            }
+            memo.recordComputedOnceVerdict(key, true);
+            final ExpressionCollation[] collations = keyCollations(computed, keys);
+            rows = PreparedKeyedRows.build(collatedRows(computed.getRows(), collations), keys, computed.getColumns());
+            memo.recordKeyedRows(rowsQuery, rows);
+            memo.recordKeyCollations(rowsQuery, collations);
+        }
+        final List<Object> probe = preparedProbe(key, rowsQuery);
+        if (probe == null || !holdsNull(probe) && !rows.answers(probe)) {
+            return NOT_KEYED;
+        }
+        memo.recordCorrelated(memoKey(expr));
+        final List<Row> kept = new ArrayList<>();
+        if (!holdsNull(probe)) {
+            final List<Row> group = rows.rowsOf(probe);
+            if (!group.isEmpty()) {
+                final ExpressionEvaluator evaluator = residualEvaluatorOf(key, rows);
+                evaluator.setOuterLateralContext(buildLateralContext());
+                final Expression residual = residuals.get(key);
+                for (final Row row : group) {
+                    if (SqlTruth.isTrue(evaluator.evaluate(residual, row))) {
+                        kept.add(row);
+                    }
+                }
+            }
+        }
+        return DeferredFault.read(visitor.getQueryExecutor().aggregateOverRows(residualAggregates.get(key), kept,
+            residualRowsOf(key, rows)));
+    }
+
+    /**
+     * An aggregate item written over its arguments' columns, parsed, or null where it reads anything but those
+     * columns or does not parse.
+     */
+    private FrostlakeParser.ExpressionContext aggregateOverArgumentsOf(final String text) {
+        try {
+            final Expression parsed = ExpressionEvaluator.parse(text);
+            if (VolatileCalls.writes(parsed)) {
+                return null;
+            }
+            final ColumnReferenceCollectWalk names = new ColumnReferenceCollectWalk();
+            parsed.accept(names);
+            for (final ColumnReferenceExpression name : names.references()) {
+                if (name.isQualified() || !name.getColumnName().startsWith("$A")) {
+                    return null;
+                }
+            }
+            return visitor.getQueryExecutor().parsedExpression(text);
+        } catch (final RuntimeException unparsed) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether a scalar subquery's value, run for the row at hand, is one the plan reads as computed: not a constant it
+     * converts unchecked nor a double it folds (see {@link #scalarSubqueryValue}). False where it does not run.
+     */
+    private boolean answersAsComputed(final SubqueryExpression expr) {
+        final List<ResultSet> results;
+        try {
+            results = executeSubquery(expr);
+        } catch (final RuntimeException failed) {
+            return false;
+        }
+        if (results.isEmpty() || results.get(0) == null || results.get(0).getColumns().size() != 1) {
+            return false;
+        }
+        // A DECFLOAT answer takes the form of the subquery's projection, which a value aggregated here would not.
+        final ResultSetColumn column = results.get(0).getColumns().get(0);
+        return !column.isUncheckedConstant() && !column.isFoldedDouble()
+            && !NumericType.isDecfloat(column.getDataType());
+    }
+
+    /** Whether a text fails to parse as an expression or computes a value that answers anew each time. */
+    private static boolean writesOrUnparsed(final String text) {
+        try {
+            return VolatileCalls.writes(ExpressionEvaluator.parse(text));
+        } catch (final RuntimeException unparsed) {
+            return true;
+        }
+    }
+
+    /** Whether a column after the keys is a DECFLOAT, whose aggregate takes the form of the subquery's projection. */
+    private static boolean readsADecfloat(final ResultSet computed, final int keys) {
+        for (int i = keys; i < computed.getColumns().size(); i++) {
+            if (NumericType.isDecfloat(computed.getColumns().get(i).getDataType())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+        /** Whether a computed row holds a fault waiting in its cell. */
+    private static boolean holdsAFault(final List<Row> computed) {
+        for (final Row row : computed) {
+            for (final Object cell : row.getValues()) {
+                if (cell instanceof DeferredFault) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** The collation a query's one column carries, as a comparison with it would read it. */
@@ -1254,12 +1619,212 @@ final class SubqueryEvaluator {
     }
 
     /**
+     * The literal each place of a query writes where the query is one SELECT with no FROM: TRUE for a literal that is
+     * not NULL, FALSE for a NULL, null for a place that is no literal — every place null for any other query.
+     *
+     * @param width the number of places asked for
+     */
+    Boolean[] literalPlaces(final SubqueryExpression expr, final int width) {
+        final Boolean[] places = new Boolean[width];
+        final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+        final FrostlakeParser.SelectStatementContext parsed =
+            queryExecutor == null ? null : queryExecutor.subqueryStatement(expr.getSubquery());
+        if (parsed == null || parsed.selectOperand().size() != 1 || parsed.selectOperand(0).selectClause() == null
+                || parsed.selectOperand(0).selectClause().FROM() != null) {
+            return places;
+        }
+        final List<FrostlakeParser.SelectItemContext> items =
+            parsed.selectOperand(0).selectClause().selectList().selectItem();
+        for (int i = 0; i < width && i < items.size(); i++) {
+            final FrostlakeParser.ExpressionContext value = SelectItemAccessors.getItemValueExpr(items.get(i));
+            if (value instanceof FrostlakeParser.LiteralExprContext) {
+                places[i] = Boolean.valueOf(!"NULL".equalsIgnoreCase(value.getText()));
+            }
+        }
+        return places;
+    }
+
+    /**
+     * Whether a one-value quantified query, or a NOT IN's, cannot answer NULL, which makes a NULL subject FALSE
+     * where no row it answers is NULL (live-verified): by its projection — a NOT NULL column, an expression over one
+     * that no NULL reaches as {@code COALESCE(k, 0)}, a VALUES column no row of which is NULL — or, for a query that
+     * reads nothing of the outer row once the conditions the statistics settle are folded, by the statistics of the
+     * tables it reads: a column whose rows hold no NULL, though declared nullable, and a number computed from such
+     * columns. A NULL its WHERE or an inner join leaves out still counts, one a DELETE or an UPDATE removed does not.
+     * A column of one value, {@code SELECT 5 FROM t}, is compared as that value alone.
+     *
+     * @param expr     the query
+     * @param answered the rows it answered
+     * @return whether it cannot answer NULL
+     */
+    boolean answersNoNull(final SubqueryExpression expr, final ResultSet answered) {
+        if (answered.getColumns().isEmpty()) {
+            return false;
+        }
+        final ResultSetColumn own = answered.getColumns().get(0);
+        if (columnAnswersNoNull(own, answered.getRowCount())) {
+            return true;
+        }
+        if (Boolean.FALSE.equals(own.getDerivedNullable()) || Boolean.FALSE.equals(own.getReportedNullable())) {
+            return false;   // no NULL by its projection, but a column of one value
+        }
+        if (readsOuterRow(expr) && !correlationSettledAway(expr)) {
+            return false;
+        }
+        final List<ResultSetColumn> held = heldColumns(expr);
+        return held != null && !held.isEmpty() && columnAnswersNoNull(held.get(0), 0);
+    }
+
+    /**
+     * Whether a column cannot answer NULL by what its projection is (see {@link #answersNoNull}).
+     *
+     * @param column   the column
+     * @param rowCount the rows answered
+     */
+    private static boolean columnAnswersNoNull(final ResultSetColumn column, final int rowCount) {
+        if (!Boolean.FALSE.equals(column.getDerivedNullable())) {
+            // A VALUES column no row of which is NULL tells it so; one of a single row is a column of one value.
+            return Boolean.FALSE.equals(column.getReportedNullable()) && rowCount > 1;
+        }
+        final ValueRange range = column.getValueRange();
+        return range == null || range.isEmpty() || range.getMin() == null || range.getMax() == null
+            || range.getMin().compareTo(range.getMax()) != 0;
+    }
+
+    /**
+     * Whether one of the first {@code width} columns of a ROW quantified query may answer NULL as the statistics of
+     * the tables it reads tell it: a column whose rows hold a NULL anywhere, whatever its WHERE keeps. False where
+     * the query's shape cannot be read.
+     *
+     * @param expr  the query
+     * @param width the places compared
+     * @return whether a place may answer NULL
+     */
+    boolean placeMayAnswerNull(final SubqueryExpression expr, final int width) {
+        final List<ResultSetColumn> held = heldColumns(expr);
+        if (held == null) {
+            return false;
+        }
+        for (int i = 0; i < width && i < held.size(); i++) {
+            if (!Boolean.FALSE.equals(held.get(i).getDerivedNullable())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the place at {@code index} of a query is one value on every row (see
+     * {@link QueryExecutor#placeIsConstant}).
+     *
+     * @param expr  the query
+     * @param index the place
+     * @param width the places compared
+     * @return whether the place is a constant
+     */
+    boolean placeIsConstant(final SubqueryExpression expr, final int index, final int width) {
+        final String key = memoKey(expr);
+        boolean[] places = constantPlaces.get(key);
+        if (places == null) {
+            places = new boolean[width];
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            for (int i = 0; i < width; i++) {
+                places[i] = queryExecutor.placeIsConstant(expr.getSubquery(), i);
+            }
+            constantPlaces.put(key, places);
+        }
+        return index < places.length && places[index];
+    }
+
+    /**
+     * A query's columns, read for their shape alone with every catalog column answering NULL by what its rows hold
+     * (see {@link QueryExecutor#beginHeldNullReading}); null where the query cannot be read so.
+     */
+    private List<ResultSetColumn> heldColumns(final SubqueryExpression expr) {
+        final String key = memoKey(expr);
+        if (heldShapes.containsKey(key)) {
+            return heldShapes.get(key);
+        }
+        final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+        List<ResultSetColumn> columns = null;
+        final boolean shapeOnly = RelationShapeOnly.begin();
+        LateConstantRefusal.beginProbe();
+        final StoredColumnValues previous = queryExecutor.beginHeldNullReading();
+        try {
+            final List<ResultSet> shapes = executeInScope(queryExecutor, expr.getSubquery(), buildLateralContext());
+            if (!shapes.isEmpty() && shapes.get(0) != null) {
+                columns = shapes.get(0).getColumns();
+            }
+        } catch (final RuntimeException unread) {
+            columns = null;
+        } finally {
+            queryExecutor.endHeldNullReading(previous);
+            LateConstantRefusal.endProbe();
+            RelationShapeOnly.end(shapeOnly);
+        }
+        heldShapes.put(key, columns);
+        return columns;
+    }
+
+
+    /** Whether a row of a query's answer is NULL in its first column. */
+    private static boolean holdsNullMember(final ResultSet answered) {
+        for (final Row row : answered.getRows()) {
+            if (DeferredFault.read(row.getValue(0)) == null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Whether a query read the row around it when it last ran: one matched row against row, whose positive
      * membership is two-valued (see {@link #evaluateInSubquery}).
      */
     boolean readsOuterRow(final SubqueryExpression expr) {
         final SubqueryMemo subqueryMemo = visitor.getSubqueryMemo();
         return subqueryMemo != null && subqueryMemo.isCorrelated(memoKey(expr));
+    }
+
+    /**
+     * Whether a query that read the row around it is matched row against row: not where it reads that row only in
+     * filters the statistics settle, which the plan folds away (see
+     * {@link CorrelatedSubqueryRule#correlationSettledAway}), so the query is a set as an uncorrelated one is.
+     */
+    boolean matchesRowAgainstRow(final SubqueryExpression expr) {
+        return readsOuterRow(expr) && !correlationSettledAway(expr);
+    }
+
+    /**
+     * Whether a query read the row around it only in filters the statistics settle (see
+     * {@link CorrelatedSubqueryRule#correlationSettledAway}). Its negated membership — NOT IN, {@code <> ALL} — is
+     * FALSE for a NULL subject against a set of a row at least, and reads a set of NULLs alone as holding nothing:
+     * {@code k NOT IN (SELECT k FROM an WHERE p.id > 0)} over ids 1 to 5 and a column of NULLs alone is TRUE for
+     * every k but a NULL one, where its uncorrelated twin is NULL; a NULL beside a value leaves a miss NULL, as
+     * {@code o.k NOT IN (SELECT i.k + IFF(o.id > 0, 0, 0) FROM i)} keeps no row (live-verified).
+     */
+    boolean correlationSettledAway(final SubqueryExpression expr) {
+        if (!readsOuterRow(expr)) {
+            return false;
+        }
+        final String key = memoKey(expr);
+        Boolean settled = settledCorrelations.get(key);
+        if (settled == null) {
+            settled = Boolean.FALSE;
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            final FrostlakeParser.SelectStatementContext parsed =
+                queryExecutor == null ? null : queryExecutor.subqueryStatement(expr.getSubquery());
+            if (parsed != null) {
+                final Set<String> outerNames = new HashSet<>();
+                for (final String name : buildLateralContext().keySet()) {
+                    outerNames.add(name.toUpperCase(Locale.ROOT));
+                }
+                settled = Boolean.valueOf(new CorrelatedSubqueryRule(queryExecutor, outerNames,
+                    visitor.scopeRelations()).correlationSettledAway(parsed));
+            }
+            settledCorrelations.put(key, settled);
+        }
+        return settled.booleanValue();
     }
 
     /**
@@ -1578,9 +2143,11 @@ final class SubqueryEvaluator {
     private List<ResultSet> executeInScope(final QueryExecutor queryExecutor, final String subquery,
                                            final Map<String, Object> context) {
         final ExpressionEvaluatorVisitor enclosingScope = SubqueryCompilation.beginScope(visitor);
+        final Object[] enclosingText = RunningSubqueryText.begin(subquery);
         try {
             return queryExecutor.executeWithLateralContext(subquery, context);
         } finally {
+            RunningSubqueryText.end(enclosingText);
             SubqueryCompilation.endScope(enclosingScope);
         }
     }
@@ -1614,8 +2181,14 @@ final class SubqueryEvaluator {
         final SubqueryExpression query = (SubqueryExpression) expr.getSubquery();
         final boolean all = expr.getQuantifier() == Quantifier.ALL;
         final boolean equality = !all && expr.getOperator() == BinaryOperator.EQUAL;
-        return requireSupportedCorrelation(query, query, false, true, all, equality ? expr.getLeft() : null,
-            expr.getQuantifierPosition());
+        final boolean orderedBefore = orderedUniversal;
+        orderedUniversal = all && expr.getOperator() != BinaryOperator.NOT_EQUAL;
+        try {
+            return requireSupportedCorrelation(query, query, false, true, all, equality ? expr.getLeft() : null,
+                expr.getQuantifierPosition());
+        } finally {
+            orderedUniversal = orderedBefore;
+        }
     }
 
     /**
@@ -1627,12 +2200,16 @@ final class SubqueryEvaluator {
     private boolean requireSupportedCorrelation(final SubqueryExpression expr, final SubqueryExpression run,
                                                 final boolean scalar, final boolean in, final boolean not,
                                                 final Expression subject, final SourcePosition place) {
+        if (UnreadExistsSubqueries.waives(expr.getSubquery())) {
+            // Inside an EXISTS body's select item no row reads: compiled, never planned.
+            return false;
+        }
         final String key = scalar ? PlannedCorrelations.valueKey(expr.getSubquery())
             : PlannedCorrelations.membershipKey(expr.getSubquery());
         if (PlannedCorrelations.refused(key)) {
             return true;
         }
-        if (judgedCorrelations.contains(key)) {
+        if (judgedCorrelations.contains(key) || PlannedCorrelations.answered(key)) {
             return false;
         }
         final QueryExecutor queryExecutor = visitor.getQueryExecutor();
@@ -1682,14 +2259,80 @@ final class SubqueryEvaluator {
                 new CorrelatedSubqueryRule(queryExecutor, outerNames, visitor.scopeRelations(), constancy);
             // Where the IN stands is not known here, so a positive one is read as the semi-join a WHERE makes of it;
             // the statement's plan has refused it already where it stands anywhere else.
+            rule.quantifiedAs(in && not, orderedUniversal, false);
             if (scalar ? rule.refusesScalar(parsed)
                     : rule.refusesMembership(parsed, in, in && !not, subject == null ? null : printed(subject),
                         in && not)) {
-                throw unsupported(scalar, place);
+                throw nestedReadRefusal(run, rule, scalar, place);
             }
         }
         judgedCorrelations.add(key);
         return false;
+    }
+
+    /**
+     * The refusal of a correlated subquery live cannot turn into a join, judged as a row of the subquery holding it
+     * reaches it: one whose own subquery reads that row is placed as the statement's plan places it (see
+     * {@link NestedSubqueryRefusalPlace}), found where it stands in the running subquery's text, and any other as
+     * {@link #unsupported} places it.
+     */
+    private UnsupportedSubqueryException nestedReadRefusal(final SubqueryExpression run,
+                                                           final CorrelatedSubqueryRule rule, final boolean scalar,
+                                                           final SourcePosition place) {
+        if (scalar && visitor.sqlFunctionBeingCalled() != null) {
+            return unsupported(true, place);
+        }
+        final ParserRuleContext judged =
+            RunningSubqueryText.holderOf(visitor.getQueryExecutor(), ExpressionSource.resolve(run.getQueryPosition()));
+        final FrostlakeParser.SelectStatementContext query = judged == null ? null : holdersQuery(judged);
+        if (query == null) {
+            return unsupported(scalar, place);
+        }
+        final FrostlakeParser.SelectClauseContext clause = CorrelatedSubqueryRule.mainClause(query);
+        if (!scalar && clause != null && clause.FROM() == null
+                && NestedSubqueryRefusalPlace.readsBeyondItsHolder(judged, clause)) {
+            // An IN, a quantified comparison or an EXISTS with no FROM inside the subquery running, reading a row
+            // further out than that subquery's, gives no place (live-verified), where a scalar one, and one reading
+            // the running subquery's own row alone, is placed.
+            return new UnsupportedSubqueryException(
+                SqlCompilationError.of("Unsupported subquery type cannot be evaluated"));
+        }
+        if (rule.outerReadDepth() != 2) {
+            return unsupported(scalar, place);
+        }
+        final Token nested = NestedSubqueryRefusalPlace.of(judged, query, rule);
+        if (nested != null) {
+            final SourcePosition at = RunningSubqueryText.place(nested);
+            return new UnsupportedSubqueryException(SqlCompilationError.of(
+                "Unsupported subquery type cannot be evaluated"
+                    + (at == null ? "" : " at line " + at.getLine() + ", position " + at.getCharPositionInLine())));
+        }
+        if (NestedSubqueryRefusalPlace.standsInWhere(judged)
+                && NestedSubqueryRefusalPlace.unplacedAtDepthTwo(judged, query, rule)) {
+            return new UnsupportedSubqueryException(
+                SqlCompilationError.of("Unsupported subquery type cannot be evaluated"));
+        }
+        return unsupported(scalar, place);
+    }
+
+    /** The query of a subquery-holding expression {@link RunningSubqueryText#holderOf} found. */
+    private static FrostlakeParser.SelectStatementContext holdersQuery(final ParserRuleContext judged) {
+        if (judged instanceof FrostlakeParser.ScalarSubqueryExprContext) {
+            return ((FrostlakeParser.ScalarSubqueryExprContext) judged).selectStatement();
+        }
+        if (judged instanceof FrostlakeParser.InSubqueryExprContext) {
+            return ((FrostlakeParser.InSubqueryExprContext) judged).selectStatement();
+        }
+        if (judged instanceof FrostlakeParser.TupleInSubqueryExprContext) {
+            return ((FrostlakeParser.TupleInSubqueryExprContext) judged).selectStatement();
+        }
+        if (judged instanceof FrostlakeParser.QuantifiedComparisonExprContext) {
+            return ((FrostlakeParser.QuantifiedComparisonExprContext) judged).selectStatement();
+        }
+        if (judged instanceof FrostlakeParser.ExistsExprContext) {
+            return ((FrostlakeParser.ExistsExprContext) judged).selectStatement();
+        }
+        return null;
     }
 
     /**
@@ -1876,8 +2519,207 @@ final class SubqueryEvaluator {
         for (final String name : names) {
             outerNames.add(name.toUpperCase(Locale.ROOT));
         }
-        return new CorrelatedSubqueryRule(queryExecutor, outerNames, visitor.scopeRelations())
-            .opensWithOuterAggregate(parsed);
+        final CorrelatedSubqueryRule rule =
+            new CorrelatedSubqueryRule(queryExecutor, outerNames, visitor.scopeRelations());
+        if (rule.opensWithOuterAggregate(parsed)) {
+            return true;
+        }
+        final FrostlakeParser.SelectClauseContext clause = CorrelatedSubqueryRule.mainClause(parsed);
+        return clause != null && clause.tableExpression() != null
+            && nestedOpensWithOuterAggregate(queryExecutor, rule, new ArrayList<FrostlakeParser.SelectClauseContext>(),
+                clause);
+    }
+
+    /**
+     * What settles a condition of {@code clause}'s select items from the statistics of the one catalog table it reads,
+     * or null where only a constant does: it reads anything else, its table holds no row, or its WHERE keeps no row
+     * (see {@link UnguardedSubqueryWalk}). Over g holding 7 and 8, {@code (SELECT CASE WHEN g.v > 100 THEN (SELECT
+     * MAX(o.i) FROM g g2) END FROM g LIMIT 1)} is answered (live-verified).
+     *
+     * @param filtered whether the rows are those the WHERE keeps, rather than every row of the table
+     */
+    private ExpressionEvaluatorVisitor rowStatistics(final QueryExecutor queryExecutor,
+                                                     final FrostlakeParser.SelectClauseContext clause,
+                                                     final boolean filtered) {
+        final FrostlakeParser.TableExpressionContext from = clause.tableExpression();
+        if (from == null || !from.joinClause().isEmpty() || from.tableReference().size() != 1) {
+            return null;
+        }
+        final FrostlakeParser.TableReferenceContext relation = from.tableReference(0);
+        final FrostlakeParser.TableSourceContext source = relation.tableSource();
+        if (source == null || source.tableQualifiedName() == null) {
+            return null;
+        }
+        final Table table;
+        try {
+            table = queryExecutor.getCatalog().resolveTable(
+                SqlIdentifiers.canonicalText(source.tableQualifiedName().getText()));
+        } catch (final RuntimeException notATable) {
+            return null;
+        }
+        if (table == null || !table.isCatalogResident()) {
+            return null;
+        }
+        final Long rows = queryExecutor.baseTableRowCount(table);
+        if (rows == null || rows.longValue() == 0L) {
+            return null;
+        }
+        final String alias = relation.aliasName() != null
+            ? ParseTreeText.getIdentifier(relation.aliasName())
+            : relation.nonJoinKeywordIdentifier() != null
+                ? SqlIdentifiers.canonicalText(relation.nonJoinKeywordIdentifier().getText()) : table.getName();
+        final ExpressionEvaluator scope =
+            new ExpressionEvaluator(table, queryExecutor.getFunctionRegistry(), queryExecutor.getCatalog(), queryExecutor);
+        final Map<String, Table> aliasToTable = new HashMap<>();
+        aliasToTable.put(alias.toUpperCase(Locale.ROOT), table);
+        scope.setMultiTableContext(aliasToTable, Collections.singletonList(table));
+        if (filtered && clause.whereClause() != null) {
+            try {
+                if (Boolean.FALSE.equals(scope.settledCondition(
+                        ExpressionEvaluator.parse(ParseTreeText.getOriginalText(clause.whereClause().booleanExpr()))))) {
+                    return null;
+                }
+            } catch (final RuntimeException unsettled) {
+                return scope.scopeVisitor();
+            }
+        }
+        return scope.scopeVisitor();
+    }
+
+    /**
+     * The outer query's own statistics, which settle a condition over the outer row that the inner query's leave
+     * open, where each relation it reads is a catalog table holding rows: {@code CASE WHEN o.i > 100 THEN …} over o
+     * holding 1 is settled (live-verified). Null otherwise.
+     */
+    private ExpressionEvaluatorVisitor outerStatistics(final QueryExecutor queryExecutor) {
+        final List<Table> relations = new ArrayList<>();
+        if (visitor.getMultiTableAllTables() != null && !visitor.getMultiTableAllTables().isEmpty()) {
+            relations.addAll(visitor.getMultiTableAllTables());
+        } else if (visitor.getTable() != null) {
+            relations.add(visitor.getTable());
+        }
+        if (relations.isEmpty()) {
+            return null;
+        }
+        for (final Table relation : relations) {
+            final Long rows = relation != null && relation.isCatalogResident()
+                ? queryExecutor.baseTableRowCount(relation) : null;
+            if (rows == null || rows.longValue() == 0L) {
+                return null;
+            }
+        }
+        return visitor;
+    }
+
+    /**
+     * Whether {@code clause} evaluates, whatever its row holds (see {@link UnguardedSubqueryWalk}, only a constant or
+     * the statistics settling a branch or a conjunction), a scalar subquery opening with the outer query's aggregate,
+     * at any depth: in a select item, its WHERE, a join's ON, its GROUP BY, its HAVING or its ORDER BY. Live refuses
+     * the outer query's subquery reading a table in its place, at its own position, whatever the tables hold:
+     * {@code (SELECT (SELECT MAX(e.i) FROM g) FROM g)}, {@code (SELECT 1 + (SELECT MAX(e.i) FROM g) FROM g)} and
+     * {@code (SELECT g.v FROM g WHERE g.v = (SELECT MAX(e.i) FROM g g2))} over an empty {@code e} are refused at the
+     * outer subquery, also under its own WHERE FALSE, while {@code IFF(FALSE, (SELECT MAX(e.i) FROM g), 0)} spares it.
+     * A select that aggregates its rows into one, ungrouped, plans its subqueries itself: {@code (SELECT MAX(v) +
+     * (SELECT MAX(e.i) FROM g) FROM g)} is refused at the inner subquery (all live-verified).
+     *
+     * @param enclosing the queries around {@code clause} inside the outer query's subquery, outermost first
+     */
+    private boolean nestedOpensWithOuterAggregate(final QueryExecutor queryExecutor, final CorrelatedSubqueryRule rule,
+                                                  final List<FrostlakeParser.SelectClauseContext> enclosing,
+                                                  final FrostlakeParser.SelectClauseContext clause) {
+        if (clause.selectList() == null || rule.aggregatesUngrouped(clause)) {
+            return false;
+        }
+        final List<FrostlakeParser.SelectClauseContext> around = new ArrayList<>(enclosing);
+        around.add(clause);
+        final List<ParserRuleContext> items = new ArrayList<>();
+        for (final FrostlakeParser.SelectItemContext item : clause.selectList().selectItem()) {
+            final ParserRuleContext value = SelectItemAccessors.getItemExpression(item);
+            if (value != null) {
+                items.add(value);
+            }
+        }
+        final List<ParserRuleContext> filters = new ArrayList<>();
+        if (clause.whereClause() != null) {
+            filters.add(clause.whereClause().booleanExpr());
+        }
+        if (clause.tableExpression() != null) {
+            for (final FrostlakeParser.JoinClauseContext join : clause.tableExpression().joinClause()) {
+                if (join.booleanExpr() != null) {
+                    filters.add(join.booleanExpr());
+                }
+            }
+        }
+        if (clause.groupByClause() != null) {
+            for (final FrostlakeParser.GroupByElementContext element : clause.groupByClause().groupByElement()) {
+                if (KeyContexts.of(element) != null) {
+                    filters.add(KeyContexts.of(element));
+                }
+            }
+        }
+        if (clause.havingClause() != null) {
+            filters.add(clause.havingClause().booleanExpr());
+        }
+        if (clause.getParent() != null
+                && clause.getParent().getParent() instanceof FrostlakeParser.SelectStatementContext) {
+            final FrostlakeParser.SelectStatementContext statement =
+                (FrostlakeParser.SelectStatementContext) clause.getParent().getParent();
+            if (statement.selectOperand().size() == 1 && statement.orderByClause() != null) {
+                for (final FrostlakeParser.OrderItemContext key : statement.orderByClause().orderItem()) {
+                    if (KeyContexts.of(key) != null) {
+                        filters.add(KeyContexts.of(key));
+                    }
+                }
+            }
+        }
+        // The select items are judged over the rows the WHERE keeps; the filters over the table's own.
+        final ExpressionEvaluatorVisitor kept = items.isEmpty() ? null : rowStatistics(queryExecutor, clause, true);
+        final ExpressionEvaluatorVisitor all = filters.isEmpty() ? null : rowStatistics(queryExecutor, clause, false);
+        final ExpressionEvaluatorVisitor outer = kept == null && all == null ? null : outerStatistics(queryExecutor);
+        return nestedOpensIn(queryExecutor, rule, around, items, kept, kept == null ? null : outer, false)
+            || nestedOpensIn(queryExecutor, rule, around, filters, all, all == null ? null : outer, true);
+    }
+
+    /**
+     * {@link #nestedOpensWithOuterAggregate} for some places of a select, settled by the given statistics. The body
+     * of an ANY comparison is no value the select plans, nor is that of an IN filtering its rows, while a NOT IN's
+     * and a select item's IN are: {@code g.v = ANY (SELECT MAX(o.i) FROM g g2)} and a WHERE's {@code g.v IN (…)}
+     * are answered, a WHERE's {@code NOT IN} and an item's {@code 1 IN (…)} refused (live-verified).
+     *
+     * @param filter whether the places filter the select's rows rather than being its items
+     */
+    private boolean nestedOpensIn(final QueryExecutor queryExecutor, final CorrelatedSubqueryRule rule,
+                                  final List<FrostlakeParser.SelectClauseContext> around,
+                                  final List<ParserRuleContext> places, final ExpressionEvaluatorVisitor statistics,
+                                  final ExpressionEvaluatorVisitor outer, final boolean filter) {
+        for (final ParserRuleContext place : places) {
+            final Expression parsedPlace;
+            try {
+                parsedPlace = ExpressionEvaluator.parse(ParseTreeText.getOriginalText(place));
+            } catch (final RuntimeException unparsed) {
+                continue;   // left to the evaluation, which reports it
+            }
+            final UnguardedSubqueryWalk walk = new UnguardedSubqueryWalk(statistics, outer, true, filter);
+            parsedPlace.accept(walk);
+            for (final SubqueryExpression nested : walk.subqueries()) {
+                if (nested.isExistence()) {
+                    continue;
+                }
+                final FrostlakeParser.SelectStatementContext statement =
+                    queryExecutor.subqueryStatement(nested.getSubquery());
+                if (statement == null) {
+                    continue;
+                }
+                if (rule.opensWithOuterAggregate(around, statement)) {
+                    return true;
+                }
+                final FrostlakeParser.SelectClauseContext inner = CorrelatedSubqueryRule.mainClause(statement);
+                if (inner != null && nestedOpensWithOuterAggregate(queryExecutor, rule, around, inner)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

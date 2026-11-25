@@ -212,7 +212,8 @@ public class ProjectOperator implements Operator {
                 // when no FROM-source column has that name: the real column takes precedence over a
                 // same-named sibling alias (what makes a swap projection `SELECT t AS s, s AS t` read
                 // both values from the input row instead of collapsing to t, t).
-                } else if (rowAliasValues.containsKey(expr.toUpperCase(Locale.ROOT)) && !isInputColumn(expr, context)) {
+                } else if (rowAliasValues.containsKey(expr.toUpperCase(Locale.ROOT)) && !isInputColumn(expr, context)
+                        && !readsOuterRow(i, expr.toUpperCase(Locale.ROOT))) {
                     value = rowAliasValues.get(expr.toUpperCase(Locale.ROOT));
                 // The WHERE computed this item for the row: the value it tested is the value shown.
                 } else if (whereAliasValues != null && columnAliases != null && columnAliases.get(i) != null
@@ -274,6 +275,24 @@ public class ProjectOperator implements Operator {
             return String.format(Locale.ROOT, "PROJECT[%s]", String.join(", ", projectionExpressions));
         }
         return String.format(Locale.ROOT, "PROJECT[%d columns]", projectionExpressions.size());
+    }
+
+    /**
+     * Whether an item written as a bare name reads the outer row's binding rather than an earlier item's alias: it
+     * is evaluated then, so the read is seen as one of the outer row and the subquery is run again for every row.
+     */
+    private boolean readsOuterRow(final int item, final String name) {
+        if (baseBindings == null || !baseBindings.containsKey(name)) {
+            return false;
+        }
+        if (columnAliases != null) {
+            for (int j = 0; j < item && j < columnAliases.size(); j++) {
+                if (columnAliases.get(j) != null && name.equals(columnAliases.get(j).toUpperCase(Locale.ROOT))) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**

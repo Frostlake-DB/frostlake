@@ -228,6 +228,7 @@ public final class ConstructEndSyntax {
      *   BEGIN LOOP BREAK END; END LOOP; RETURN 1; END;    'END', ';', then 'RETURN'
      *   BEGIN LOOP BREAK END; RETURN 1; END;              'END', then ';'
      *   BEGIN LOOP BREAK END LOOP; RETURN 1; END;         'END'
+     *   BEGIN FOR i IN 1 TO 3 DO BREAK END; END FOR; …     'END', ';', then 'FOR'     FOR is no label
      * </pre>
      */
     private static List<Token> afterLoopClosedAt(final Parser parser, final ParserRuleContext statement,
@@ -259,6 +260,11 @@ public final class ConstructEndSyntax {
             return lines;
         }
         Token next = nextSpoken(stream, closing.getTokenIndex());
+        if (next != null && next.getType() == keyword && !SyntaxErrorListener.isNameLike(parser, next)) {
+            // That END is the block's now, whose label the loop's keyword cannot be: END FOR is refused at FOR.
+            lines.add(next);
+            return lines;
+        }
         if (next != null && next.getType() == keyword) {
             next = nextSpoken(stream, next.getTokenIndex());
         } else if (next != null && next.getType() != FrostlakeLexer.SEMI && next.getType() != Token.EOF) {

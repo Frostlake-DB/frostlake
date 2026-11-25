@@ -195,6 +195,12 @@ enum ShowListing {
     /** DELEGATED AUTHORIZATIONS reads a user or an integration, and none of the modifiers. */
     DELEGATED_AUTHORIZATIONS(null, null, ShowTailGrammar.NONE, false,
         ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    /** USER PROGRAMMATIC ACCESS TOKENS reads a user, and none of the modifiers. */
+    USER_PROGRAMMATIC_ACCESS_TOKENS(null, null, ShowTailGrammar.NONE, false,
+        ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
+    /** USER KEY PAIRS reads a user, and none of the modifiers. */
+    USER_KEY_PAIRS(null, null, ShowTailGrammar.NONE, false,
+        ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
     /** USER WORKLOAD IDENTITY AUTHENTICATION METHODS reads a user, and none of the modifiers. */
     USER_WORKLOAD_IDENTITY_METHODS(null, null, ShowTailGrammar.NONE, false,
         ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, ShowScopeAnswer.CANNOT_SHOW, false, false),
@@ -428,8 +434,11 @@ enum ShowListing {
         if (ctx.DELEGATED() != null) {
             return DELEGATED_AUTHORIZATIONS;
         }
-        if (ctx.workload != null) {
-            return USER_WORKLOAD_IDENTITY_METHODS;
+        if (ctx.userKind != null) {
+            return ctx.tokens != null ? USER_PROGRAMMATIC_ACCESS_TOKENS : USER_WORKLOAD_IDENTITY_METHODS;
+        }
+        if (ctx.pairs != null) {
+            return USER_KEY_PAIRS;
         }
         if (ctx.COMPUTE() != null) {
             return ctx.FAMILIES() != null ? COMPUTE_POOL_INSTANCE_FAMILIES : COMPUTE_POOLS;

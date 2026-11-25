@@ -16,7 +16,8 @@
 
 package dev.frostlake.executor;
 
-import dev.frostlake.executor.expressions.BinaryOperationExpression;
+import dev.frostlake.executor.commands.MultiTableInsertShape;
+import dev.frostlake.executor.expressions.AnonymousCallWalk;
 import dev.frostlake.executor.expressions.CastExpression;
 import dev.frostlake.executor.expressions.DefaultMarkerExpression;
 import dev.frostlake.executor.expressions.Expression;
@@ -32,7 +33,6 @@ import dev.frostlake.executor.expressions.RowExpression;
 import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.SqlTruth;
 import dev.frostlake.executor.expressions.SubqueryExpression;
-import dev.frostlake.executor.expressions.UnaryOperationExpression;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.metastore.model.DefaultValueExpression;
 import dev.frostlake.metastore.model.Privilege;
@@ -56,7 +56,6 @@ import dev.frostlake.types.StringType;
 import dev.frostlake.types.VariantType;
 import dev.frostlake.types.VectorType;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -345,7 +344,8 @@ final class InsertExecutor {
 
             logger.trace("Inserted {} row(s) into table: {}", rowsInserted, tableName);
             if (!isOverwrite) {
-                executor.noteStatementTarget(fullyQualifiedName, StreamVersionKind.INSERT);
+                executor.noteStatementTarget(fullyQualifiedName, StreamVersionKind.INSERT,
+                    rowsInserted == 0 && rewritesUnchanged(fullyQualifiedName, ctx.selectStatement()));
             }
             // LAST_ALTERED moves for the statement, whether or not a row reached the table.
             table.markDmlRan(StatementClock.commitInstant());
@@ -784,6 +784,11 @@ final class InsertExecutor {
         } catch (final RuntimeException notAnExpression) {
             return;
         }
+        // A procedure a CALL defines for itself, called as a value, is no value a VALUES clause takes (live-verified).
+        if (AnonymousCallWalk.holdsOne(ast)) {
+            throw new RuntimeException(SqlCompilationError.of("Invalid expression [" + exprText.trim()
+                + "] in VALUES clause"));
+        }
         boolean semiStructured = false;
         if (ast instanceof JsonObjectExpression || ast instanceof JsonArrayExpression) {
             semiStructured = true;
@@ -822,12 +827,12 @@ final class InsertExecutor {
             // RANDOM all raise the same sentence, while TO_BINARY and UPPER pass. The boundary is not
             // a return-type rule (SHA2 returns VARCHAR and is rejected; TO_BINARY returns BINARY and
             // passes), so only the measured names are listed.
-            semiStructured = semiStructured || VALUES_REJECTED_FUNCTIONS.contains(name);
+            semiStructured = semiStructured || ValuesRefusedFunctions.refuses(name);
         }
         // A rejected function poisons the whole item wherever it sits, not only at the top: live
         // refuses UPPER(UUID_STRING()) and CONCAT('p', RANDOM()) too, naming the OUTER expression. So does a
         // semi-structured part anywhere in it, ARRAY_SIZE([1]) (see ValuesSemiStructuredParts).
-        semiStructured = semiStructured || containsRejectedFunction(ast)
+        semiStructured = semiStructured || ValuesRefusedFunctions.holdsOne(ast)
             || ValuesSemiStructuredParts.holdsOne(ast, evaluator, executor.getFunctionRegistry());
         if (semiStructured) {
             // The item is echoed as the statement compiled it: [1, 2] as ARRAY_CONSTRUCT(1, 2), a :: as a CAST to the
@@ -849,50 +854,6 @@ final class InsertExecutor {
         }
     }
 
-    /**
-     * The measured non-semi-structured functions live refuses inside a VALUES clause.
-     *
-     * <p>Membership is by NAME, not by determinism: the two-argument {@code UUID_STRING(ns, name)} is
-     * an exact RFC 4122 function and is refused all the same, while {@code CURRENT_TIMESTAMP()},
-     * {@code CURRENT_DATE()}, {@code CURRENT_USER()} and {@code UPPER()} all pass. {@code UNIFORM} is
-     * refused even with constant arguments ({@code UNIFORM(1, 10, 5)}), so it is the function and not
-     * its randomness. SEQ2 is the one entry inferred rather than measured — SEQ1, SEQ4 and SEQ8 were
-     * each refused, and the family is uniform.
-     *
-     * <p>{@code INSERT ... SELECT} is the supported route for every one of them.
-     */
-    private static final Set<String> VALUES_REJECTED_FUNCTIONS = new HashSet<>(Arrays.asList(
-        "COMPRESS", "MD5_BINARY", "HEX_DECODE_BINARY", "SHA2", "RANDOM",
-        "UUID_STRING", "UNIFORM", "SEQ1", "SEQ2", "SEQ4", "SEQ8",
-        "ENCRYPT", "ENCRYPT_RAW", "NORMAL", "ZIPF"));
-
-    /** Whether a refused function appears ANYWHERE under {@code node}. */
-    private static boolean containsRejectedFunction(final Expression node) {
-        if (node instanceof FunctionCallExpression) {
-            final FunctionCallExpression call = (FunctionCallExpression) node;
-            if (VALUES_REJECTED_FUNCTIONS.contains(call.getFunctionName().toUpperCase(Locale.ROOT))) {
-                return true;
-            }
-            for (final Expression argument : call.getArguments()) {
-                if (containsRejectedFunction(argument)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        if (node instanceof CastExpression) {
-            return containsRejectedFunction(((CastExpression) node).getExpression());
-        }
-        if (node instanceof BinaryOperationExpression) {
-            return containsRejectedFunction(((BinaryOperationExpression) node).getLeft())
-                || containsRejectedFunction(((BinaryOperationExpression) node).getRight());
-        }
-        if (node instanceof UnaryOperationExpression) {
-            return containsRejectedFunction(((UnaryOperationExpression) node).getOperand());
-        }
-        return false;
-    }
-
     Row buildInsertRow(final Table table, final String fullyQualifiedName,
                                final List<String> columnNames, final int[] valueIndexes,
                                final List<Object> values) {
@@ -904,6 +865,17 @@ final class InsertExecutor {
      *
      * @param filledByDefault one flag per table column, set for this row; null when the caller has no use for it
      */
+    /**
+     * Whether an INSERT that wrote no row rewrote its target as it was: the target holds rows and the account read the
+     * source rather than settling it empty while compiling (see InsertSourcePruning).
+     */
+    private boolean rewritesUnchanged(final String fullyQualifiedName,
+                                      final FrostlakeParser.SelectStatementContext source) {
+        return source != null && executor.getStorageEngine().hasTable(fullyQualifiedName)
+            && !executor.readTableRowsForTransaction(fullyQualifiedName).isEmpty()
+            && !InsertSourcePruning.settledEmpty(executor, source);
+    }
+
     private Row buildInsertRow(final Table table, final String fullyQualifiedName,
                                final List<String> columnNames, final int[] valueIndexes,
                                final List<Object> values, final boolean[] filledByDefault) {
@@ -1073,6 +1045,8 @@ final class InsertExecutor {
      * matching WHEN; ELSE applies only when no WHEN matched.
      */
     Object executeMultiTableInsert(final FrostlakeParser.MultiTableInsertStatementContext ctx) {
+        // The order of the cases is the statement's compile error, ahead of every other refusal.
+        MultiTableInsertShape.require(ctx);
         executor.checkNotReadOnly();
         try {
             if (!executor.getTransactionManager().hasActiveTransaction()) {
@@ -1180,8 +1154,9 @@ final class InsertExecutor {
                             }
                         }
                     }
-                    if (!matched && ctx.multiInsertElse() != null) {
-                        applicable.addAll(ctx.multiInsertElse().multiInsertInto());
+                    final FrostlakeParser.MultiInsertElseContext otherwise = MultiTableInsertShape.elseOf(ctx);
+                    if (!matched && otherwise != null) {
+                        applicable.addAll(otherwise.multiInsertInto());
                     }
                 }
 
@@ -1220,6 +1195,16 @@ final class InsertExecutor {
                 }
             }
             logger.trace("Multi-table INSERT routed {} row insertion(s)", rowsInserted);
+            if (!overwrite) {
+                // Every target writes a version, one no row reached too: it rewrote the table where the source was
+                // read rather than settled empty.
+                for (final Map.Entry<String, long[]> target : insertedInto.entrySet()) {
+                    final boolean untouched = target.getValue()[0] == 0;
+                    executor.noteStatementTarget(target.getKey(), StreamVersionKind.INSERT, untouched
+                        && (source.getRows().isEmpty() ? rewritesUnchanged(target.getKey(), ctx.selectStatement())
+                            : !executor.readTableRowsForTransaction(target.getKey()).isEmpty()));
+                }
+            }
             // LAST_ALTERED moves on every table the statement names, whether or not a row reached it.
             for (final FrostlakeParser.MultiInsertIntoContext into : allMultiInsertIntos(ctx)) {
                 targetOf(into).markDmlRan(StatementClock.commitInstant());
@@ -1259,8 +1244,9 @@ final class InsertExecutor {
         for (final FrostlakeParser.MultiInsertWhenContext whenCtx : ctx.multiInsertWhen()) {
             all.addAll(whenCtx.multiInsertInto());
         }
-        if (ctx.multiInsertElse() != null) {
-            all.addAll(ctx.multiInsertElse().multiInsertInto());
+        final FrostlakeParser.MultiInsertElseContext otherwise = MultiTableInsertShape.elseOf(ctx);
+        if (otherwise != null) {
+            all.addAll(otherwise.multiInsertInto());
         }
         return all;
     }
@@ -1435,9 +1421,19 @@ final class InsertExecutor {
         return parsed instanceof DefaultMarkerExpression ? parsed : evaluateRowExpression(exprCtx, sourceTable, srcRow);
     }
 
+    /**
+     * Evaluate a WHEN condition or an INTO value for one routed row, counting every position inside it — a
+     * subquery's included — from where the expression stands in the statement.
+     */
     private Object evaluateRowExpression(final ParserRuleContext exprCtx, final Table sourceTable, final Row srcRow) {
         final ExpressionEvaluator evaluator = new ExpressionEvaluator(sourceTable, executor.getFunctionRegistry(), executor.getCatalog(), executor);
-        return evaluator.evaluate(executor.getOriginalText(exprCtx), srcRow);
+        final SourcePosition displaced = ExpressionSource.beginNested(new SourcePosition(
+            exprCtx.getStart().getLine(), exprCtx.getStart().getCharPositionInLine()));
+        try {
+            return evaluator.evaluate(executor.getOriginalText(exprCtx), srcRow);
+        } finally {
+            ExpressionSource.end(displaced);
+        }
     }
 
     private boolean evaluateRowCondition(final FrostlakeParser.BooleanExprContext condCtx, final Table sourceTable, final Row srcRow) {

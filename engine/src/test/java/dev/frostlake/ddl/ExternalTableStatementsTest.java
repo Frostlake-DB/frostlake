@@ -55,12 +55,12 @@ public class ExternalTableStatementsTest extends MeasuredCellsTestSupport {
             + " d DATE AS TO_DATE(metadata$filename)) PARTITION BY (d) WITH LOCATION = @et_xs/sub/"
             + " REFRESH_ON_CREATE = false AUTO_REFRESH = false PATTERN = '.*[.]csv' FILE_FORMAT = (TYPE = CSV)"
             + " COMMENT = 'one'");
-        assertEquals("<TS>|ET_A|TEST_DB|TEST_SCHEMA|false|null|SYSADMIN|one|TEST_DB.TEST_SCHEMA.ET_XS|@TEST_DB"
-            + ".TEST_SCHEMA.ET_XS/sub/||CSV|AWS||null|null|UNSPECIFIED|null|ROLE",
+        assertEquals("<TS>|ET_A|TEST_DB|TEST_SCHEMA|false|null|SYSADMIN|one|@TEST_DB.TEST_SCHEMA.ET_XS|s3://bucket"
+            + "/path/sub/||CSV|AWS|null|null|null|UNSPECIFIED|null|ROLE",
             listed("SHOW EXTERNAL TABLES"));
-        assertEquals("VALUE|VARIANT|COLUMN|Y|null|N|N|null|null|null|null|null|null ;; C1|VARCHAR(16777216)|VI"
-            + "RTUAL|Y|null|N|N|null|(value:c1::varchar)|null|null|null|null ;; D|DATE|VIRTUAL|Y|null|N"
-            + "|N|null|TO_DATE(metadata$filename)|null|null|null|null",
+        assertEquals("VALUE|VARIANT|COLUMN|Y|null|N|N|null|null|The value of this row|null|null|null ;; C1|VARCHAR"
+            + "(16777216)|VIRTUAL|Y|null|N|N|null|CAST(GET(VALUE, 'c1') AS VARCHAR)|null|null|null|null ;; D|DATE"
+            + "|VIRTUAL|Y|null|N|N|null|TO_DATE(METADATA$FILENAME)|null|null|null|null",
             answer("DESCRIBE EXTERNAL TABLE et_a"));
         assertEquals("", answer("SELECT * FROM et_a"));
         assertEquals("0", answer("SELECT COUNT(c1) FROM et_a"));
@@ -71,8 +71,8 @@ public class ExternalTableStatementsTest extends MeasuredCellsTestSupport {
             "CREATE EXTERNAL TABLE et_a LOCATION = @et_xs FILE_FORMAT = (TYPE = JSON)");
         assertAnswer("Table ET_A successfully created.", "CREATE OR REPLACE EXTERNAL TABLE et_a LOCATION = @et_xs"
             + " FILE_FORMAT = (TYPE = JSON) COMMENT = 'two'");
-        assertEquals("<TS>|ET_A|TEST_DB|TEST_SCHEMA|false|null|SYSADMIN|two|TEST_DB.TEST_SCHEMA.ET_XS|@TEST_DB"
-            + ".TEST_SCHEMA.ET_XS/||JSON|AWS||null|null|UNSPECIFIED|null|ROLE",
+        assertEquals("<TS>|ET_A|TEST_DB|TEST_SCHEMA|false|null|SYSADMIN|two|@TEST_DB.TEST_SCHEMA.ET_XS|s3://bucket"
+            + "/path/||JSON|AWS|null|null|null|UNSPECIFIED|null|ROLE",
             listed("SHOW EXTERNAL TABLES LIKE 'ET_A'"));
         assertAnswer("ET_A successfully dropped.",
             "DROP EXTERNAL TABLE et_a");

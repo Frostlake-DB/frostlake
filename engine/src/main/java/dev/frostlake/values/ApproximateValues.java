@@ -58,22 +58,25 @@ public final class ApproximateValues {
             return Double.valueOf(((Number) value).doubleValue());
         }
         if (value instanceof CharSequence) {
-            final String text = value.toString().trim();
-            final Double nonFinite = NonFiniteDoubles.parseForCast(text);
-            if (nonFinite != null) {
-                return nonFinite;
-            }
-            try {
-                return Double.valueOf(Double.parseDouble(text));
-            } catch (final NumberFormatException notNumeric) {
-                final Double hex = HexDoubleText.withoutExponent(text, true);
-                if (hex != null) {
-                    return hex;
-                }
+            final Double read = ApproximateText.folded(value.toString());
+            if (read == null) {
                 throw new RuntimeException("Numeric value '" + value + "' is not recognized");
             }
+            return read;
         }
         return null;
+    }
+
+    /**
+     * The double a value takes when stored in a FLOAT column, as {@link #written} reads it except that a text is
+     * read as the statement runs (see ApproximateText): a finite text past the double's range is refused, not stored
+     * as an infinity, and a text that spells no number is echoed trimmed, without one leading plus sign.
+     *
+     * @param value the value as the write produced it
+     * @return its double, or null
+     */
+    public static Double stored(final Object value) {
+        return value instanceof CharSequence ? ApproximateText.read(value.toString()) : written(value);
     }
 
     /**

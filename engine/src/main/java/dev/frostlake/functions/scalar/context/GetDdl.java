@@ -64,6 +64,7 @@ import dev.frostlake.metastore.model.RowAccessPolicy;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SecurityObject;
 import dev.frostlake.metastore.model.SecurityObjectKind;
+import dev.frostlake.metastore.model.SemanticView;
 import dev.frostlake.metastore.model.Sequence;
 import dev.frostlake.metastore.model.SequenceDefault;
 import dev.frostlake.metastore.model.StorageLifecyclePolicy;
@@ -270,6 +271,7 @@ public class GetDdl extends BuiltInFunction {
                 final Schema schema =
                     catalog.resolveSchema(QualifiedName.of(SqlIdentifiers.canonicalTextParts(written)));
                 final String recorded = QualifiedName.join(schema.getDatabaseName(), schema.getName());
+                refuseShared(schema.getDatabaseName());
                 if (ownership != null && !SystemDatabase.is(schema.getDatabaseName())
                         && !ownership.sees("SCHEMA", recorded, schema.getOwner())) {
                     // One the session does not see is answered as one that does not exist.
@@ -279,6 +281,7 @@ public class GetDdl extends BuiltInFunction {
             }
             case "DATABASE": {
                 final Database database = databaseNamed(written);
+                refuseShared(database.getName());
                 if (ownership != null && !SystemDatabase.is(database.getName())
                         && !ownership.sees("DATABASE", database.getName(), database.getOwner())) {
                     // One the session does not see is answered as one that does not exist.
@@ -329,9 +332,19 @@ public class GetDdl extends BuiltInFunction {
                         SqlIdentifiers.canonicalTextParts(written)[0]));
                 }
                 throw new RuntimeException("GET_DDL does not support object type: " + objectType);
+            case "SEMANTIC_VIEW": {
+                // The view is looked up as any schema object is, and a missing one is refused as missing.
+                final String[] parts = SqlIdentifiers.canonicalTextParts(written);
+                final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+                final SemanticView view = schema.getSemanticViewExact(parts[parts.length - 1]);
+                if (view == null) {
+                    throw new RuntimeException(SqlCompilationError.doesNotExist("Semantic View",
+                        schema.qualifiedName(parts[parts.length - 1])));
+                }
+                return lookupOnly ? null : view.ddl(names.object(schema, view.getName()));
+            }
             case "INTEGRATION":
             case "TYPE":
-            case "SEMANTIC_VIEW":
             case "CORTEX_AGENT":
             case "FAILOVER_GROUP":
             case "REPLICATION_GROUP":
@@ -420,6 +433,9 @@ public class GetDdl extends BuiltInFunction {
                 // (live-verified).
                 throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
             }
+            if (owner.getView(name).getOwner() == null) {
+                refuseShared(owner.getDatabaseName());
+            }
             requireSeen(objectType, "VIEW", parts, owner, owner.getView(name).getOwner());
             requireShown(owner.getView(name).isSecure(), owner.getView(name).getOwner());
             return lookupOnly ? null : viewDdl(owner.getView(name), owner, names);
@@ -434,6 +450,18 @@ public class GetDdl extends BuiltInFunction {
             return lookupOnly ? null : dynamicTableDdl(owner.getDynamicTable(name), owner, names);
         }
         throw missingRelation(objectType, parts, owner);
+    }
+
+    /**
+     * Refuses the DDL of the SNOWFLAKE database, one of its schemas or a view its share holds: the account recreates
+     * nothing of a shared database (live-verified: {@code This operation is not supported on shared database
+     * 'SNOWFLAKE'.}, on the line of its prefix).
+     */
+    private static void refuseShared(final String databaseName) {
+        if (SystemDatabase.is(databaseName)) {
+            throw new RuntimeException("SQL compilation error: This operation is not supported on shared database '"
+                + databaseName + "'.");
+        }
     }
 
     /**
@@ -986,7 +1014,7 @@ public class GetDdl extends BuiltInFunction {
     private String columnLine(final TableColumn col, final Schema schema, final boolean formatNames) {
         final StringBuilder c = new StringBuilder();
         c.append(SqlIdentifiers.spellCanonicalEscaped(col.getName())).append(" ")
-         .append(formatNames ? IcebergTypes.ddlName(col.getFormatType()) : renderType(col.getDataType()));
+         .append(formatNames ? IcebergTypes.ddlName(col.getFormatType()) : renderType(col.getDefinedType()));
         if (col.isVirtual()) {
             // A virtual column's expression follows its type, as the plan prints it (live-verified).
             c.append(" AS (").append(col.getVirtualText()).append(')');
@@ -1462,7 +1490,8 @@ public class GetDdl extends BuiltInFunction {
     /**
      * The properties a handler-backed routine (Java, Python, Scala) carries, each on a line of its own in
      * the account's order: {@code RUNTIME_VERSION = '3.11'}, a Python routine's {@code ARTIFACT_REPOSITORY},
-     * {@code PACKAGES = ('a','b')} with no space after a comma, {@code HANDLER = 'run'}, {@code IMPORTS} and
+     * {@code PACKAGES = ('a','b')} with no space after a comma - for a Python routine whose PACKAGES sit beside
+     * ARTIFACT_REPOSITORY_PACKAGES, those first, then the repository and {@code ARTIFACT_REPOSITORY_PACKAGES} -, {@code HANDLER = 'run'}, {@code IMPORTS} and
      * {@code TARGET_PATH}. Each is left out when the routine has none, so a SQL or JavaScript routine renders
      * nothing here; the secrets and integrations a routine names are not rendered at all (live-verified).
      */
@@ -1476,11 +1505,16 @@ public class GetDdl extends BuiltInFunction {
         if ("PYTHON".equalsIgnoreCase(language)) {
             final RoutineEnvironment described = environment.copy();
             described.setPackages(packages);
+            final List<String> plain = described.plainPackages();
+            out.append(quotedList("PACKAGES", plain));
             if (described.describedArtifactRepository() != null) {
                 out.append("ARTIFACT_REPOSITORY = ").append(described.describedArtifactRepository()).append("\n");
             }
+            out.append(quotedList(plain.isEmpty() ? "PACKAGES" : "ARTIFACT_REPOSITORY_PACKAGES",
+                described.repositoryPackages()));
+        } else {
+            out.append(quotedList("PACKAGES", packages));
         }
-        out.append(quotedList("PACKAGES", packages));
         if (handler != null) {
             out.append("HANDLER = ").append(quotedText(handler)).append("\n");
         }

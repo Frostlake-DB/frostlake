@@ -489,6 +489,7 @@ public class CreateTableHandler implements CommandHandler {
                 // Column names, types, defaults (IDENTITY's definition included) and constraints, the clustering
                 // keys and the tags; no policy is set on the new table (Table.likeCopy).
                 table = sourceTable.likeCopy(tableName, isTemporary, transientTable);
+                VirtualColumnDefinitions.refuseCopiedMismatch(table);
 
                 String comment = null;
                 final List<FrostlakeParser.CommentClauseContext> comments = tailComments(ctx);
@@ -635,11 +636,21 @@ public class CreateTableHandler implements CommandHandler {
                 for (int i = 0; i < nullableSources.length; i++) {
                     nullableSources[i] = Boolean.TRUE.equals(nullability.get(i));
                 }
+                // A constant text the plan folds is written as the folded value (see ApproximateText).
+                final List<Object> sourceFolding = new ArrayList<>();
+                for (final ResultSetColumn sourceColumn : resultSet.getColumns()) {
+                    sourceFolding.add(Boolean.valueOf(sourceColumn.isFoldedText()));
+                }
+                final List<Object> folding = virtual ? VirtualColumns.spread(table, sourceFolding) : sourceFolding;
+                final boolean[] foldedSources = new boolean[folding.size()];
+                for (int i = 0; i < foldedSources.length; i++) {
+                    foldedSources[i] = Boolean.TRUE.equals(folding.get(i));
+                }
                 for (final Row resultRow : resultSet.getRows()) {
                     final Row typedRow = new Row(virtual ? VirtualColumns.spread(table, resultRow.getValues())
                         : new ArrayList<>(resultRow.getValues()));
                     if (ctx.columnList() != null) {
-                        queryExecutor.writeCtasRow(table, typedRow, envelopeName, nullableSources);
+                        queryExecutor.writeCtasRow(table, typedRow, envelopeName, nullableSources, foldedSources);
                     } else {
                         queryExecutor.coerceRowTypesLenient(table, typedRow);
                     }
@@ -1242,6 +1253,18 @@ public class CreateTableHandler implements CommandHandler {
             // Recorded in full, as every policy attachment is (see PolicyReferences).
             table.setRowAccessPolicyName(catalog.qualifiedExactName(written));
             table.setRowAccessPolicyColumns(policyCols);
+        }
+    }
+
+    /**
+     * Refuses a CREATE TABLE that writes its comment twice, as the block holding it compiles (see
+     * {@link BlockCompiledShapes}). An event table and a dynamic table are left to their own statements.
+     *
+     * @param ctx a CREATE statement
+     */
+    static void requireOneComment(final FrostlakeParser.CreateStatementContext ctx) {
+        if (ctx.TABLE() != null && ctx.EVENT() == null && ctx.DYNAMIC() == null) {
+            tailComments(ctx);
         }
     }
 

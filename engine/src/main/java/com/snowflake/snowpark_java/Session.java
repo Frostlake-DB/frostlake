@@ -48,6 +48,11 @@ public class Session {
      */
     private final AtomicBoolean queryInFlight = new AtomicBoolean(false);
     private final boolean ownersRights;
+    /**
+     * The thread the session was made on, the one running the procedure's statement: a query another thread submits
+     * runs under what that statement holds (see {@link DatabaseEngine#beginLentStatement}).
+     */
+    private final Thread owner;
 
     public Session(final DatabaseEngine engine) {
         this(engine, false);
@@ -60,6 +65,7 @@ public class Session {
     public Session(final DatabaseEngine engine, final boolean ownersRights) {
         this.engine = engine;
         this.ownersRights = ownersRights;
+        this.owner = Thread.currentThread();
     }
 
     /**
@@ -87,11 +93,19 @@ public class Session {
             throw SnowparkStatementFailure.raise(refused);
         }
         beginQuery();
+        // A worker the handler hands the session to while it waits: the handler's statement holds the engine.
+        final boolean lent = Thread.currentThread() != owner;
+        if (lent) {
+            engine.beginLentStatement();
+        }
         try {
             return engine.executeQuery(sqlText);
         } catch (final RuntimeException refused) {
             throw SnowparkStatementFailure.raise(refused);
         } finally {
+            if (lent) {
+                engine.endLentStatement();
+            }
             queryInFlight.set(false);
         }
     }

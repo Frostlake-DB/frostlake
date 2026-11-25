@@ -19,72 +19,79 @@ package dev.frostlake.functions.aggregate;
 import dev.frostlake.values.Decfloats;
 
 import java.math.BigDecimal;
-import java.math.MathContext;
-import java.math.RoundingMode;
 import java.util.List;
 
 /**
- * The power sums of DECFLOAT values, each held to 38 digits as it grows, and their correctly rounded mean, from which
- * {@link DecfloatMoments} computes the skewness and the kurtosis as the account does.
+ * The sums the account plans the DECFLOAT variance, skewness and kurtosis over: {@code SUM(x)}, {@code SUM(x * x)},
+ * {@code SUM((x * x) * x)} and {@code SUM(((x * x) * x) * x)}. Each product is held to 38 digits, and each sum is
+ * taken exactly and held once, as a DECFLOAT SUM is: the sum of 1e38, 1 and -1e38 is 1 (live-verified). The mean is
+ * the held sum over the count, held.
  */
 final class DecfloatPowerSums {
 
-    /** The digits the exact mean is computed to before its one rounding to 38. */
-    private static final MathContext WORKING = new MathContext(Decfloats.DIGITS + 22, RoundingMode.HALF_EVEN);
-
     private final BigDecimal count;
-    private BigDecimal first = BigDecimal.ZERO;
-    private BigDecimal squares = BigDecimal.ZERO;
-    private BigDecimal cubes = BigDecimal.ZERO;
-    private BigDecimal fourthPowers = BigDecimal.ZERO;
+    private final BigDecimal first;
+    private final BigDecimal squares;
+    private final BigDecimal cubes;
+    private final BigDecimal fourthPowers;
     private final BigDecimal mean;
 
     /**
      * @param values the DECFLOAT values, at least one
      */
     DecfloatPowerSums(final List<BigDecimal> values) {
-        BigDecimal exact = BigDecimal.ZERO;
+        BigDecimal sum = BigDecimal.ZERO;
+        BigDecimal sumOfSquares = BigDecimal.ZERO;
+        BigDecimal sumOfCubes = BigDecimal.ZERO;
+        BigDecimal sumOfFourthPowers = BigDecimal.ZERO;
         for (final BigDecimal value : values) {
             final BigDecimal square = Decfloats.multiply(value, value);
-            first = Decfloats.add(first, value);
-            squares = Decfloats.add(squares, square);
-            cubes = Decfloats.add(cubes, Decfloats.multiply(square, value));
-            fourthPowers = Decfloats.add(fourthPowers, Decfloats.multiply(square, square));
-            exact = exact.add(value, WORKING);
+            final BigDecimal cube = Decfloats.multiply(square, value);
+            sum = DecfloatAggregates.added(sum, value);
+            sumOfSquares = DecfloatAggregates.added(sumOfSquares, square);
+            sumOfCubes = DecfloatAggregates.added(sumOfCubes, cube);
+            sumOfFourthPowers = DecfloatAggregates.added(sumOfFourthPowers, Decfloats.multiply(cube, value));
         }
         count = BigDecimal.valueOf(values.size());
-        mean = Decfloats.held(exact.divide(count, WORKING));
+        first = DecfloatAggregates.held(sum);
+        squares = DecfloatAggregates.held(sumOfSquares);
+        cubes = DecfloatAggregates.held(sumOfCubes);
+        fourthPowers = DecfloatAggregates.held(sumOfFourthPowers);
+        mean = Decfloats.divide(first, count);
     }
 
-    /** The correctly rounded mean. */
-    BigDecimal mean() {
-        return mean;
+    /**
+     * {@code n·Σx² - Σx·Σx}, each step held to 38 digits, a negative difference taken as 0: the variance's dividend.
+     *
+     * @return the dividend
+     */
+    BigDecimal spread() {
+        final BigDecimal spread = Decfloats.subtract(Decfloats.multiply(count, squares),
+            Decfloats.multiply(first, first));
+        return spread.signum() < 0 ? BigDecimal.ZERO : spread;
     }
 
-    /** {@code Σx²}. */
-    BigDecimal squares() {
-        return squares;
-    }
-
-    /** {@code Σx³ - 3·mean·Σx² + 3·mean²·Σx - n·mean³}, each step held to 38 digits. */
+    /** {@code ((Σx³ - (3·mean)·Σx²) + ((3·mean)·mean)·Σx) - ((n·mean)·mean)·mean}, each step held to 38 digits. */
     BigDecimal centeredCubes() {
-        final BigDecimal meanSquared = Decfloats.multiply(mean, mean);
-        final BigDecimal three = BigDecimal.valueOf(3);
+        final BigDecimal threeMeans = Decfloats.multiply(BigDecimal.valueOf(3), mean);
         return Decfloats.subtract(Decfloats.add(
-            Decfloats.subtract(cubes, Decfloats.multiply(Decfloats.multiply(three, mean), squares)),
-            Decfloats.multiply(Decfloats.multiply(three, meanSquared), first)),
-            Decfloats.multiply(count, Decfloats.multiply(meanSquared, mean)));
+            Decfloats.subtract(cubes, Decfloats.multiply(threeMeans, squares)),
+            Decfloats.multiply(Decfloats.multiply(threeMeans, mean), first)),
+            Decfloats.multiply(Decfloats.multiply(Decfloats.multiply(count, mean), mean), mean));
     }
 
-    /** {@code Σx⁴ - 4·mean·Σx³ + 6·mean²·Σx² - 4·mean³·Σx + n·mean⁴}, each step held to 38 digits. */
+    /**
+     * {@code (((Σx⁴ - (4·mean)·Σx³) + ((6·mean)·mean)·Σx²) - (((4·mean)·mean)·mean)·Σx) + (((n·mean)·mean)·mean)·mean},
+     * each step held to 38 digits.
+     */
     BigDecimal centeredFourthPowers() {
-        final BigDecimal meanSquared = Decfloats.multiply(mean, mean);
-        final BigDecimal meanCubed = Decfloats.multiply(meanSquared, mean);
-        final BigDecimal four = BigDecimal.valueOf(4);
+        final BigDecimal fourMeans = Decfloats.multiply(BigDecimal.valueOf(4), mean);
+        final BigDecimal sixMeans = Decfloats.multiply(BigDecimal.valueOf(6), mean);
+        final BigDecimal nMeans = Decfloats.multiply(count, mean);
         return Decfloats.add(Decfloats.subtract(Decfloats.add(
-            Decfloats.subtract(fourthPowers, Decfloats.multiply(Decfloats.multiply(four, mean), cubes)),
-            Decfloats.multiply(Decfloats.multiply(BigDecimal.valueOf(6), meanSquared), squares)),
-            Decfloats.multiply(Decfloats.multiply(four, meanCubed), first)),
-            Decfloats.multiply(count, Decfloats.multiply(meanSquared, meanSquared)));
+            Decfloats.subtract(fourthPowers, Decfloats.multiply(fourMeans, cubes)),
+            Decfloats.multiply(Decfloats.multiply(sixMeans, mean), squares)),
+            Decfloats.multiply(Decfloats.multiply(Decfloats.multiply(fourMeans, mean), mean), first)),
+            Decfloats.multiply(Decfloats.multiply(Decfloats.multiply(nMeans, mean), mean), mean));
     }
 }

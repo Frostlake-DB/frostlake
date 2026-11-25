@@ -29,7 +29,6 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
@@ -110,7 +109,8 @@ public final class SnowflakeDateFormat {
         // while a value with no zone at all (NTZ, DATE) says the bare GMT. A session zone with no
         // English abbreviation (Etc/GMT+5) uses the spelled-offset form as well.
         {"TZD", "Z", "0"},
-        // ★ YYYY PRINTS THE DIGITS OF A YEAR PAST 9999 (20201), never a sign.
+        // ★ YYYY PRINTS THE DIGITS OF A YEAR PAST 9999 (20201) and the PROLEPTIC year, unpadded and signed,
+        // before the year 0 (-44, -4); YY and Y the proleptic year modulo 100 (56 and 96 there).
         {"YYYY", "y", "4"}, {"UUUU", "u", "4"}, {"HH24", "H", "2"}, {"HH12", "h", "2"},
         // The unpadded elements (live-verified on 2005-04-05 17:08:09): H24:ME:S is 17:8:9, H12 is 5, MO is 4.
         {"H24", "H", "1"}, {"H12", "h", "1"}, {"MMMM", "M", "4"},
@@ -129,10 +129,6 @@ public final class SnowflakeDateFormat {
         // meridiem's letter, A or P. These are what make 'DAY' and 'MONTH' come out as "15A20" / "JanT0".
         {"Y", "Y", "1"}, {"D", "d", "1"}, {"H", "H", "1"}, {"S", "s", "1"}, {"P", "P", "1"},
     };
-
-    /** The Y element: the year's last two digits, unpadded. */
-    private static final DateTimeFormatter SHORT_YEAR_FORMAT = new DateTimeFormatterBuilder()
-        .appendValueReduced(ChronoField.YEAR, 1, 2, 2000).toFormatter(Locale.US);
 
     /** The UUUU element: the proleptic year, four digits at least and signed past them. */
     private static final DateTimeFormatter PROLEPTIC_YEAR_FORMAT = DateTimeFormatter.ofPattern("uuuu", Locale.US);
@@ -164,7 +160,7 @@ public final class SnowflakeDateFormat {
             final char field = fieldOf(piece.element());
             int end = i + 1;
             int width = widthOf(piece.element());
-            if (joins && field != ZONE_NAME) {
+            if (joins && field != ZONE_NAME && !(field == YEAR && beforeYearZero(temporal))) {
                 while (end < scanned.size() && scanned.get(end).isElement()
                         && fieldOf(scanned.get(end).element()) == field) {
                     width += widthOf(scanned.get(end).element());
@@ -182,6 +178,14 @@ public final class SnowflakeDateFormat {
             i = end;
         }
         return out.toString();
+    }
+
+    /**
+     * Whether a value's year is before the year 0, whose year elements never join: 'YYYYYY' is YYYY then YY,
+     * {@code -4456} for the year -44, where it is the year at six digits from the year 0 on (live-verified).
+     */
+    private static boolean beforeYearZero(final TemporalAccessor temporal) {
+        return temporal.isSupported(ChronoField.YEAR) && temporal.get(ChronoField.YEAR) < 0;
     }
 
     /** Whether a format's adjacent elements of one field join: not when it holds Y, P or UUUU. */
@@ -202,12 +206,15 @@ public final class SnowflakeDateFormat {
                                  final Object value) {
         switch (field) {
             case YEAR:
-                final int year = temporal.get(ChronoField.YEAR_OF_ERA);
-                return width == 2 ? padded(year % 100, 2) : padded(year, width);
+                final int year = temporal.get(ChronoField.YEAR);
+                if (width == 2) {
+                    return padded(Math.floorMod(year, 100), 2);
+                }
+                return year < 0 ? "-" + (-year) : padded(year, width);
             case PROLEPTIC_YEAR:
                 return PROLEPTIC_YEAR_FORMAT.format(temporal);
             case SHORT_YEAR:
-                return SHORT_YEAR_FORMAT.format(temporal);
+                return Integer.toString(Math.floorMod(temporal.get(ChronoField.YEAR), 100));
             case MONTH:
                 final int month = temporal.get(ChronoField.MONTH_OF_YEAR);
                 if (width >= 4) {
@@ -234,7 +241,8 @@ public final class SnowflakeDateFormat {
             case MERIDIEM_LETTER:
                 return temporal.get(ChronoField.AMPM_OF_DAY) == 0 ? "A" : "P";
             case OFFSET:
-                return offset(temporal.get(ChronoField.OFFSET_SECONDS), width);
+                return offset(value instanceof ZonedDateTime ? WideOffsetZone.offsetSeconds((ZonedDateTime) value)
+                    : temporal.get(ChronoField.OFFSET_SECONDS), width);
             default:
                 return tzdText(value);
         }
@@ -316,8 +324,8 @@ public final class SnowflakeDateFormat {
         }
         if (value instanceof ZonedDateTime) {
             final ZoneId zone = ((ZonedDateTime) value).getZone();
-            if (zone instanceof ZoneOffset) {
-                return spelledGmtOffset((ZoneOffset) zone);
+            if (zone instanceof ZoneOffset || WideOffsetZone.isWide(zone)) {
+                return spelledGmtOffset(WideOffsetZone.offsetSeconds((ZonedDateTime) value));
             }
             return standardShortName(zone);
         }
@@ -336,8 +344,7 @@ public final class SnowflakeDateFormat {
     }
 
     /** The offset spelled in the localized-GMT form, sign and minutes always written: GMT+05:30. */
-    private static String spelledGmtOffset(final ZoneOffset offset) {
-        final int total = offset.getTotalSeconds();
+    private static String spelledGmtOffset(final int total) {
         final int magnitude = Math.abs(total);
         return String.format(Locale.ROOT, "GMT%s%02d:%02d", total < 0 ? "-" : "+",
             magnitude / 3600, (magnitude % 3600) / 60);
@@ -364,6 +371,10 @@ public final class SnowflakeDateFormat {
         // a ZERO offset rather than left without one, because the offset elements have to render
         // SOMETHING for it and live renders Z. A TIME is a time on 1970-01-01 (live-verified: 'YYYY-MM-DD'
         // over a TIME is 1970-01-01).
+        // A wide offset's wall clock is read here, its offset beside it in the OFFSET element.
+        if (v instanceof ZonedDateTime && WideOffsetZone.isWide(((ZonedDateTime) v).getZone())) {
+            return WideOffsetZone.wallClock((ZonedDateTime) v).atOffset(ZoneOffset.UTC);
+        }
         if (v instanceof ZonedDateTime) return (ZonedDateTime) v;
         if (v instanceof OffsetDateTime) return (OffsetDateTime) v;
         if (v instanceof LocalDateTime) return ((LocalDateTime) v).atOffset(ZoneOffset.UTC);

@@ -314,7 +314,12 @@ final class PlanExpressionText extends AstPrinterVisitor {
 
     @Override
     public String visitIsNull(final IsNullExpression expr) {
-        return operand(expr.getOperand(), false) + (expr.isNot() ? " IS NOT NULL" : " IS NULL");
+        // A procedure's token call is tested as it is too: PR(X) IS NOT NULL (live-verified).
+        final Expression operand = expr.getOperand();
+        final boolean tokenCall = operand instanceof FunctionCallExpression
+            && ((FunctionCallExpression) operand).getNameExpression() != null && !isLiteral(operand);
+        final String tested = isBareCall(operand) || tokenCall ? spell(operand) : operand(operand, false);
+        return tested + (expr.isNot() ? " IS NOT NULL" : " IS NULL");
     }
 
     @Override
@@ -808,6 +813,9 @@ final class PlanExpressionText extends AstPrinterVisitor {
         }
         final boolean arithmetic = operator == '+' || operator == '-' || operator == '*';
         final boolean comparison = !arithmetic && operator != '%';
+        if (comparison && isBareCall(operand)) {
+            return spell(operand);
+        }
         if (operand instanceof FunctionCallExpression && isAggregate((FunctionCallExpression) operand)
                 && !isCompound(operand)) {
             return comparison && isCount((FunctionCallExpression) operand) ? operand(operand, false)
@@ -1052,12 +1060,33 @@ final class PlanExpressionText extends AstPrinterVisitor {
         return true;
     }
 
+    /**
+     * Whether an expression is a scalar call written with no arguments, which a comparison and an IS NULL hold
+     * without parentheses, {@code RANDOM() > 0} (live-verified), while a sum still encloses it.
+     */
+    private boolean isBareCall(final Expression expression) {
+        if (!(expression instanceof FunctionCallExpression) || folded(expression) != null) {
+            return false;
+        }
+        final FunctionCallExpression call = (FunctionCallExpression) expression;
+        return call.getNameExpression() == null && call.getFunctionName() != null && !call.isStar()
+            && call.getArguments().isEmpty() && !isAggregate(call);
+    }
+
     private boolean isAggregate(final FunctionCallExpression call) {
         return call.getFunctionName() != null && call.getNameExpression() == null
             && functions.hasAggregateFunction(call.getFunctionName().toUpperCase(Locale.ROOT));
     }
 
     /** Whether an expression is a value the plan holds as it is: a literal, a negative number, a folded literal. */
+    /**
+     * @param expression the expression
+     * @return whether the plan holds it as a value: a literal, a negative number, a folded constant
+     */
+    boolean isConstant(final Expression expression) {
+        return isLiteral(expression);
+    }
+
     private boolean isLiteral(final Expression expression) {
         if (expression instanceof LiteralExpression || folded(expression) != null) {
             return true;

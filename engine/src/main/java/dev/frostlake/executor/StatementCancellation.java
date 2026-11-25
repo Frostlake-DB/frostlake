@@ -18,7 +18,9 @@ package dev.frostlake.executor;
 import dev.frostlake.security.SessionSettings;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * What can end a running statement before its answer: its session's STATEMENT_TIMEOUT_IN_SECONDS, a driver's query
@@ -44,6 +46,12 @@ public final class StatementCancellation {
 
     /** The running statements by query ID, which SYSTEM$CANCEL_QUERY finds them by. */
     private static final Map<String, StatementCancellation> RUNNING = new HashMap<String, StatementCancellation>();
+
+    /**
+     * The query IDs the request running on this thread canceled as it was read, before it waited for the engine (see
+     * {@link RequestQueryCancels}): its SYSTEM$CANCEL_QUERY of such an ID answers in its turn that it terminated it.
+     */
+    private static final ThreadLocal<Set<String>> CANCELED_AHEAD = new ThreadLocal<Set<String>>();
 
     private final int driverSeconds;
     private volatile boolean canceled;
@@ -192,6 +200,60 @@ public final class StatementCancellation {
      * @return whether one was running under it
      */
     static boolean cancelRunning(final String id) {
+        final Set<String> ahead = CANCELED_AHEAD.get();
+        if (ahead != null && ahead.remove(id)) {
+            // Canceled as the request was read; it may have ended since, which is what the cancel did.
+            cancelNow(id);
+            return true;
+        }
+        return cancelNow(id);
+    }
+
+    /**
+     * Cancel the running statement a query ID names, as the request running on this thread is read, before it waits
+     * for the engine: the request's SYSTEM$CANCEL_QUERY of that ID answers in its turn that it terminated it, once the
+     * statement may have ended.
+     *
+     * @param id the query ID
+     */
+    static void cancelAhead(final String id) {
+        if (!cancelNow(id)) {
+            return;
+        }
+        Set<String> ahead = CANCELED_AHEAD.get();
+        if (ahead == null) {
+            ahead = new HashSet<String>();
+            CANCELED_AHEAD.set(ahead);
+        }
+        ahead.add(id);
+    }
+
+    /**
+     * Begin reading a request on this thread: no query ID is canceled ahead for it yet.
+     *
+     * @return what an enclosing request canceled ahead, to put back with {@link #endCanceledAhead}
+     */
+    static Set<String> beginCanceledAhead() {
+        final Set<String> displaced = CANCELED_AHEAD.get();
+        CANCELED_AHEAD.remove();
+        return displaced;
+    }
+
+    /**
+     * The request {@link #beginCanceledAhead} began on this thread has ended.
+     *
+     * @param displaced what {@link #beginCanceledAhead} answered
+     */
+    static void endCanceledAhead(final Set<String> displaced) {
+        if (displaced == null) {
+            CANCELED_AHEAD.remove();
+        } else {
+            CANCELED_AHEAD.set(displaced);
+        }
+    }
+
+    /** Cancel the running statement a query ID names; whether one was running under it. */
+    private static boolean cancelNow(final String id) {
         final StatementCancellation token;
         synchronized (RUNNING) {
             token = RUNNING.get(id);

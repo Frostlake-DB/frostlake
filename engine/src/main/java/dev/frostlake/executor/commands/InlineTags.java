@@ -157,6 +157,17 @@ public final class InlineTags {
     }
 
     /**
+     * Whether a tag clause is an external table column's, which the statement judges once its stage is: a stage that
+     * is not there is refused before a tag that is not (live-verified).
+     *
+     * @param tags the tag clause
+     * @return whether it is an external table column's
+     */
+    public static boolean isExternalColumnOwn(final FrostlakeParser.TagListContext tags) {
+        return tags.getParent() instanceof FrostlakeParser.ExternalTableColumnContext;
+    }
+
+    /**
      * Refuse a tag clause on a CREATE OR ALTER, which sets no tags: every tag it names must exist, and then the
      * clause is refused whatever its values (live-verified).
      *

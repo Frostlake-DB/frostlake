@@ -23,16 +23,20 @@ import dev.frostlake.executor.expressions.ColumnReferenceExpression;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
 import dev.frostlake.executor.expressions.LiteralExpression;
+import dev.frostlake.executor.expressions.LiteralType;
 import dev.frostlake.executor.expressions.SubqueryExpression;
 import dev.frostlake.executor.expressions.UnaryOperationExpression;
 import dev.frostlake.executor.expressions.UnaryOperator;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.storage.Row;
 
 import org.antlr.v4.runtime.ParserRuleContext;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -128,7 +132,7 @@ final class ConstantSubqueries {
      * @return true when it folds
      */
     static boolean foldsAsGeneratorBound(final QueryExecutor executor, final SubqueryExpression subquery) {
-        if (folds(executor, subquery)) {
+        if (folds(executor, subquery) || foldsOverOneRow(executor, subquery)) {
             return true;
         }
         try {
@@ -158,6 +162,145 @@ final class ConstantSubqueries {
         } catch (final RuntimeException unreadable) {
             return false;
         }
+    }
+
+    /**
+     * Whether a GENERATOR bound's subquery is MIN, MAX and COUNT over a catalog table of one row, under no grouping key
+     * and a WHERE true of that row: the account folds it whatever the columns' types, {@code (SELECT MAX(f) FROM t)}
+     * of a FLOAT and {@code (SELECT MAX(v || 'a') FROM t)} of a VARCHAR alike, where SUM, AVG, ANY_VALUE, a HAVING, a
+     * GROUP BY, a WHERE false of the row and a table of two rows or none do not fold (live-verified).
+     *
+     * @param executor the executor that reads the tables
+     * @param subquery the subquery
+     * @return true when it folds
+     */
+    private static boolean foldsOverOneRow(final QueryExecutor executor, final SubqueryExpression subquery) {
+        try {
+            final FrostlakeParser.SelectStatementContext statement = executor.parseSelectStatement(
+                subquery.getSubquery());
+            if (statement.withClause() != null || statement.orderByClause() != null
+                    || statement.limitClause() != null || statement.fetchClause() != null
+                    || statement.selectOperand().size() != 1 || statement.selectOperand(0).selectClause() == null) {
+                return false;
+            }
+            final FrostlakeParser.SelectClauseContext clause = statement.selectOperand(0).selectClause();
+            final FrostlakeParser.TableExpressionContext from = clause.tableExpression();
+            if (clause.DISTINCT() != null || clause.topClause() != null || clause.connectByClause() != null
+                    || clause.groupByClause() != null || clause.havingClause() != null
+                    || clause.qualifyClause() != null || from == null || from.tableReference().size() != 1
+                    || !from.joinClause().isEmpty()) {
+                return false;
+            }
+            final FrostlakeParser.TableReferenceContext reference = from.tableReference(0);
+            if (reference.LATERAL() != null || reference.identifierList() != null || reference.pivotClause() != null
+                    || reference.unpivotClause() != null || reference.matchRecognizeClause() != null
+                    || reference.sampleClause() != null || reference.tableSource().tableQualifiedName() == null
+                    || reference.tableSource().timeTravelClause() != null) {
+                return false;
+            }
+            final String name = ParseTreeText.getQualifiedName(reference.tableSource().tableQualifiedName());
+            final Table table = executor.getCatalog().resolveTableAsWritten(name, "Object");
+            if (table == null || !table.isCatalogResident()) {
+                return false;
+            }
+            final List<Row> rows = executor.statisticsRowsFor(executor.getFullyQualifiedTableName(name));
+            if (rows.size() != 1) {
+                return false;
+            }
+            int aggregates = 0;
+            for (final FrostlakeParser.SelectItemContext item : clause.selectList().selectItem()) {
+                final ParserRuleContext text = SelectItemAccessors.isExprItem(item) ? itemText(item) : null;
+                if (text == null) {
+                    return false;
+                }
+                final int counted = oneRowAggregates(ExpressionEvaluator.parse(ParseTreeText.getOriginalText(text)));
+                if (counted < 0) {
+                    return false;
+                }
+                aggregates += counted;
+            }
+            if (aggregates == 0) {
+                return false;
+            }
+            if (clause.whereClause() == null) {
+                return true;
+            }
+            table.setQualifiedName(executor.getFullyQualifiedTableName(name));
+            final ExpressionEvaluator evaluator = new ExpressionEvaluator(table, executor.getFunctionRegistry(),
+                executor.getCatalog(), executor);
+            final Map<String, Table> relations = new HashMap<>();
+            relations.put(GeneratorBounds.qualifierOf(reference), table);
+            final List<Table> tables = new ArrayList<>();
+            tables.add(table);
+            evaluator.setMultiTableContext(relations, tables);
+            return Boolean.TRUE.equals(evaluator.evaluate(ExpressionEvaluator.parse(
+                ParseTreeText.getOriginalText(clause.whereClause().booleanExpr())), rows.get(0)));
+        } catch (final RuntimeException unreadable) {
+            return false;
+        }
+    }
+
+    /**
+     * How many MIN, MAX and COUNT calls an item over a table of one row holds - over columns and literals joined by
+     * +, -, * and || - or -1 when it holds anything else.
+     */
+    private static int oneRowAggregates(final Expression expr) {
+        if (expr instanceof LiteralExpression) {
+            return 0;
+        }
+        if (expr instanceof CastExpression) {
+            return oneRowAggregates(((CastExpression) expr).getExpression());
+        }
+        if (expr instanceof UnaryOperationExpression) {
+            final UnaryOperationExpression unary = (UnaryOperationExpression) expr;
+            return unary.getOperator() == UnaryOperator.NEGATE || unary.getOperator() == UnaryOperator.PLUS
+                ? oneRowAggregates(unary.getOperand()) : -1;
+        }
+        if (expr instanceof BinaryOperationExpression) {
+            final BinaryOperationExpression binary = (BinaryOperationExpression) expr;
+            if (!rowShapedOperator(binary.getOperator()) && binary.getOperator() != BinaryOperator.DIVIDE) {
+                return -1;
+            }
+            final int left = oneRowAggregates(binary.getLeft());
+            final int right = oneRowAggregates(binary.getRight());
+            return left < 0 || right < 0 ? -1 : left + right;
+        }
+        if (!(expr instanceof FunctionCallExpression)) {
+            return -1;
+        }
+        final FunctionCallExpression call = (FunctionCallExpression) expr;
+        if (call.getNameExpression() != null || call.getFunctionName() == null || call.isDistinct()) {
+            return -1;
+        }
+        final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+        if (name.equals("COUNT")) {
+            return call.isStar() || call.getArguments().size() == 1
+                && (call.getArguments().get(0) instanceof LiteralExpression
+                    || call.getArguments().get(0) instanceof ColumnReferenceExpression) ? 1 : -1;
+        }
+        return (name.equals("MIN") || name.equals("MAX")) && call.getArguments().size() == 1
+            && rowShaped(call.getArguments().get(0)) ? 1 : -1;
+    }
+
+    /** A column, a literal that is no NULL, or +, -, * and || over those. */
+    private static boolean rowShaped(final Expression argument) {
+        if (argument instanceof LiteralExpression) {
+            return ((LiteralExpression) argument).getType() != LiteralType.NULL;
+        }
+        if (argument instanceof ColumnReferenceExpression) {
+            return true;
+        }
+        if (argument instanceof BinaryOperationExpression) {
+            final BinaryOperationExpression binary = (BinaryOperationExpression) argument;
+            return rowShapedOperator(binary.getOperator()) && rowShaped(binary.getLeft())
+                && rowShaped(binary.getRight());
+        }
+        return false;
+    }
+
+    private static boolean rowShapedOperator(final BinaryOperator op) {
+        return op == BinaryOperator.ADD || op == BinaryOperator.SUBTRACT || op == BinaryOperator.MULTIPLY
+            || op == BinaryOperator.CONCAT;
     }
 
     /** Whether a LIMIT keeps one row or more, and skips none. */

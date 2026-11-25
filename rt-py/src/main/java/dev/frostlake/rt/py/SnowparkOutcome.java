@@ -30,10 +30,20 @@ public final class SnowparkOutcome {
 
     private final String queryId;
 
-    private SnowparkOutcome(final PythonResultSet result, final String refusal, final String queryId) {
+    private final Integer sqlErrorCode;
+
+    private final String message;
+
+    private final String rawMessage;
+
+    private SnowparkOutcome(final PythonResultSet result, final String refusal, final String queryId,
+        final Integer sqlErrorCode, final String message, final String rawMessage) {
         this.result = result;
         this.refusal = refusal;
         this.queryId = queryId;
+        this.sqlErrorCode = sqlErrorCode;
+        this.message = message;
+        this.rawMessage = rawMessage;
     }
 
     /**
@@ -41,7 +51,7 @@ public final class SnowparkOutcome {
      * @return the outcome of a statement that ran
      */
     static SnowparkOutcome of(final PythonResultSet result) {
-        return new SnowparkOutcome(result, null, null);
+        return new SnowparkOutcome(result, null, null, null, null, null);
     }
 
     /**
@@ -49,16 +59,20 @@ public final class SnowparkOutcome {
      * @return the outcome of a statement the engine refused
      */
     static SnowparkOutcome refusedWith(final String refusal) {
-        return new SnowparkOutcome(null, refusal, null);
+        return new SnowparkOutcome(null, refusal, null, null, null, null);
     }
 
     /**
      * @param refusal the engine's refusal, as Snowpark's exception reads it
      * @param queryId the ID of the statement the engine ran and refused
+     * @param sqlErrorCode the refusal's vendor code
+     * @param message the refusal as the connector words it: its code in six digits, its SQLSTATE, its text
+     * @param rawMessage the refusal's own text
      * @return the outcome of a statement the engine ran and refused
      */
-    static SnowparkOutcome refusedWith(final String refusal, final String queryId) {
-        return new SnowparkOutcome(null, refusal, queryId);
+    static SnowparkOutcome refusedWith(final String refusal, final String queryId, final int sqlErrorCode,
+        final String message, final String rawMessage) {
+        return new SnowparkOutcome(null, refusal, queryId, Integer.valueOf(sqlErrorCode), message, rawMessage);
     }
 
     /** @return whether the engine refused the statement */
@@ -74,6 +88,24 @@ public final class SnowparkOutcome {
     /** @return the ID of the statement the engine ran and refused, or null for any other outcome */
     public String queryId() {
         return queryId;
+    }
+
+    /** @return the vendor code of the refusal of a statement the engine ran, or null for any other outcome */
+    public Integer sqlErrorCode() {
+        return sqlErrorCode;
+    }
+
+    /**
+     * @return the refusal of a statement the engine ran, as the connector words it ({@code 100051 (22012): Division by
+     *     zero}), or null for any other outcome
+     */
+    public String message() {
+        return message;
+    }
+
+    /** @return the own text of the refusal of a statement the engine ran, or null for any other outcome */
+    public String rawMessage() {
+        return rawMessage;
     }
 
     /** @return what the statement answered, or null when it was refused */

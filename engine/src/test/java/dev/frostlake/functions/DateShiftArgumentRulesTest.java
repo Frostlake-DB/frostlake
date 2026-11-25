@@ -106,9 +106,9 @@ public class DateShiftArgumentRulesTest extends BaseDatabaseTest {
 
     @Test
     public void aCoarseAmountMustFitThirtyTwoBits() {
-        assertEquals(List.of("5881634-07-25", "5877588-07-06", "2092-02-02 13:14:08.000", "6107-02-07 12:08:00.000"),
+        assertEquals(List.of("5881634-07-25", "-5877587-07-06", "2092-02-02 13:14:08.000", "6107-02-07 12:08:00.000"),
             row("""
-                SELECT DATEADD(day, 2147483647, d)::VARCHAR, (d - 2147483648)::VARCHAR,
+                SELECT DATEADD(day, 2147483647, d)::VARCHAR, TO_CHAR(d - 2147483648, 'UUUU-MM-DD'),
                     DATEADD(second, 2147483648, ts)::VARCHAR, DATEADD(minute, 2147483648, ts)::VARCHAR
                 FROM vt"""));
         final String past = "Numeric value '2147483648' is out of range";

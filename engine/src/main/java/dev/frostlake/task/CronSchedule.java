@@ -16,6 +16,8 @@
 
 package dev.frostlake.task;
 
+import dev.frostlake.functions.scalar.WideOffsetZone;
+
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -77,6 +79,9 @@ public final class CronSchedule {
 
     static {
         for (final String id : ZoneId.getAvailableZoneIds()) {
+            if (WideOffsetZone.isWideName(id)) {
+                continue;
+            }
             ZONES_BY_UPPER_NAME.put(id.toUpperCase(Locale.ROOT), id);
         }
     }
@@ -131,6 +136,17 @@ public final class CronSchedule {
             throw new RuntimeException(INVALID_SCHEDULE_MESSAGE);
         }
         return new CronSchedule(tokens.subList(2, 7), ZoneId.of(zoneId));
+    }
+
+    /** How many minutes of an hour the schedule names: one for an expression that fires at most hourly. */
+    public int minutesPerHour() {
+        int count = 0;
+        for (final boolean minute : minutes) {
+            if (minute) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /** The zone the fields are read in. */

@@ -50,6 +50,7 @@
         <module>rt-js</module>
         <module>rt-py</module>
         <module>rt-scala</module>
+        <module>cloud-aws</module>
     </modules>
 
     <properties>

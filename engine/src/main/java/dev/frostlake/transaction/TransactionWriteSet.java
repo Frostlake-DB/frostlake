@@ -386,7 +386,22 @@ public class TransactionWriteSet {
      * @param kind  INSERT, UPDATE, DELETE or MERGE
      */
     public void noteStatementTarget(final String table, final StreamVersionKind kind) {
-        statementChange(table).noteKind(kind);
+        noteStatementTarget(table, kind, false);
+    }
+
+    /**
+     * The same, for a statement that rewrote the table whether or not it changed a row (see StatementTableChange).
+     *
+     * @param table     the table, fully qualified
+     * @param kind      INSERT, UPDATE, DELETE or MERGE
+     * @param rewritten whether the statement rewrote the table though it may have changed no row
+     */
+    public void noteStatementTarget(final String table, final StreamVersionKind kind, final boolean rewritten) {
+        final StatementTableChange change = statementChange(table);
+        change.noteKind(kind);
+        if (rewritten) {
+            change.noteRewritten();
+        }
     }
 
     /**

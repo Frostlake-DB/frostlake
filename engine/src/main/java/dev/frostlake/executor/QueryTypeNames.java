@@ -47,6 +47,9 @@ final class QueryTypeNames {
     /** The kind of a statement that could not be read. */
     static final String UNKNOWN = "UNKNOWN";
 
+    /** The kind of a request of several statements, the parent of the statements it runs. */
+    static final String MULTI_STATEMENT = "MULTI_STATEMENT";
+
     private QueryTypeNames() {
     }
 

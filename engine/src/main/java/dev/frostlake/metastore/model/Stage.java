@@ -164,8 +164,9 @@ public class Stage extends SqlObject implements SessionScoped {
         if (url.startsWith("file://")) {
             this.localPath = Paths.get(url.substring(7));
         } else if (url.startsWith("s3://")) {
+            // Mapped only: creating a stage never downloads its bucket; LIST and a file lookup fetch what they read.
             this.localPath = s3Resolver != null
-                ? s3Resolver.toLocalPath(url)
+                ? s3Resolver.mappedPath(url)
                 : Paths.get(S3_SIMULATION_BASE, url.substring(5));
         } else {
             this.localPath = null;
@@ -316,11 +317,10 @@ public class Stage extends SqlObject implements SessionScoped {
         this.directoryAutoRefresh = directoryAutoRefresh;
     }
 
-    // The id a directory refresh names the stage's files under, {@code stages/<id>/<path>}: the stage's own,
-    // the same at every refresh.
+    // The id the stage's files are stored under, {@code stages/<id>/<path>}: the stage's own, kept by a rename.
     private String directoryId;
 
-    /** The id a directory refresh names the stage's files under, or null before one was given. */
+    /** The id the stage's files are stored under, or null before one was given. */
     public String getDirectoryId() {
         return directoryId;
     }
@@ -385,6 +385,9 @@ public class Stage extends SqlObject implements SessionScoped {
         if (localPath == null) {
             throw new UnsupportedOperationException("LIST only supported for file:// and s3:// stages");
         }
+        if (fetchesFromS3()) {
+            s3Resolver.toLocalPath(url.endsWith("/") ? url : url + "/");   // sync the stage's prefix
+        }
 
         if (!Files.exists(localPath)) {
             return new ArrayList<>();
@@ -442,6 +445,9 @@ public class Stage extends SqlObject implements SessionScoped {
         if (localPath == null) {
             return false;
         }
+        if (fetchesFromS3()) {
+            return Files.exists(s3Resolver.toLocalPath(fileUrl(fileName)));
+        }
 
         final Path filePath = localPath.resolve(fileName);
         return Files.exists(filePath);
@@ -454,8 +460,39 @@ public class Stage extends SqlObject implements SessionScoped {
         if (localPath == null) {
             throw new UnsupportedOperationException("getFilePath only supported for file:// and s3:// stages");
         }
+        if (fetchesFromS3()) {
+            return s3Resolver.toLocalPath(fileUrl(fileName));
+        }
 
         return localPath.resolve(fileName);
+    }
+
+    /**
+     * The local path of the stage, or of a path below it, for a statement that reads it (LIST, COPY, GET). With
+     * {@code stage.s3.fetch} on, an {@code s3://} stage's files are downloaded first: the whole prefix for the stage or a
+     * directory below it, the one object for a file. Otherwise it is the stage directory, or the path resolved in it.
+     *
+     * @param subPath the path below the stage, empty for the stage itself
+     * @return the local path
+     */
+    public Path localPathFor(final String subPath) {
+        if (localPath != null && fetchesFromS3()) {
+            if (subPath.isEmpty()) {
+                return s3Resolver.toLocalPath(url.endsWith("/") ? url : url + "/");
+            }
+            return s3Resolver.toLocalPath(fileUrl(subPath));
+        }
+        return subPath.isEmpty() ? localPath : localPath.resolve(subPath);
+    }
+
+    /** Whether this is an {@code s3://} stage whose resolver downloads missing files ({@code stage.s3.fetch}). */
+    private boolean fetchesFromS3() {
+        return url != null && url.startsWith("s3://") && s3Resolver != null && s3Resolver.fetches();
+    }
+
+    /** The {@code s3://} URL of a file in this stage. */
+    private String fileUrl(final String fileName) {
+        return url + (url.endsWith("/") ? "" : "/") + fileName;
     }
 
     /**

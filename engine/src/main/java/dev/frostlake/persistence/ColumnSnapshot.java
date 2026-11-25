@@ -89,6 +89,13 @@ public class ColumnSnapshot implements Serializable {
      */
     public String virtualExpression;
     public String virtualText;
+    /**
+     * What a query reading a virtual column computes, and the type its definition wrote where the column reads at
+     * another (see TableColumn#getVirtualRead and TableColumn#getDefinedType); null for every other column, and on a
+     * snapshot written before they were kept.
+     */
+    public String virtualRead;
+    public DataType virtualDefinedType;
 
     // The position the table gave this column: kept so a restored table reports the same gaps a
     // dropped column left behind. 0 in a snapshot written before positions were recorded.

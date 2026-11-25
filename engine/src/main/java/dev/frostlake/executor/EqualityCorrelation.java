@@ -42,6 +42,8 @@ public final class EqualityCorrelation {
     private final String memberItem;
     private final List<String> residual = new ArrayList<>();
     private final List<String> residualItems = new ArrayList<>();
+    private String aggregateOverArguments;
+    private final List<String> aggregateArguments = new ArrayList<>();
 
     /**
      * @param innerKeys      each equality's side over the subquery's relations, as written
@@ -80,6 +82,46 @@ public final class EqualityCorrelation {
     }
 
     /**
+     * @param overArguments the aggregate item with each aggregate's argument written as the column {@code "$A<n>"}
+     * @param arguments     each argument's expression over the subquery's relations, as written, in column order
+     * @return this correlation with its aggregate item over those columns as well
+     */
+    public EqualityCorrelation withAggregateArguments(final String overArguments, final List<String> arguments) {
+        final EqualityCorrelation copy = withResidual(residual, residualItems);
+        copy.aggregateOverArguments = overArguments;
+        copy.aggregateArguments.addAll(arguments);
+        return copy;
+    }
+
+    /**
+     * @return the aggregate item with each aggregate's argument written as the column {@code "$A<n>"} of
+     *         {@link #residualAggregateRowsQuery}'s rows, or null where the item is not read that way
+     */
+    public String getAggregateOverArguments() {
+        return aggregateOverArguments;
+    }
+
+    /**
+     * @return the query of the inner keys, the residual's columns and the aggregates' arguments of each row the other
+     *         conjuncts keep, the keys first
+     */
+    public String residualAggregateRowsQuery() {
+        final StringBuilder items = new StringBuilder();
+        for (int i = 0; i < residualItems.size(); i++) {
+            items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
+        }
+        for (int i = 0; i < aggregateArguments.size(); i++) {
+            items.append(", ").append(aggregateArguments.get(i)).append(" AS \"$A").append(i).append('"');
+        }
+        return "SELECT " + String.join(", ", innerKeys) + items + " FROM " + from + filter(null);
+    }
+
+    /** @return how many columns the aggregates' arguments take */
+    public int aggregateArgumentCount() {
+        return aggregateArguments.size();
+    }
+
+    /**
      * @return the conjuncts reading the outer row other than the equalities, joined by AND, each part reading the
      *         subquery's relations alone written as the column {@code "$R<n>"} of {@link #residualRowsQuery}'s rows
      *         after the keys; null where the equalities are the subquery's only reading of the outer row
@@ -111,6 +153,19 @@ public final class EqualityCorrelation {
             items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
         }
         return "SELECT " + String.join(", ", innerKeys) + items + " FROM " + from + filter(heldKeys);
+    }
+
+    /**
+     * @return {@link #residualRowsQuery} over every row the other conjuncts keep, the select list's one member
+     *         ({@link #getMemberItem}) after the residual's columns as the column {@code "$MEMBER"}
+     */
+    public String residualMembersQuery() {
+        final StringBuilder items = new StringBuilder();
+        for (int i = 0; i < residualItems.size(); i++) {
+            items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
+        }
+        return "SELECT " + String.join(", ", innerKeys) + items + ", " + memberItem + " AS \"$MEMBER\" FROM " + from
+            + filter(null);
     }
 
     /** @return the select list's one item an IN compares with, or null when the select list is anything else */
@@ -170,6 +225,7 @@ public final class EqualityCorrelation {
         final List<String> texts = new ArrayList<>(otherConjuncts);
         texts.addAll(innerKeys);
         texts.addAll(residualItems);
+        texts.addAll(aggregateArguments);
         return texts;
     }
 

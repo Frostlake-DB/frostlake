@@ -50,8 +50,15 @@ import java.util.Locale;
  * its two's complement across the digits unless an {@code S} or an {@code MI} prints its sign.
  *
  * <p><b>Text minimal.</b> {@code TM9} prints the value's own digits, {@code TME} them in scientific
- * notation ({@code 1.2345E4}), and {@code TM} a FLOAT in whichever is shorter and any other number as
- * {@code TM9} does — never with padding.
+ * notation ({@code 1.2345E4}), and {@code TM} any number but a FLOAT as {@code TM9} does — never with
+ * padding. A FLOAT's digits are its exact binary value rounded half up to 16 significant digits counted
+ * from the power of ten its common logarithm names (15 when the logarithm of a value just below a power
+ * of ten rounds up to it), and to no more than 322 fraction digits; its sign is the sign bit, so a
+ * negative zero prints {@code -0}. Under {@code %} a FLOAT is multiplied by 100 as a FLOAT, and a NaN or an
+ * infinity prints {@code NAN} or {@code INF} in the case of the element's first letter, with no {@code $}.
+ * Under {@code TM9} a FLOAT of 1E39 or more prints as {@code TME} does, and one needing more than 38
+ * fraction digits prints {@code 0}; under {@code TM} it prints positionally when its whole part has at
+ * most 18 digits and its fraction at most 17, else as {@code TME} does.
  *
  * <p><b>Fill mode.</b> {@code FM} removes every space a numeric element printed; a literal keeps its own.
  */
@@ -61,6 +68,21 @@ public final class NumericOutputFormat {
     private static final int VARIABLE_EXPONENT_WIDTH = 5;
 
     private static final BigInteger SIXTEEN = BigInteger.valueOf(16);
+
+    /** The significant digits a FLOAT prints under a text-minimal element. */
+    private static final int FLOAT_SIGNIFICANT_DIGITS = 16;
+
+    /** The most fraction digits a FLOAT prints under a text-minimal element. */
+    private static final int FLOAT_LONGEST_FRACTION = 322;
+
+    /** The least exponent at which {@code TM9} prints a FLOAT in scientific notation. */
+    private static final int TM9_SCIENTIFIC_EXPONENT = 39;
+
+    /** The most fraction digits {@code TM9} prints a FLOAT with; a longer one prints zero. */
+    private static final int TM9_LONGEST_FRACTION = 38;
+
+    /** The largest exponent, and the most fraction digits, {@code TM} prints a FLOAT positionally with. */
+    private static final int TM_POSITIONAL_LIMIT = 17;
 
     private NumericOutputFormat() {
     }
@@ -325,38 +347,102 @@ public final class NumericOutputFormat {
     private static String textMinimal(final Number number, final NumericFormatAlternative model) {
         final List<NumericFormatElement> kinds = model.kinds();
         final List<String> spellings = model.spellings();
-        BigDecimal value = decimalOf(number);
-        if (value == null) {
-            return number.toString();
+        final boolean floating = number instanceof Double || number instanceof Float;
+        final boolean percent = kinds.contains(NumericFormatElement.PERCENT);
+        BigDecimal value;
+        final boolean negative;
+        String nonFinite = null;
+        if (floating) {
+            final double d = percent ? number.doubleValue() * 100 : number.doubleValue();
+            negative = !Double.isNaN(d) && Double.doubleToRawLongBits(d) < 0;
+            if (Double.isNaN(d) || Double.isInfinite(d)) {
+                nonFinite = Double.isNaN(d) ? "NAN" : "INF";
+                value = BigDecimal.ZERO;
+            } else {
+                value = floatDigits(new BigDecimal(d));
+            }
+        } else {
+            value = decimalOf(number);
+            if (value == null) {
+                return number.toString();
+            }
+            if (percent) {
+                value = value.movePointRight(2);
+            }
+            negative = value.signum() < 0;
         }
-        if (kinds.contains(NumericFormatElement.PERCENT)) {
-            value = value.movePointRight(2);
-        }
-        final boolean negative = value.signum() < 0;
         final boolean explicitSign = kinds.contains(NumericFormatElement.SIGN)
             || kinds.contains(NumericFormatElement.MINUS);
+        final String sign = negative && !explicitSign ? "-" : "";
         final BigDecimal magnitude = value.abs();
         final NumericOutputLine line = new NumericOutputLine();
         for (int i = 0; i < kinds.size(); i++) {
             final NumericFormatElement kind = kinds.get(i);
             final String spelling = spellings.get(i);
-            if (kind == NumericFormatElement.TEXT_MINIMAL_POSITIONAL) {
-                line.add((negative && !explicitSign ? "-" : "") + positionalText(magnitude));
+            final boolean textMinimal = kind == NumericFormatElement.TEXT_MINIMAL_POSITIONAL
+                || kind == NumericFormatElement.TEXT_MINIMAL_SCIENTIFIC || kind == NumericFormatElement.TEXT_MINIMAL;
+            if (textMinimal && nonFinite != null) {
+                line.add(sign + (Character.isLowerCase(spelling.charAt(0))
+                    ? nonFinite.toLowerCase(Locale.ROOT)
+                    : nonFinite));
+            } else if (kind == NumericFormatElement.TEXT_MINIMAL_POSITIONAL) {
+                line.add(sign + (floating ? floatPositionalText(magnitude) : positionalText(magnitude)));
             } else if (kind == NumericFormatElement.TEXT_MINIMAL_SCIENTIFIC) {
-                line.add((negative && !explicitSign ? "-" : "") + scientificText(magnitude, spelling.charAt(2)));
+                line.add(sign + scientificText(magnitude, spelling.charAt(2)));
             } else if (kind == NumericFormatElement.TEXT_MINIMAL) {
-                final String positional = positionalText(magnitude);
-                final String scientific = scientificText(magnitude, 'E');
-                final boolean shorter = (number instanceof Double || number instanceof Float)
-                    && scientific.length() < positional.length();
-                line.add((negative && !explicitSign ? "-" : "") + (shorter ? scientific : positional));
+                line.add(sign + (floating ? floatMinimalText(magnitude) : positionalText(magnitude)));
             } else if (kind == NumericFormatElement.MINUS) {
                 line.add(negative ? "-" : "");
-            } else {
+            } else if (kind != NumericFormatElement.DOLLAR || nonFinite == null) {
                 addFixed(line, kind, spelling, negative, false, false);
             }
         }
         return line.text(false);
+    }
+
+    /**
+     * A FLOAT's exact value rounded to the digits a text-minimal element prints: 16 from the power of ten
+     * its common logarithm names, so a value just below a power of ten whose logarithm rounds up to it keeps
+     * 15, and no more than 322 fraction digits.
+     */
+    private static BigDecimal floatDigits(final BigDecimal exact) {
+        if (exact.signum() == 0) {
+            return exact;
+        }
+        final double approximate = exact.abs().doubleValue();
+        final int exponent = Double.isInfinite(approximate)
+            ? exponentOf(exact.abs())
+            : (int) Math.floor(StrictMath.log10(approximate));
+        return exact.setScale(Math.min(FLOAT_SIGNIFICANT_DIGITS - 1 - exponent, FLOAT_LONGEST_FRACTION),
+            RoundingMode.HALF_UP);
+    }
+
+    /** The exponent of a nonzero magnitude's first significant digit. */
+    private static int exponentOf(final BigDecimal magnitude) {
+        return magnitude.precision() - magnitude.scale() - 1;
+    }
+
+    /** A FLOAT under {@code TM9}: positional, scientific from 1E39 on, zero when the fraction is too long. */
+    private static String floatPositionalText(final BigDecimal magnitude) {
+        if (magnitude.signum() == 0) {
+            return "0";
+        }
+        final BigDecimal stripped = magnitude.stripTrailingZeros();
+        if (exponentOf(stripped) >= TM9_SCIENTIFIC_EXPONENT) {
+            return scientificText(stripped, 'E');
+        }
+        return stripped.scale() > TM9_LONGEST_FRACTION ? "0" : positionalText(stripped);
+    }
+
+    /** A FLOAT under {@code TM}: positional while short enough either side of the point, else scientific. */
+    private static String floatMinimalText(final BigDecimal magnitude) {
+        if (magnitude.signum() == 0) {
+            return "0";
+        }
+        final BigDecimal stripped = magnitude.stripTrailingZeros();
+        return exponentOf(stripped) <= TM_POSITIONAL_LIMIT && stripped.scale() <= TM_POSITIONAL_LIMIT
+            ? positionalText(stripped)
+            : scientificText(stripped, 'E');
     }
 
     /** The value's own digits, without trailing fraction zeros. */

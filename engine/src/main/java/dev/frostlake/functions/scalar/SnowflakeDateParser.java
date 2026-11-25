@@ -55,7 +55,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>PM adds twelve to an hour below twelve under HH24 and HH12 alike, AM turns a twelve under
  *       HH12 into zero and leaves HH24 alone, and HH12 without AM/PM is the hour as written;</li>
  *   <li>FF reads any number of fraction digits and keeps the first nine — FF3 is a display width,
- *       not a parse width;</li>
+ *       not a parse width; a point before it may be left out with the fraction ('10:00:00' under
+ *       HH24:MI:SS.FF), where a colon may not;</li>
  *   <li>a day name under DY is read and ignored ('Mon 2020-01-15' is a Wednesday);</li>
  *   <li>TZH / TZHTZM / TZH:TZM read a signed offset or Z; TZD reads a standard-time abbreviation;</li>
  *   <li>a space in the model is optional in the input except at the very end, where it is required;
@@ -99,7 +100,8 @@ public final class SnowflakeDateParser {
 
     /**
      * The input read against the model: a {@link LocalDateTime}, or an {@link java.time.OffsetDateTime}
-     * when the model read an offset or a zone abbreviation.
+     * when the model read an offset or a zone abbreviation - a {@link java.time.ZonedDateTime} at a
+     * {@link WideOffsetZone} for an offset wider than a zone offset holds.
      *
      * @param input the text as given, echoed verbatim in the refusal
      * @param format the Snowflake format model, echoed verbatim in the refusal
@@ -149,12 +151,19 @@ public final class SnowflakeDateParser {
         }
         final FormatPiece piece = pieces.get(index);
         if (!piece.isElement()) {
-            return parseLiteral(piece.literal(), index, pos);
+            if (parseLiteral(piece.literal(), index, pos)) {
+                return true;
+            }
+            // A fraction's point and its digits are left out together: '10:00:00' reads under HH24:MI:SS.FF as
+            // 10:00:00, where the point alone after another separator is still required (live-verified).
+            return ".".equals(piece.literal()) && index + 1 < pieces.size() && pieces.get(index + 1).isElement()
+                && pieces.get(index + 1).element().startsWith("FF") && parseFrom(index + 2, pos);
         }
         final String element = piece.element();
         switch (element) {
-            case "YYYY":
             case "UUUU":
+                return parseSignedYear(index, pos);
+            case "YYYY":
                 return parseNumber(YEAR, elementFollows(index) ? ADJACENT_YEAR_WIDTHS : YEAR_WIDTHS,
                     0, 999_999_999, index, pos);
             case "YY":
@@ -237,6 +246,23 @@ public final class SnowflakeDateParser {
             }
         }
         return false;
+    }
+
+    /**
+     * The UUUU element: the proleptic year, its sign optional ({@code -0044}, {@code +0044}, {@code -44}) and
+     * every digit that follows read as the year, so a UUUU with another number directly after it never
+     * matches ('UUUUMMDD' reads nothing) (live-verified).
+     */
+    private boolean parseSignedYear(final int index, final int pos) {
+        final boolean signed = pos < input.length() && (input.charAt(pos) == '-' || input.charAt(pos) == '+');
+        final int start = signed ? pos + 1 : pos;
+        final int digits = digitRun(start);
+        if (digits == 0 || digits > 9) {
+            return false;
+        }
+        final int magnitude = Integer.parseInt(input.substring(start, start + digits));
+        final int year = signed && input.charAt(pos) == '-' ? -magnitude : magnitude;
+        return tryField(YEAR, year, index, start + digits);
     }
 
     private boolean parseTwoDigitYear(final int index, final int pos) {
@@ -330,7 +356,7 @@ public final class SnowflakeDateParser {
             minutes = Integer.parseInt(input.substring(afterColon, afterColon + 2));
             at = afterColon + 2;
         }
-        if (hours > 18 || minutes > 59) {
+        if (minutes > 59) {
             return false;
         }
         return tryField(OFFSET, sign * (hours * 3600 + minutes * 60), index, at);
@@ -398,7 +424,10 @@ public final class SnowflakeDateParser {
                 LocalTime.of(hour, fields.getOrDefault(MINUTE, 0), fields.getOrDefault(SECOND, 0),
                     fields.getOrDefault(NANO, 0)));
             final Integer offset = fields.get(OFFSET);
-            if (offset != null) {
+            if (offset != null && Math.abs(offset) > ZoneOffset.MAX.getTotalSeconds()) {
+                // Any two-digit hours are an offset (live-verified: TZH:TZM reads +99:59), kept as written.
+                result = WideOffsetZone.at(wall, offset / 60);
+            } else if (offset != null) {
                 result = wall.atOffset(ZoneOffset.ofTotalSeconds(offset));
             } else if (zone != null) {
                 result = wall.atOffset(

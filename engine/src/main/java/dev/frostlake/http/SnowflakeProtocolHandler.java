@@ -560,7 +560,10 @@ final class SnowflakeProtocolHandler implements HttpHandler {
         describe(data, session, queryId, SnowflakeStatementTypes.SELECT, written);
         data.put("resultIds", String.join(",", ids));
         data.put("resultTypes", String.join(",", kinds));
-        return success(data);
+        // Kept under the request's own ID too, which the driver reads its statements' ids from (getChildQueryIds).
+        final ObjectNode request = success(data);
+        keptResults.put(queryId, request);
+        return request;
     }
 
     /**

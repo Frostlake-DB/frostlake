@@ -29,6 +29,7 @@ import dev.frostlake.executor.expressions.FunctionCallExpression;
 import dev.frostlake.executor.expressions.LiteralExpression;
 import dev.frostlake.executor.expressions.LiteralType;
 import dev.frostlake.executor.expressions.RowExpression;
+import dev.frostlake.executor.expressions.ShapedExpressionParser;
 import dev.frostlake.executor.expressions.SortKeyRole;
 import dev.frostlake.executor.expressions.SubqueryExpression;
 import dev.frostlake.executor.expressions.SubqueryMemo;
@@ -319,6 +320,17 @@ public class ExpressionEvaluator {
     }
 
     /**
+     * Whether this evaluator's relations prove over their statistics that a filter keeps no row: the condition is
+     * FALSE or NULL on every row.
+     *
+     * @param predicate the parsed condition
+     * @return whether no row satisfies it
+     */
+    public boolean filtersEveryRow(final Expression predicate) {
+        return preparedVisitor().filtersEveryRow(predicate);
+    }
+
+    /**
      * Plan-time strict-argument validation over a parsed expression: runs the Snowflake
      * argument-type checks for every function call in {@code expression} WITHOUT evaluating it,
      * so rejection fires even over zero input rows.
@@ -526,6 +538,15 @@ public class ExpressionEvaluator {
      */
     public ExpressionEvaluatorVisitor scopeVisitor() {
         return preparedVisitor();
+    }
+
+    /**
+     * Notes a condition this evaluator evaluates as a predicate (see {@link ExpressionEvaluatorVisitor#markPredicate}).
+     *
+     * @param condition the condition, as it is evaluated
+     */
+    public void markPredicate(final Expression condition) {
+        preparedVisitor().markPredicate(condition);
     }
 
     /** The reusable visitor with this evaluator's context applied — shared by every phase. */
@@ -866,6 +887,21 @@ public class ExpressionEvaluator {
     }
 
     /**
+     * Whether a select item is a constant the plan folds, or a column carrying one out of a derived relation — see
+     * TableColumn#isFoldedText. Never throws.
+     *
+     * @param expression a select item
+     * @return true for such an item
+     */
+    public boolean projectsFoldedText(final Expression expression) {
+        try {
+            return preparedVisitor().projectsFoldedText(expression);
+        } catch (final RuntimeException undetermined) {
+            return false;
+        }
+    }
+
+    /**
      * Whether a select item projects a double live's compiler folds, or a column carrying one out of a derived
      * relation — see TableColumn#isFoldedDouble. Never throws.
      *
@@ -1148,6 +1184,17 @@ public class ExpressionEvaluator {
     }
 
     /**
+     * {@link #plannedText} for a window call's argument or key: a predicate is cast to the BOOLEAN it yields - see
+     * {@link ExpressionEvaluatorVisitor#strictPlanValueText}.
+     *
+     * @param expression the argument or key
+     * @return its plan text
+     */
+    public String plannedValueText(final Expression expression) {
+        return preparedVisitor().strictPlanValueText(expression);
+    }
+
+    /**
      * {@link #plannedText} with what the plan folds early printed as its value - see
      * {@link ExpressionEvaluatorVisitor#strictFoldedPlanText}.
      *
@@ -1218,6 +1265,29 @@ public class ExpressionEvaluator {
      * a session setting) would hand the first occurrence's value to every later one: a wrong answer,
      * which is worse than the missing one it replaced.
      */
+    /**
+     * {@link #parse(String)} for a text that differs from others of its kind only in its literals, as a SQL
+     * function's body with its arguments written out does: the grammar is read once for each shape (see
+     * {@link ShapedExpressionParser}), and the expression is the one {@link #parse(String)} builds.
+     *
+     * @param expression the expression text
+     * @return its expression
+     */
+    public static Expression parseShaped(final String expression) {
+        if (expression == null || expression.trim().isEmpty()) {
+            return parse(expression);
+        }
+        final String trimmed = expression.trim();
+        final Expression cached = AST_CACHE.get(trimmed);
+        if (cached != null) {
+            return cached;
+        }
+        final Expression ast = ShapedExpressionParser.parse(trimmed);
+        CallOrdinalWalk.number(ast);
+        AST_CACHE.put(trimmed, ast);
+        return ast;
+    }
+
     private static Expression parseToAst(final String expression) {
         final Expression cached = AST_CACHE.get(expression);
         if (cached != null) {

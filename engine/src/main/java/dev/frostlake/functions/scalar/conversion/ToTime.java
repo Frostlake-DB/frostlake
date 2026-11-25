@@ -19,6 +19,7 @@ package dev.frostlake.functions.scalar.conversion;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.functions.scalar.SnowflakeDateParser;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 import dev.frostlake.types.DateTimeType;
 import dev.frostlake.values.VariantValue;
 
@@ -71,7 +72,7 @@ public class ToTime extends BuiltInFunction {
         if (v instanceof LocalTime) return v;
         if (v instanceof LocalDateTime) return ((LocalDateTime) v).toLocalTime();
         // A zoned timestamp's time is its own wall clock's, TIMESTAMP_TZ and TIMESTAMP_LTZ alike (live-verified).
-        if (v instanceof ZonedDateTime) return ((ZonedDateTime) v).toLocalTime();
+        if (v instanceof ZonedDateTime) return WideOffsetZone.wallClock((ZonedDateTime) v).toLocalTime();
         if (v instanceof OffsetDateTime) return ((OffsetDateTime) v).toLocalTime();
         // A written 'AUTO' reads by the session's input format first, then by AUTO.
         return args.size() > 1 ? SharedFunctionHelpers.toLocalTimeAuto(v.toString())

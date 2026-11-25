@@ -99,6 +99,8 @@ final class HavingAggregateSubqueries {
     private final Map<String, Table> outerRelations;
     private final Map<String, Table> innerRelations = new LinkedHashMap<>();
     private boolean innerKnown = true;
+    /** The outer relation's columns as their definitions over a derived relation's source, or null. */
+    private DerivedColumnDefinitions definitions;
 
     private HavingAggregateSubqueries(final QueryExecutor executor, final Map<String, Table> outerRelations,
                                    final FrostlakeParser.SelectClauseContext subquery) {
@@ -191,6 +193,21 @@ final class HavingAggregateSubqueries {
     static String refusal(final QueryExecutor executor, final Map<String, Table> outerRelations,
                           final FrostlakeParser.FunctionCallExprContext aggregate,
                           final FrostlakeParser.ScalarSubqueryExprContext subquery) {
+        return refusal(executor, outerRelations, aggregate, subquery, null);
+    }
+
+    /**
+     * {@link #refusal(QueryExecutor, Map, FrostlakeParser.FunctionCallExprContext,
+     * FrostlakeParser.ScalarSubqueryExprContext)} over a derived relation merged into the grouped query, its columns
+     * printed as their definitions (see {@link DerivedColumnDefinitions}); a column with no printed definition leaves
+     * the nesting unprinted.
+     *
+     * @param definitions the derived relation's definitions, or null for none
+     */
+    static String refusal(final QueryExecutor executor, final Map<String, Table> outerRelations,
+                          final FrostlakeParser.FunctionCallExprContext aggregate,
+                          final FrostlakeParser.ScalarSubqueryExprContext subquery,
+                          final DerivedColumnDefinitions definitions) {
         final FrostlakeParser.SelectStatementContext query = subquery.selectStatement();
         if (query.selectOperand().size() != 1 || query.selectOperand(0).selectClause() == null) {
             return null;
@@ -201,6 +218,7 @@ final class HavingAggregateSubqueries {
             return null;
         }
         final HavingAggregateSubqueries nesting = new HavingAggregateSubqueries(executor, outerRelations, select);
+        nesting.definitions = definitions;
         final FrostlakeParser.BooleanExprContext item =
             ((FrostlakeParser.ExprItemContext) select.selectList().selectItem(0)).booleanExpr();
         final ParserRuleContext own = nesting.ownAggregate(item);
@@ -208,8 +226,118 @@ final class HavingAggregateSubqueries {
             final String outerOnly = nesting.outerOnly(aggregate, subquery, item, select);
             return outerOnly == null ? null : SqlCompilationError.withoutPosition(outerOnly);
         }
+        if (unfiltered(select) && nesting.readsOuterBesideAggregates(item)) {
+            // Read whole, the subquery's aggregate is one value and the outer row's column beside it the row's own:
+            // MAX((SELECT COUNT(*) + t.id FROM g)) is answered row by row (live-verified).
+            return null;
+        }
         final String printed = nesting.printed(aggregate, subquery, item, own);
         return printed == null ? "" : SqlCompilationError.withoutPosition(printed);
+    }
+
+    /**
+     * Whether a subquery reads the outer row, and whether its one item then takes an aggregate over the outer row
+     * alone, with no aggregate of its own.
+     *
+     * @param executor       the executor
+     * @param outerRelations the grouped query's relations, by the names they go by
+     * @param subquery       the subquery
+     * @param outerAggregate true to ask whether the item's aggregate reads the outer row alone, false to ask whether
+     *                       the subquery reads the outer row at all
+     * @return the answer; false for a subquery of another shape
+     */
+    static boolean readsOuterRow(final QueryExecutor executor, final Map<String, Table> outerRelations,
+                                 final FrostlakeParser.ScalarSubqueryExprContext subquery,
+                                 final boolean outerAggregate) {
+        final FrostlakeParser.SelectStatementContext query = subquery.selectStatement();
+        if (query.selectOperand().size() != 1 || query.selectOperand(0).selectClause() == null) {
+            return false;
+        }
+        final FrostlakeParser.SelectClauseContext select = query.selectOperand(0).selectClause();
+        final HavingAggregateSubqueries nesting = new HavingAggregateSubqueries(executor, outerRelations, select);
+        if (!outerAggregate) {
+            return nesting.readsOuterColumn(select);
+        }
+        if (select.selectList().selectItem().size() != 1
+                || !(select.selectList().selectItem(0) instanceof FrostlakeParser.ExprItemContext)) {
+            return false;
+        }
+        final FrostlakeParser.BooleanExprContext item =
+            ((FrostlakeParser.ExprItemContext) select.selectList().selectItem(0)).booleanExpr();
+        return nesting.ownAggregate(item) == null && nesting.readsOuterColumn(item)
+            && !nesting.readsOuterBesideAggregates(item);
+    }
+
+    /**
+     * Whether a HAVING's MAX, MIN, SUM or COUNT over a subquery reading one relation whole takes a COUNT of an outer
+     * catalog table's column - alone or beside a literal - that the table's statistics settle holds no NULL: declared
+     * NOT NULL, or holding none. The COUNT then counts the subquery's rows, and the HAVING's aggregate takes that count
+     * for each of the group's rows (live-verified for MAX and MIN; the account answers a SUM or a COUNT with a value
+     * that ignores the group's rows, which is not followed).
+     *
+     * @param executor       the executor
+     * @param outerRelations the grouped query's relations, by the names they go by
+     * @param aggregate      the HAVING's aggregate call
+     * @param subquery       the subquery
+     * @return true where the count is settled
+     */
+    static boolean settledCount(final QueryExecutor executor, final Map<String, Table> outerRelations,
+                                final FrostlakeParser.FunctionCallExprContext aggregate,
+                                final FrostlakeParser.ScalarSubqueryExprContext subquery) {
+        final String outerName = aggregate.functionName().getText().toUpperCase(Locale.ROOT);
+        if (!PER_GROUP_AGGREGATES.contains(outerName) || "ANY_VALUE".equals(outerName)
+                || !wholeArgument(executor, aggregate, subquery)) {
+            return false;
+        }
+        final FrostlakeParser.SelectStatementContext query = subquery.selectStatement();
+        if (query.selectOperand().size() != 1 || query.selectOperand(0).selectClause() == null
+                || query.limitClause() != null || query.fetchClause() != null || query.withClause() != null) {
+            return false;
+        }
+        final FrostlakeParser.SelectClauseContext select = query.selectOperand(0).selectClause();
+        if (!unfiltered(select) || select.selectList().selectItem().size() != 1
+                || !(select.selectList().selectItem(0) instanceof FrostlakeParser.ExprItemContext)) {
+            return false;
+        }
+        ParseTree value = valueOf(((FrostlakeParser.ExprItemContext) select.selectList().selectItem(0)).booleanExpr());
+        if (value instanceof FrostlakeParser.AdditiveExprContext
+                && isLiteral(valueOf(((FrostlakeParser.AdditiveExprContext) value).expression(1)))) {
+            value = valueOf(((FrostlakeParser.AdditiveExprContext) value).expression(0));
+        }
+        if (!(value instanceof FrostlakeParser.FunctionCallExprContext)) {
+            return false;
+        }
+        final FrostlakeParser.FunctionCallExprContext call = (FrostlakeParser.FunctionCallExprContext) value;
+        if (!"COUNT".equalsIgnoreCase(call.functionName().getText()) || call.overClause() != null
+                || call.DISTINCT() != null || call.functionArgList() == null
+                || call.functionArgList().functionArg().size() != 1
+                || call.functionArgList().functionArg(0).booleanExpr() == null
+                || !(valueOf(call.functionArgList().functionArg(0).booleanExpr())
+                    instanceof FrostlakeParser.QualifiedNameExprContext)) {
+            return false;
+        }
+        final FrostlakeParser.QualifiedNameExprContext counted = (FrostlakeParser.QualifiedNameExprContext)
+            valueOf(call.functionArgList().functionArg(0).booleanExpr());
+        final HavingAggregateSubqueries subqueries = new HavingAggregateSubqueries(executor, outerRelations, select);
+        if (!subqueries.innerKnown || subqueries.innerColumn(counted) != null) {
+            return false;
+        }
+        final String[] parts = ParseTreeText.qualifiedNameParts(counted.qualifiedName());
+        if (parts.length > 2) {
+            return false;
+        }
+        for (final Map.Entry<String, Table> relation : outerRelations.entrySet()) {
+            final TableColumn column = parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0])
+                ? relation.getValue().findColumn(parts[parts.length - 1]) : null;
+            if (column != null) {
+                if (!relation.getValue().isCatalogResident()) {
+                    return false;
+                }
+                return !column.isNullable() || Boolean.FALSE.equals(
+                    new StoredColumnValues(executor).holdsNull(relation.getValue(), column.getName()));
+            }
+        }
+        return false;
     }
 
     /**
@@ -559,9 +687,41 @@ final class HavingAggregateSubqueries {
         final String[] parts = ParseTreeText.qualifiedNameParts(inner.qualifiedName());
         final String column = parts[parts.length - 1];
         for (final Map.Entry<String, Table> relation : innerRelations.entrySet()) {
-            final TableColumn held = relation.getValue().getColumn(column);
+            final TableColumn held = relation.getValue().findColumn(column);
             if ((parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0])) && held != null) {
                 return !constancy.holdsOneValue(relation.getKey(), held.getName());
+            }
+        }
+        return false;
+    }
+
+    /** Whether a query reads its one relation whole: no WHERE, join, grouping, TOP or hierarchy. */
+    private static boolean unfiltered(final FrostlakeParser.SelectClauseContext select) {
+        return select.tableExpression() != null && ParseTreeText.getWhereClause(select) == null
+            && select.tableExpression().tableReference().size() == 1
+            && select.tableExpression().joinClause().isEmpty()
+            && select.tableExpression().tableReference(0).tableSource() != null
+            && select.tableExpression().tableReference(0).tableSource().tableQualifiedName() != null
+            && select.groupByClause() == null && select.havingClause() == null && select.qualifyClause() == null
+            && select.topClause() == null && select.connectByClause() == null;
+    }
+
+    /** Whether a tree reads a column of the outer row outside every aggregate call it holds. */
+    private boolean readsOuterBesideAggregates(final ParseTree node) {
+        if (node instanceof FrostlakeParser.SelectStatementContext
+                || node instanceof FrostlakeParser.FunctionCallStarExprContext
+                || node instanceof FrostlakeParser.FunctionCallExprContext
+                    && ((FrostlakeParser.FunctionCallExprContext) node).overClause() == null
+                    && executor.getFunctionRegistry().getAggregateFunction(
+                        ((FrostlakeParser.FunctionCallExprContext) node).functionName().getText()) != null) {
+            return false;
+        }
+        if (node instanceof FrostlakeParser.QualifiedNameExprContext) {
+            return readsOuterColumn(node);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (readsOuterBesideAggregates(node.getChild(i))) {
+                return true;
             }
         }
         return false;
@@ -839,7 +999,7 @@ final class HavingAggregateSubqueries {
         final String decorrelated;
         if ("SUM".equals(name) || "AVG".equals(name)) {
             final PrintedPlanValue summed = wrapped(planned);
-            if (summed == null || "AVG".equals(name) && !(planned.getType() instanceof NumericType
+            if (summed == null || computedByArithmetic(argument) || "AVG".equals(name) && !(planned.getType() instanceof NumericType
                     && !NumericType.isApproximate(planned.getType())
                     && ((NumericType) planned.getType()).getScale() == 0)) {
                 return null;
@@ -849,8 +1009,10 @@ final class HavingAggregateSubqueries {
             decorrelated = "AVG".equals(name) ? "SCALED_ROUND_INT_DIVIDE(CAST(" + inner + " AS " + WHOLE_SUM
                 + "), CAST(COUNT(" + planned.getText() + ") AS " + COUNT_TYPE + "))" : inner;
         } else {
-            inner = name + "(" + planned.getText() + ")";
-            decorrelated = inner;
+            final String[] extreme = ("MAX".equals(name) || "MIN".equals(name)) ? extremeTerms(argument) : null;
+            inner = name + "(" + (extreme != null ? extreme[0] : planned.getText()) + ")";
+            // A MAX or a MIN of a list's column plus a number takes the number out of itself.
+            decorrelated = extreme != null ? extreme[1] + "(" + inner + ")" + extreme[2] : inner;
         }
         String correlated = outerSummed(outerName, name, beside, planned, decorrelated);
         if (!beside.isEmpty() && listedDecimal(argument, planned)) {
@@ -859,6 +1021,24 @@ final class HavingAggregateSubqueries {
         }
         return "Aggregate functions cannot be nested: [" + inner + "] nested in [" + outerName + "(CORRELATION("
             + correlated + ")" + beside + ")]";
+    }
+
+    /** Whether a value is a derived relation's column defined by arithmetic (see DerivedColumnDefinitions). */
+    private boolean computedByArithmetic(final ParseTree argument) {
+        if (definitions == null || !(argument instanceof FrostlakeParser.QualifiedNameExprContext)) {
+            return false;
+        }
+        final String outer = outerColumn((FrostlakeParser.QualifiedNameExprContext) argument);
+        return outer != null && definitions.computedByArithmetic(outer);
+    }
+
+    /** The terms a MAX or a MIN of a derived relation's column takes out of itself, or null (see DerivedColumnDefinitions). */
+    private String[] extremeTerms(final ParseTree argument) {
+        if (definitions == null || !(argument instanceof FrostlakeParser.QualifiedNameExprContext)) {
+            return null;
+        }
+        final String outer = outerColumn((FrostlakeParser.QualifiedNameExprContext) argument);
+        return outer == null ? null : definitions.extremeTerms(outer);
     }
 
     /** Whether a value is a column of an outer VALUES list holding decimals. */
@@ -872,7 +1052,7 @@ final class HavingAggregateSubqueries {
             .qualifiedName());
         for (final Map.Entry<String, Table> relation : outerRelations.entrySet()) {
             if ((parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0]))
-                    && relation.getValue().getColumn(parts[parts.length - 1]) != null) {
+                    && relation.getValue().findColumn(parts[parts.length - 1]) != null) {
                 return !relation.getValue().isCatalogResident();
             }
         }
@@ -883,12 +1063,13 @@ final class HavingAggregateSubqueries {
      * The correlated value an outer SUM adds: cast to the type its own aggregate answers - a MAX's or a MIN's its
      * argument's, a SUM's twelve digits wider at the same scale - NUMBER(38,0) included (live-verified: SUM((SELECT
      * MAX(t.id) FROM g …)) over an INT column is SUM(CORRELATION(CAST(MAX(T.ID) AS NUMBER(38,0))))). Beside a literal,
-     * under another outer aggregate, or for an AVG or a COUNT, it is as it stands.
+     * under another outer aggregate, for an AVG or a COUNT, or over a bare conversion (a derived relation's
+     * {@code TO_NUMBER(GET(F.VALUE, 'id'))}), it is as it stands.
      */
     private static String outerSummed(final String outerName, final String innerName, final String beside,
                                       final PrintedPlanValue planned, final String decorrelated) {
         if (!"SUM".equals(outerName) || !beside.isEmpty() || !(planned.getType() instanceof NumericType)
-                || NumericType.isApproximate(planned.getType())) {
+                || NumericType.isApproximate(planned.getType()) || planned.isConversion()) {
             return decorrelated;
         }
         final NumericType type = (NumericType) planned.getType();
@@ -933,6 +1114,10 @@ final class HavingAggregateSubqueries {
             final String outer = outerColumn(name);
             if (outer == null) {
                 return null;
+            }
+            if (definitions != null) {
+                // A derived relation's column is its definition; where it is read correlated it is not printed.
+                return correlate ? null : definitions.definition(outer);
             }
             return new PrintedPlanValue(correlate ? "CORRELATION(" + outer + ")" : outer, outerColumnType(name), true,
                 false, false, false, correlate ? outer : null);
@@ -1580,7 +1765,7 @@ final class HavingAggregateSubqueries {
         final String column = parts[parts.length - 1];
         for (final Map.Entry<String, Table> relation : relations.entrySet()) {
             final boolean named = parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0]);
-            if (named && relation.getValue().getColumn(column) != null) {
+            if (named && relation.getValue().findColumn(column) != null) {
                 return relation.getKey().toUpperCase(Locale.ROOT) + "." + column.toUpperCase(Locale.ROOT);
             }
         }
@@ -1597,14 +1782,14 @@ final class HavingAggregateSubqueries {
         final FrostlakeParser.QualifiedNameExprContext name = (FrostlakeParser.QualifiedNameExprContext) node;
         final Table owner = owner(name, innerRelations);
         final TableColumn held = owner == null || owner.residentSource() == null ? null
-            : owner.getColumn(lastPart(name));
+            : owner.findColumn(lastPart(name));
         return held == null ? null : executor.columnValueRange(owner.residentSource(), held.getName());
     }
 
     /** The BOOLEAN a column's statistics settle its numbers to (see QueryExecutor#columnSettledBoolean), or null. */
     private Boolean settledBoolean(final FrostlakeParser.QualifiedNameExprContext name) {
         final Table owner = owner(name, innerColumn(name) != null ? innerRelations : outerRelations);
-        final TableColumn held = owner == null ? null : owner.getColumn(lastPart(name));
+        final TableColumn held = owner == null ? null : owner.findColumn(lastPart(name));
         return held == null ? null : executor.columnSettledBoolean(owner, held.getName());
     }
 
@@ -1617,7 +1802,7 @@ final class HavingAggregateSubqueries {
         }
         for (final Map.Entry<String, Table> relation : relations.entrySet()) {
             if ((parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0]))
-                    && relation.getValue().getColumn(parts[parts.length - 1]) != null) {
+                    && relation.getValue().findColumn(parts[parts.length - 1]) != null) {
                 return relation.getValue();
             }
         }
@@ -1645,7 +1830,7 @@ final class HavingAggregateSubqueries {
         final String column = parts[parts.length - 1];
         for (final Map.Entry<String, Table> relation : relations.entrySet()) {
             if (parts.length == 1 || relation.getKey().equalsIgnoreCase(parts[0])) {
-                final TableColumn held = relation.getValue().getColumn(column);
+                final TableColumn held = relation.getValue().findColumn(column);
                 if (held != null) {
                     return held.getDataType();
                 }

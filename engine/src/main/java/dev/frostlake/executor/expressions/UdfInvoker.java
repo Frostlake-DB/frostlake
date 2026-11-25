@@ -18,6 +18,7 @@ package dev.frostlake.executor.expressions;
 
 import dev.frostlake.config.S3PathResolver;
 import dev.frostlake.executor.AmbiguousOverload;
+import dev.frostlake.executor.BlockReturnText;
 import dev.frostlake.executor.DeferredFault;
 import dev.frostlake.executor.ExpressionEvaluator;
 import dev.frostlake.executor.NamedArguments;
@@ -54,6 +55,7 @@ import dev.frostlake.executor.udf.StatementHandlerStates;
 import dev.frostlake.executor.udf.UdfRuntimes;
 import dev.frostlake.functions.FunctionRegistry;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
+import dev.frostlake.functions.scalar.math.Div;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.NullHandling;
@@ -111,6 +113,12 @@ final class UdfInvoker {
      * so an overload reached that way is chosen last.
      */
     private static final int UNNAMED_CONVERSION = 64;
+
+    /**
+     * What a conversion the account refuses outright weighs: more than any overload that takes the call can, so an
+     * overload asking for one runs only where every overload does, and that call is then refused.
+     */
+    private static final long REFUSED_CONVERSION = 1L << 32;
 
     private static final JavaFunctionCompiler javaCompiler = new JavaFunctionCompiler();
 
@@ -363,8 +371,9 @@ final class UdfInvoker {
             }
         }
         if (accepting.isEmpty()) {
-            // No overload accepts the arguments: the first one's conversion says why.
-            return candidatesByCount.get(0);
+            // No overload accepts the arguments: the one their families reach first is refused, its conversion
+            // saying why.
+            return firstBySignature(lightest(candidatesByCount, null, argumentFamilies, argValues));
         }
         return firstBySignature(lightest(accepting, null, argumentFamilies, argValues));
     }
@@ -417,7 +426,8 @@ final class UdfInvoker {
             }
         }
         if (accepting.isEmpty()) {
-            return fitting.get(0);
+            // No overload accepts the arguments: the one their families reach first is refused.
+            return lightest(fitting, targets, argumentFamilies, argValues).get(0);
         }
         final List<Function> lightest = lightest(accepting, acceptingTargets, argumentFamilies, argValues);
         if (lightest.size() > 1) {
@@ -452,6 +462,11 @@ final class UdfInvoker {
                     continue;
                 }
                 final DataType type = params.get(target).getDataType();
+                if (families != null ? UdfOverloadPreference.refusesFamily(families.get(i), type)
+                        : UdfOverloadPreference.refuses(values.get(i), type)) {
+                    total += REFUSED_CONVERSION;
+                    continue;
+                }
                 final int weight = families != null ? UdfOverloadPreference.rankFamily(families.get(i), type)
                     : UdfOverloadPreference.rank(values.get(i), type);
                 total += weight == Integer.MAX_VALUE ? UNNAMED_CONVERSION : weight;
@@ -863,7 +878,10 @@ final class UdfInvoker {
             // Snowflake casts the RETURNed value to the DECLARED return type: `RETURNS INT` over
             // `RETURN '7'` is 7, `RETURNS VARCHAR` over `RETURN 42` is the string '42', and
             // `RETURNS INT` over `RETURN 'abc'` fails "Numeric value 'abc' is not recognized".
-            return queryExecutor.getProceduralExecutor().coerceToType(returned, function.getReturnType());
+            // A RETURN the block did not already convert (a call, arithmetic, an array or object constant, one inside
+            // an IF) is written as text and read as the declared type (see BlockReturnText).
+            return queryExecutor.getProceduralExecutor().coerceToType(
+                BlockReturnText.read(returned, function.getReturnType(), functionRegistry), function.getReturnType());
         }
         if (queryExecutor != null) {
             // A body that OPENS a block but does not parse as one is not an expression either, and its
@@ -904,7 +922,7 @@ final class UdfInvoker {
                 new ExpressionEvaluator(paramTable, functionRegistry,
                     queryExecutor.getCatalog(), queryExecutor);
             try {
-                return eval.evaluate(exprBody, paramRow);
+                return eval.evaluate(ExpressionEvaluator.parseShaped(exprBody), paramRow);
             } catch (final Exception e) {
                 rethrowDeferredConversion(args, e);
                 throw inBody(e);
@@ -921,7 +939,7 @@ final class UdfInvoker {
                 new ExpressionEvaluator(emptyTable, functionRegistry,
                     queryExecutor.getCatalog(), queryExecutor);
             try {
-                return eval.evaluate(exprBody, emptyRow);
+                return eval.evaluate(ExpressionEvaluator.parseShaped(exprBody), emptyRow);
             } catch (final Exception e) {
                 throw inBody(e);
             }
@@ -931,11 +949,13 @@ final class UdfInvoker {
 
     /**
      * A failure of a function's expression body. A name the body cannot resolve is the statement's own
-     * compilation error, as the account reports it; anything else says where it came from.
+     * compilation error, as the account reports it, and so is a DIV the body calls (live-verified); anything else
+     * says where it came from.
      */
     private RuntimeException inBody(final Exception failure) {
         if (failure instanceof RuntimeException && (SqlCompilationError.isCompilationError(failure.getMessage())
-                || ReadOnlyRequest.isRefusal(failure.getMessage()))) {
+                || ReadOnlyRequest.isRefusal(failure.getMessage())
+                || Div.UNSUPPORTED.equals(failure.getMessage()))) {
             return (RuntimeException) failure;
         }
         if (cycleIn(failure) != null) {

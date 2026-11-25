@@ -18,6 +18,7 @@ package dev.frostlake.functions.window;
 
 import dev.frostlake.functions.aggregate.AggregateNumerics;
 import dev.frostlake.functions.aggregate.ExactMoments;
+import dev.frostlake.functions.aggregate.PinnedArgument;
 import dev.frostlake.functions.aggregate.SpreadAccumulator;
 
 import java.util.Map;
@@ -41,11 +42,14 @@ public final class ExactFrameMoments {
      * @param lows      each row's first frame position
      * @param highs     each row's last frame position, below its first for an empty frame
      * @param statistic the statistic
+     * @param pinned    whether the argument is a constant to the planner, whose square it folds (see
+     *                  {@link ExactMoments#setFoldedSquares})
      */
     public ExactFrameMoments(final Object[] values, final int[] lows, final int[] highs,
-                             final MomentStatistic statistic) {
+                             final MomentStatistic statistic, final PinnedArgument pinned) {
         answers = new Object[values.length];
         final ExactMoments moments = new ExactMoments();
+        moments.setFoldedSquares(pinned);
         final TreeMap<Integer, Integer> scales = new TreeMap<Integer, Integer>();
         int low = 0;
         int high = -1;

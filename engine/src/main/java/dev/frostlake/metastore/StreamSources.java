@@ -25,6 +25,7 @@ import dev.frostlake.metastore.model.View;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The table a table stream reads, bound to the table itself rather than to its name.
@@ -41,7 +42,9 @@ import java.util.List;
  *
  * <p>A stream on a view is bound the same way to every table its view's query reads, each name read where the VIEW
  * lives, as the query itself reads it. Dropping or recreating any of them "makes any stream on the view stale"
- * (Snowflake's documentation), and a same-named table elsewhere feeds it nothing.
+ * (Snowflake's documentation), and a same-named table elsewhere feeds it nothing. Where the view's names come to read
+ * other tables while the bound ones are still there (a rename, a swap, an UNDROP), the stream's next read re-binds it
+ * to the tables the names read (see {@link #tablesReadAway}).
  */
 public final class StreamSources {
 
@@ -153,6 +156,8 @@ public final class StreamSources {
 
     /**
      * Whether a change to {@code changed} feeds this view stream: whether it is one of the very tables the view reads.
+     * A stream another of whose tables is gone still captures the changes of the ones that are there, which it reads
+     * once UNDROP brings the gone one back (live-verified).
      *
      * @param catalog the catalog
      * @param stream  the stream
@@ -160,7 +165,9 @@ public final class StreamSources {
      * @return whether the stream captures the change
      */
     public static boolean capturesThroughView(final Catalog catalog, final Stream stream, final Table changed) {
-        final List<Table> bound = baseTablesOf(catalog, stream);
+        final List<Table> named = baseTablesOf(catalog, stream);
+        final List<Table> bound = named != null || stream.getSourceType() != StreamSourceType.VIEW ? named
+            : stream.getBaseTables();
         if (bound == null || changed == null) {
             return false;
         }
@@ -236,6 +243,68 @@ public final class StreamSources {
     }
 
     /**
+     * The tables a view stream's view's names read now where they are not the tables the stream is bound to, while
+     * those are all there: a table renamed away with another taking its name, two tables swapped, or a table UNDROP
+     * brought back under the name of one that replaced it. The stream reads its view by name, so its next read or
+     * SYSTEM$STREAM_HAS_DATA re-binds it to the tables the names read (live-verified; see {@link #follow}). A
+     * temporary table that hides a bound table from the session is no such table: the stream stays bound to the
+     * hidden one.
+     *
+     * @param catalog the catalog
+     * @param stream  the stream
+     * @return the tables, in the order the view's query names them; null when the stream reads no view, when a table
+     *         it is bound to is gone, when a name reads no table, or when each name reads the table it is bound to
+     */
+    public static List<Table> tablesReadAway(final Catalog catalog, final Stream stream) {
+        final List<Table> bound = baseTablesOf(catalog, stream);
+        if (bound == null) {
+            return null;
+        }
+        final Schema viewHome = viewHomeOf(catalog, homeOf(catalog, stream), stream);
+        final List<String> names = stream.getBaseTableNames();
+        final List<Table> now = viewBases(catalog, viewHome, names);
+        if (now == null || now.size() != bound.size()) {
+            return null;
+        }
+        boolean away = false;
+        for (int i = 0; i < now.size(); i++) {
+            if (now.get(i) == bound.get(i) || hidingOf(catalog, viewHome, names.get(i), bound.get(i)) != null) {
+                now.set(i, bound.get(i));
+            } else {
+                away = true;
+            }
+        }
+        return away ? now : null;
+    }
+
+    /**
+     * Re-binds a view stream to the tables its view's names read now in place of the tables it is bound to (see
+     * {@link #tablesReadAway}): it reads those from then on, its offset where it was, and the changes it held of the
+     * tables it was bound to are out of its reach. A table that tracked no changes takes change tracking on with the
+     * re-bind, so the range the stream reads holds a time it tracked nothing (see {@link #trackingGapOf}).
+     *
+     * @param catalog the catalog
+     * @param stream  the stream
+     * @param now     the tables the view's names read, as {@link #tablesReadAway} gave them
+     * @return the full name of the first table whose change tracking the re-bind turned on, which the read that
+     *         re-bound the stream is refused over; null where every table tracked its changes already
+     */
+    public static String follow(final Catalog catalog, final Stream stream, final List<Table> now) {
+        final Schema viewHome = viewHomeOf(catalog, homeOf(catalog, stream), stream);
+        String untracked = null;
+        for (int i = 0; i < now.size(); i++) {
+            if (!now.get(i).isChangeTracking()) {
+                now.get(i).setChangeTracking(true);
+                if (untracked == null) {
+                    untracked = completed(viewHome, stream.getBaseTableNames().get(i));
+                }
+            }
+        }
+        stream.restartOn(now);
+        return untracked;
+    }
+
+    /**
      * The full names of the tables a re-bind that kept a view stream's changes lists it as reading, each under the name
      * it has now; null when there was no such re-bind, or when one of them is gone.
      *
@@ -284,6 +353,90 @@ public final class StreamSources {
             places.add(place);
         }
         return places;
+    }
+
+    /**
+     * The tables a stream is bound to, each by its table ID, as a snapshot saves them: the table a table stream reads,
+     * or the tables a view stream reads in the order its view's query names them; null when the stream is bound to
+     * none yet. A table dropped since is among them, so a restore binds the stream to the version UNDROP brings back,
+     * as the stream was bound before.
+     *
+     * @param stream the stream
+     * @return the IDs, or null
+     */
+    public static List<Long> boundTableIds(final Stream stream) {
+        final List<Table> bound = new ArrayList<>();
+        if (stream.getSourceType() == StreamSourceType.TABLE && stream.getSourceTable() != null) {
+            bound.add(stream.getSourceTable());
+        } else if (stream.getSourceType() == StreamSourceType.VIEW && stream.getBaseTables() != null) {
+            bound.addAll(stream.getBaseTables());
+        }
+        if (bound.isEmpty()) {
+            return null;
+        }
+        final List<Long> ids = new ArrayList<>();
+        for (final Table table : bound) {
+            ids.add(Long.valueOf(table.getTableId()));
+        }
+        return ids;
+    }
+
+    /**
+     * Binds a restored stream to the tables a snapshot saved it as bound to (see {@link #boundTableIds}), each found
+     * by its table ID among the catalog's tables and the dropped versions UNDROP can restore; a table found nowhere
+     * leaves the stream as it is.
+     *
+     * @param catalog the catalog, restored with its dropped versions
+     * @param stream  the stream
+     * @param ids     the IDs, as the snapshot saved them
+     */
+    public static void restoreBinding(final Catalog catalog, final Stream stream, final List<Long> ids) {
+        final List<Table> known = new ArrayList<>();
+        for (final Database database : catalog.getAllDatabases()) {
+            addTablesOf(database, known);
+        }
+        for (final List<DroppedObject> versions : catalog.droppedVersions().values()) {
+            for (final DroppedObject version : versions) {
+                final Object object = version.getObject();
+                if (object instanceof Table) {
+                    known.add((Table) object);
+                } else if (object instanceof Schema) {
+                    addTablesOf((Schema) object, known);
+                } else if (object instanceof Database) {
+                    addTablesOf((Database) object, known);
+                }
+            }
+        }
+        final List<Table> tables = new ArrayList<>();
+        for (final Long id : ids) {
+            Table found = null;
+            for (final Table table : known) {
+                if (table.getTableId() == id.longValue()) {
+                    found = table;
+                    break;
+                }
+            }
+            if (found == null) {
+                return;
+            }
+            tables.add(found);
+        }
+        if (stream.getSourceType() == StreamSourceType.TABLE && tables.size() == 1) {
+            stream.bindSourceTable(tables.get(0));
+        } else if (stream.getSourceType() == StreamSourceType.VIEW) {
+            stream.bindBaseTables(tables);
+        }
+    }
+
+    private static void addTablesOf(final Database database, final List<Table> into) {
+        for (final Schema schema : database.getAllSchemas()) {
+            addTablesOf(schema, into);
+        }
+    }
+
+    private static void addTablesOf(final Schema schema, final List<Table> into) {
+        into.addAll(schema.getTables());
+        into.addAll(schema.getShadowedTables());
     }
 
     /**
@@ -425,18 +578,41 @@ public final class StreamSources {
      * @return whether one does
      */
     public static boolean readsAnyTrackedShadow(final Catalog catalog, final Stream stream) {
-        final List<Table> bound = baseTablesOf(catalog, stream);
-        if (bound == null) {
+        final List<Table> shadows = trackedShadowsOf(catalog, stream);
+        if (shadows == null) {
             return false;
         }
-        final Schema viewHome = viewHomeOf(catalog, homeOf(catalog, stream), stream);
-        for (int i = 0; i < bound.size() && i < stream.getBaseTableNames().size(); i++) {
-            final Table hiding = hidingOf(catalog, viewHome, stream.getBaseTableNames().get(i), bound.get(i));
-            if (hiding != null && hiding.isChangeTracking()) {
+        for (final Table shadow : shadows) {
+            if (shadow != null) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * The temporary tables that track changes and hide a view stream's tables from the session (see
+     * {@link #readsTrackedShadow}), one place per table of {@link #baseTablesOf}: the table hiding it, or null where
+     * the session reads the stream's own table.
+     *
+     * @param catalog the catalog
+     * @param stream  the stream
+     * @return the hiding tables, aligned with the stream's tables; null when the stream reads no view or a table is
+     *         gone
+     */
+    public static List<Table> trackedShadowsOf(final Catalog catalog, final Stream stream) {
+        final List<Table> bound = baseTablesOf(catalog, stream);
+        if (bound == null) {
+            return null;
+        }
+        final Schema viewHome = viewHomeOf(catalog, homeOf(catalog, stream), stream);
+        final List<Table> shadows = new ArrayList<>();
+        for (int i = 0; i < bound.size(); i++) {
+            final Table hiding = i < stream.getBaseTableNames().size()
+                ? hidingOf(catalog, viewHome, stream.getBaseTableNames().get(i), bound.get(i)) : null;
+            shadows.add(hiding != null && hiding.isChangeTracking() ? hiding : null);
+        }
+        return shadows;
     }
 
     /** The temporary table that hides one of a stream's tables from the session under its recorded name, or null. */
@@ -472,6 +648,31 @@ public final class StreamSources {
             }
         }
         return completed(viewHome, stream.getBaseTableNames().get(0));
+    }
+
+    /**
+     * The tables a view stream is bound to that are gone, each by the full name its view's query reads it under, in
+     * the order the query names them: the tables dropped or replaced under their names while the stream held changes
+     * it had not read. Empty when every one is there, or when the stream reads no view or is bound to none.
+     *
+     * @param catalog the catalog
+     * @param stream  the stream
+     * @return the full names, each with the bare upper-case name of the table that is gone, as its changes are tagged
+     */
+    public static List<String[]> goneBasesOf(final Catalog catalog, final Stream stream) {
+        final List<String[]> gone = new ArrayList<>();
+        final List<Table> bound = stream.getBaseTables();
+        if (stream.getSourceType() != StreamSourceType.VIEW || bound == null) {
+            return gone;
+        }
+        final Schema viewHome = viewHomeOf(catalog, homeOf(catalog, stream), stream);
+        for (int i = 0; i < bound.size() && i < stream.getBaseTableNames().size(); i++) {
+            if (holderOf(catalog, bound.get(i)) == null) {
+                gone.add(new String[] {completed(viewHome, stream.getBaseTableNames().get(i)),
+                    bound.get(i).getName().toUpperCase(Locale.ROOT)});
+            }
+        }
+        return gone;
     }
 
     /**

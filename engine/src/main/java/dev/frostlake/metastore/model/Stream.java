@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Represents a Snowflake Stream - Change Data Capture (CDC) mechanism
@@ -592,8 +593,9 @@ public class Stream implements Named, Taggable {
     }
 
     /**
-     * Binds this view stream, which holds no change it has not read, to the tables its view's names read now in place
-     * of tables that were dropped or replaced: it reads those from then on, its offset where it was.
+     * Binds this view stream to the tables its view's names read now in place of the tables it read: ones dropped or
+     * replaced while it held no change it had not read, or ones the names no longer read. It reads those from then
+     * on, its offset where it was, and the changes it held are dropped.
      *
      * @param tables the tables, in the order its view's query names them
      */
@@ -746,6 +748,35 @@ public class Stream implements Named, Taggable {
         final boolean appendOnly = streamType != StreamType.STANDARD;
         for (final StreamVersion version : getPendingVersions()) {
             if (version.countsAsData(appendOnly)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the stream has data as {@link #hasData} answers it, leaving out the changes of some of its tables: the
+     * tables a session reads in their place answer for themselves (a temporary table hiding one of a view's tables).
+     *
+     * @param skippedTables the bare upper-case names of the tables left out, as change records are tagged
+     * @param skippedKeys   their {@code DB.SCHEMA.TABLE} names, upper case, as versions name them
+     * @return whether the other tables' changes count as data
+     */
+    public boolean hasDataBeside(final Set<String> skippedTables, final Set<String> skippedKeys) {
+        if (initialRecords != null) {
+            return !initialRecords.isEmpty();
+        }
+        for (final StreamRecord record : getUnconsumedRecords()) {
+            if (record.getSourceTable() == null
+                    || !skippedTables.contains(record.getSourceTable().toUpperCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        final boolean appendOnly = streamType != StreamType.STANDARD;
+        for (final StreamVersion version : getPendingVersions()) {
+            if ((version.getBaseTable() == null
+                    || !skippedKeys.contains(version.getBaseTable().toUpperCase(Locale.ROOT)))
+                    && version.countsAsData(appendOnly)) {
                 return true;
             }
         }

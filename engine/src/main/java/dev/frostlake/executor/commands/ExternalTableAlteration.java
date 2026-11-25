@@ -93,7 +93,7 @@ final class ExternalTableAlteration {
      * its name as written. UNSET takes none: AUTO_REFRESH cannot lose its value, and any other word — the first of
      * a list, TAG written alone — is no property.
      */
-    private static void requireProperty(final FrostlakeParser.ExternalTableActionContext action) {
+    static void requireProperty(final FrostlakeParser.ExternalTableActionContext action) {
         if (action.UNSET() != null) {
             final String written = action.TAG() != null ? action.TAG().getText() : action.identifier(0).getText();
             if (action.TAG() == null && AUTO_REFRESH.equals(SqlIdentifiers.canonical(action.identifier(0)))) {

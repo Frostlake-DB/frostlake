@@ -74,7 +74,7 @@ final class ViewCommentText {
 
     private static ParserRuleContext clauseOf(final FrostlakeParser.CreateStatementContext ctx) {
         for (final FrostlakeParser.ViewPropertyContext property : ctx.viewProperty()) {
-            if ("COMMENT".equalsIgnoreCase(property.propertyName().getText())
+            if ("COMMENT".equalsIgnoreCase(property.propertyName().getText()) && property.copyOptionValue() != null
                     && property.copyOptionValue().STRING_LITERAL() != null) {
                 return property;
             }

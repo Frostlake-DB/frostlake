@@ -88,6 +88,13 @@ final class StageCopyOptions {
             if (writtenName.startsWith("\"") || !isOption(name)) {
                 throw new RuntimeException(SqlCompilationError.invalidCopyOption(writtenName));
             }
+            if (option.NULL() != null && "SIZE_LIMIT".equals(name)) {
+                // No size, as a stage's own list reads it.
+                if (options.containsKey(name)) {
+                    throw new RuntimeException(SqlCompilationError.conflictingCopyOption(name));
+                }
+                continue;
+            }
             final String value = UNJUDGED.contains(name) ? writtenValue(option) : judged(name, option);
             final String earlier = options.get(name);
             if (earlier != null && !earlier.equals(value)) {
@@ -222,6 +229,9 @@ final class StageCopyOptions {
     private static String writtenValue(final FrostlakeParser.ParenOptionContext option) {
         if (option.copyOptionValue() != null) {
             return ParseTreeText.getOriginalText(option.copyOptionValue());
+        }
+        if (option.NULL() != null) {
+            return option.NULL().getText();
         }
         return option.start.getInputStream().getText(
             Interval.of(option.LPAREN().getSymbol().getStartIndex(), option.RPAREN().getSymbol().getStopIndex()));

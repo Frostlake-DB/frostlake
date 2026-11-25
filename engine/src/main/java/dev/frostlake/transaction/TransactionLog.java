@@ -18,7 +18,7 @@ package dev.frostlake.transaction;
 
 
 public abstract class TransactionLog {
-    protected final String tableName;
+    protected String tableName;
 
     protected TransactionLog(final String tableName) {
         this.tableName = tableName;
@@ -26,5 +26,15 @@ public abstract class TransactionLog {
 
     public String getTableName() {
         return tableName;
+    }
+
+    /**
+     * The logged table's storage moved to another key (see {@link TransactionManager#tablesMoved}): the operation is
+     * undone there, never into a table that took the old name.
+     *
+     * @param storageName the storage's new key
+     */
+    void moveTo(final String storageName) {
+        this.tableName = storageName;
     }
 }

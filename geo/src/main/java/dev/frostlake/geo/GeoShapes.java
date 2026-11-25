@@ -16,6 +16,7 @@
 
 package dev.frostlake.geo;
 
+import dev.frostlake.functions.scalar.JsonNumberNotation;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.GeoValue;
 import tools.jackson.databind.JsonNode;
@@ -25,7 +26,9 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -91,7 +94,8 @@ public final class GeoShapes {
         int srid = -1;
         try {
             if (trimmed.startsWith("{")) {
-                model = normalizedGeoJson(MAPPER.readTree(trimmed));
+                model = normalizedGeoJson(
+                    JsonNumberNotation.applyExponentNotation(MAPPER, trimmed, MAPPER.readTree(trimmed)), geography, "");
             } else {
                 // EWKT: an SRID written ahead of the WKT, in any case and with blanks after its semicolon, which a
                 // GEOMETRY keeps and a GEOGRAPHY takes as 4326 alone (live-verified).
@@ -101,18 +105,63 @@ public final class GeoShapes {
                     throw new IllegalArgumentException("a GEOGRAPHY is read in SRID 4326 alone");
                 }
                 model = parseWkt(wkt);
-                if (model == EMPTY_SHAPE) {
-                    return null;
-                }
             }
+        } catch (final GeoJsonFormatException malformed) {
+            throw malformed;
         } catch (final RuntimeException notGeo) {
             model = null;
+        }
+        if (model == EMPTY_SHAPE) {
+            return null;
         }
         if (model == null) {
             throw unrecognized(input);
         }
         checkCoordinates(model, geography);
-        return GeoValue.ofNode(model, geography, geography ? 4326 : Math.max(srid, 0));
+        return GeoValue.ofNode(descaled(model), geography, geography ? 4326 : Math.max(srid, 0));
+    }
+
+    /**
+     * A text-read model with each number written without a JSON exponent descaled, as a JSON reader types it: its
+     * trailing zeros dropped and a whole one an INTEGER ({@code 1.0} reads 1, {@code 2.50} reads 2.5, {@code -0.0}
+     * reads 0), whether WKT or GeoJSON wrote it; a WKT exponent is no exception ({@code 1e1} reads 10), while a GeoJSON
+     * number written with an exponent stays a DOUBLE (live-verified).
+     */
+    private static JsonNode descaled(final JsonNode node) {
+        if (node.isBigDecimal()) {
+            final BigDecimal stripped = node.decimalValue().stripTrailingZeros();
+            if (stripped.scale() <= 0) {
+                return MAPPER.getNodeFactory().numberNode(stripped.toBigIntegerExact());
+            }
+            return MAPPER.getNodeFactory().numberNode(stripped);
+        }
+        if (node instanceof ArrayNode) {
+            final ArrayNode array = (ArrayNode) node;
+            for (int i = 0; i < array.size(); i++) {
+                final JsonNode element = array.get(i);
+                final JsonNode replaced = descaled(element);
+                if (replaced != element) {
+                    array.set(i, replaced);
+                }
+            }
+            return node;
+        }
+        if (node instanceof ObjectNode) {
+            final ObjectNode object = (ObjectNode) node;
+            final List<String> names = new ArrayList<String>();
+            final Iterator<String> found = object.propertyNames().iterator();
+            while (found.hasNext()) {
+                names.add(found.next());
+            }
+            for (final String name : names) {
+                final JsonNode member = object.get(name);
+                final JsonNode replaced = descaled(member);
+                if (replaced != member) {
+                    object.set(name, replaced);
+                }
+            }
+        }
+        return node;
     }
 
     private static RuntimeException unrecognized(final String input) {
@@ -172,7 +221,8 @@ public final class GeoShapes {
      * Refuses coordinates a value cannot hold (live-verified): a GEOGRAPHY's longitude outside [-180, 180] or latitude
      * outside [-90, 90] ({@code GeoJSON::Polygon::Loop: Invalid Lng/Lat pair: '200,0'.}, the path naming the shapes
      * down to the pair, the numbers to six significant digits), and a GEOMETRY coordinate that is no number
-     * ({@code Invalid GeoJSON. Coordinate value is not numeric: 'nan'.}).
+     * ({@code Invalid GeoJSON. Coordinate value is not numeric: 'nan'.}); a GEOMETRY's points must also agree in
+     * their number of coordinates (see {@link GeoDimensionCheck}).
      */
     public static void checkCoordinates(final JsonNode model, final boolean geography) {
         final String type = model.get("type").asText();
@@ -180,9 +230,12 @@ public final class GeoShapes {
             for (final JsonNode part : model.get("geometries")) {
                 checkCoordinates(part, geography, "GeometryCollection::");
             }
-            return;
+        } else {
+            checkCoordinates(model, geography, "");
         }
-        checkCoordinates(model, geography, "");
+        if (!geography) {
+            GeoDimensionCheck.check(model);
+        }
     }
 
     private static void checkCoordinates(final JsonNode model, final boolean geography, final String prefix) {
@@ -224,7 +277,7 @@ public final class GeoShapes {
         }
     }
 
-    private static void checkPair(final JsonNode pt, final boolean geography, final String path) {
+    static void checkPair(final JsonNode pt, final boolean geography, final String path) {
         final double lon = pt.get(0).asDouble();
         final double lat = pt.get(1).asDouble();
         if (geography) {
@@ -272,8 +325,24 @@ public final class GeoShapes {
         }
     }
 
-    // GeoJSON: {"coordinates": ..., "type": "..."} with sorted keys (coordinates < type).
-    private static JsonNode normalizedGeoJson(final JsonNode json) {
+    /**
+     * Refuses two GEOMETRY values of different SRIDs ({@code Incompatible SRID: 4326 and 0}, live-verified), naming
+     * the SRIDs in the order the relation reads its operands: ST_WITHIN and ST_COVEREDBY name their second argument
+     * first.
+     */
+    public static void requireSameSrid(final GeoValue first, final GeoValue second) {
+        if (first.getSrid() != second.getSrid()) {
+            throw new RuntimeException("Incompatible SRID: " + first.getSrid() + " and " + second.getSrid());
+        }
+    }
+
+    /**
+     * GeoJSON: {"coordinates": ..., "type": "..."} with sorted keys (coordinates < type). A shape of a known type
+     * whose coordinates do not hold that shape is refused with the reader's sentence (see
+     * {@link GeoJsonShapeCheck}); a GeometryCollection of no members is no value at all, as an EMPTY WKT shape is
+     * (live-verified).
+     */
+    private static JsonNode normalizedGeoJson(final JsonNode json, final boolean geography, final String prefix) {
         if (!json.isObject() || json.get("type") == null) {
             return null;
         }
@@ -285,21 +354,25 @@ public final class GeoShapes {
             }
             final ArrayNode parts = MAPPER.createArrayNode();
             for (final JsonNode member : geometries) {
-                final JsonNode normalized = normalizedGeoJson(member);
+                final JsonNode normalized = normalizedGeoJson(member, geography, "GeometryCollection::");
                 if (normalized == null) {
                     return null;
                 }
                 parts.add(normalized);
+            }
+            if (parts.isEmpty() && prefix.isEmpty()) {
+                return EMPTY_SHAPE;
             }
             final ObjectNode out = MAPPER.createObjectNode();
             out.set("geometries", parts);
             out.put("type", "GeometryCollection");
             return out;
         }
-        final JsonNode coordinates = json.get("coordinates");
-        if (coordinates == null || !isKnownType(type)) {
+        if (!isKnownType(type)) {
             return null;
         }
+        final JsonNode coordinates = json.get("coordinates");
+        GeoJsonShapeCheck.check(type, coordinates, geography, prefix);
         final ObjectNode out = MAPPER.createObjectNode();
         out.set("coordinates", coordinates);
         out.put("type", type);
@@ -315,16 +388,36 @@ public final class GeoShapes {
 
     private static JsonNode parseWkt(final String wkt) {
         final WktCursor cursor = new WktCursor(wkt);
-        final JsonNode model = parseWktBody(cursor);
+        final JsonNode model = parseWktBody(cursor, 0);
         cursor.skipSpace();
         return cursor.atEnd() ? model : null;
     }
 
-    private static JsonNode parseWktBody(final WktCursor c) {
-        final String keyword = c.word().toUpperCase(Locale.ROOT);
+    /**
+     * One WKT shape. A shape tagged Z ({@code POINT Z(1 2 3)} or {@code POINTZ(1 2 3)}) writes three coordinates per
+     * point, any other two; a collection's members carry the collection's own tag, written on each (live-verified:
+     * {@code GEOMETRYCOLLECTION Z(POINT Z(1 2 3))} is read, {@code GEOMETRYCOLLECTION Z(POINT(1 2 3))} and
+     * {@code GEOMETRYCOLLECTION(POINT Z(1 2 3))} are refused).
+     *
+     * @param requiredDims the dimension a collection member must be tagged with, or 0 at the top
+     */
+    private static JsonNode parseWktBody(final WktCursor c, final int requiredDims) {
+        String keyword = c.word().toUpperCase(Locale.ROOT);
+        boolean z = false;
+        if (keyword.length() > 1 && keyword.endsWith("Z") && isWktShape(keyword.substring(0, keyword.length() - 1))) {
+            keyword = keyword.substring(0, keyword.length() - 1);
+            z = true;
+        } else if (isWktShape(keyword)) {
+            z = c.zWord();
+        }
+        final int dims = z ? 3 : 2;
+        if (requiredDims != 0 && requiredDims != dims) {
+            return null;
+        }
         if (isWktShape(keyword) && c.emptyWord()) {
             return EMPTY_SHAPE;
         }
+        c.dimensions(dims);
         final ObjectNode out = MAPPER.createObjectNode();
         switch (keyword) {
             case "POINT": {
@@ -398,7 +491,7 @@ public final class GeoShapes {
                 final ArrayNode parts = MAPPER.createArrayNode();
                 boolean empty = false;
                 do {
-                    final JsonNode part = parseWktBody(c);
+                    final JsonNode part = parseWktBody(c, dims);
                     if (part == null) {
                         return null;
                     }
@@ -438,25 +531,50 @@ public final class GeoShapes {
 
     // ------------------------------------------------------------------ rendering
 
-    /** WKT in Snowflake's normalized form: {@code LINESTRING(0 0,1 0)} — comma without space. */
+    /**
+     * Whether the shape carries a third coordinate: its first point does, or, for a collection, its first member
+     * does. A shape read from GeoJSON with three numbers per point, or from WKT or WKB tagged Z, carries one; the
+     * spatial functions ignore it.
+     */
+    public static boolean hasZ(final JsonNode model) {
+        if ("GeometryCollection".equals(model.get("type").asText())) {
+            final JsonNode parts = model.get("geometries");
+            return parts != null && parts.size() > 0 && hasZ(parts.get(0));
+        }
+        JsonNode c = model.get("coordinates");
+        while (c != null && c.isArray() && c.size() > 0 && c.get(0).isArray()) {
+            c = c.get(0);
+        }
+        return c != null && c.isArray() && c.size() >= 3 && c.get(0).isNumber();
+    }
+
+    /**
+     * WKT in Snowflake's normalized form: {@code LINESTRING(0 0,1 0)} — comma without space; a shape with a third
+     * coordinate is tagged Z, written against its keyword ({@code POINTZ(1 2 3)}, live-verified).
+     */
     public static String toWkt(final JsonNode model) {
         final String type = model.get("type").asText();
         final StringBuilder out = new StringBuilder();
+        final String z = hasZ(model) ? "Z" : "";
         switch (type) {
             case "Point":
-                out.append("POINT(");
+                out.append("POINT").append(z).append('(');
                 appendWktPoint(model.get("coordinates"), out);
                 return out.append(')').toString();
             case "LineString":
-                out.append("LINESTRING(");
+                out.append("LINESTRING").append(z).append('(');
                 appendWktLine(model.get("coordinates"), out);
                 return out.append(')').toString();
             case "Polygon":
-                out.append("POLYGON(");
+                out.append("POLYGON").append(z).append('(');
                 appendWktRings(model.get("coordinates"), out);
                 return out.append(')').toString();
             case "MultiPoint": {
-                out.append("MULTIPOINT(");
+                if (model.get("coordinates").isEmpty()) {
+                    // a GEOGRAPHY read from GeoJSON may hold a MultiPoint of no points
+                    return "MULTIPOINT EMPTY";
+                }
+                out.append("MULTIPOINT").append(z).append('(');
                 boolean first = true;
                 for (final JsonNode pt : model.get("coordinates")) {
                     if (!first) {
@@ -470,11 +588,11 @@ public final class GeoShapes {
                 return out.append(')').toString();
             }
             case "MultiLineString":
-                out.append("MULTILINESTRING(");
+                out.append("MULTILINESTRING").append(z).append('(');
                 appendWktRings(model.get("coordinates"), out);
                 return out.append(')').toString();
             case "MultiPolygon": {
-                out.append("MULTIPOLYGON(");
+                out.append("MULTIPOLYGON").append(z).append('(');
                 boolean first = true;
                 for (final JsonNode poly : model.get("coordinates")) {
                     if (!first) {
@@ -488,7 +606,7 @@ public final class GeoShapes {
                 return out.append(')').toString();
             }
             case "GeometryCollection": {
-                out.append("GEOMETRYCOLLECTION(");
+                out.append("GEOMETRYCOLLECTION").append(z).append('(');
                 boolean first = true;
                 for (final JsonNode part : model.get("geometries")) {
                     if (!first) {
@@ -530,13 +648,42 @@ public final class GeoShapes {
 
     private static void appendWktPoint(final JsonNode pt, final StringBuilder out) {
         out.append(coordinateText(pt.get(0))).append(' ').append(coordinateText(pt.get(1)));
+        if (pt.size() >= 3) {
+            out.append(' ').append(coordinateText(pt.get(2)));
+        }
     }
 
     private static String coordinateText(final JsonNode c) {
         return c.isBigDecimal() ? GeoNumbers.wkt(c.decimalValue()) : GeoNumbers.wkt(c.asDouble());
     }
 
-    /** Little-endian WKB bytes (the ST_ASWKB form: {@code 0101000000…}). */
+    /**
+     * Refuses a value WKB cannot write: a MultiPoint of no points, which a GEOGRAPHY read from GeoJSON may hold, at
+     * the top or as a collection's member ({@code Error converting GeoJSON to WKB: GeoJSON::MultiPoint: 'coordinates'
+     * must not be empty.}, live-verified).
+     */
+    public static void requireWkbWritable(final JsonNode model) {
+        final String type = model.get("type").asText();
+        if ("GeometryCollection".equals(type)) {
+            for (final JsonNode part : model.get("geometries")) {
+                if ("MultiPoint".equals(part.get("type").asText()) && part.get("coordinates").isEmpty()) {
+                    throw emptyMultiPointWkb("GeometryCollection::");
+                }
+            }
+        } else if ("MultiPoint".equals(type) && model.get("coordinates").isEmpty()) {
+            throw emptyMultiPointWkb("");
+        }
+    }
+
+    private static RuntimeException emptyMultiPointWkb(final String prefix) {
+        return new RuntimeException("Error converting GeoJSON to WKB: GeoJSON::" + prefix
+            + "MultiPoint: 'coordinates' must not be empty.");
+    }
+
+    /**
+     * Little-endian WKB bytes (the ST_ASWKB form: {@code 0101000000…}); a shape with a third coordinate is written
+     * as ISO WKB, its type code raised by 1000 ({@code 01E9030000…}, live-verified).
+     */
     public static byte[] toWkb(final JsonNode model) {
         final List<Byte> out = new ArrayList<Byte>();
         writeWkb(model, out);
@@ -549,18 +696,19 @@ public final class GeoShapes {
 
     private static void writeWkb(final JsonNode model, final List<Byte> out) {
         final String type = model.get("type").asText();
+        final int zCode = hasZ(model) ? 1000 : 0;
         out.add((byte) 1);   // little-endian
         switch (type) {
             case "Point":
-                writeWkbInt(1, out);
+                writeWkbInt(1 + zCode, out);
                 writeWkbPoint(model.get("coordinates"), out);
                 return;
             case "LineString":
-                writeWkbInt(2, out);
+                writeWkbInt(2 + zCode, out);
                 writeWkbLine(model.get("coordinates"), out);
                 return;
             case "Polygon": {
-                writeWkbInt(3, out);
+                writeWkbInt(3 + zCode, out);
                 final JsonNode rings = model.get("coordinates");
                 writeWkbInt(rings.size(), out);
                 for (final JsonNode ring : rings) {
@@ -569,12 +717,12 @@ public final class GeoShapes {
                 return;
             }
             case "MultiPoint": {
-                writeWkbInt(4, out);
+                writeWkbInt(4 + zCode, out);
                 final JsonNode points = model.get("coordinates");
                 writeWkbInt(points.size(), out);
                 for (final JsonNode pt : points) {
                     out.add((byte) 1);
-                    writeWkbInt(1, out);
+                    writeWkbInt(1 + zCode, out);
                     writeWkbPoint(pt, out);
                 }
                 return;
@@ -582,7 +730,7 @@ public final class GeoShapes {
             default: {
                 // MultiLineString(5) / MultiPolygon(6) / GeometryCollection(7)
                 final int code = "MultiLineString".equals(type) ? 5 : "MultiPolygon".equals(type) ? 6 : 7;
-                writeWkbInt(code, out);
+                writeWkbInt(code + zCode, out);
                 if (code == 7) {
                     final JsonNode parts = model.get("geometries");
                     writeWkbInt(parts.size(), out);
@@ -596,10 +744,10 @@ public final class GeoShapes {
                 for (final JsonNode member : members) {
                     out.add((byte) 1);
                     if (code == 5) {
-                        writeWkbInt(2, out);
+                        writeWkbInt(2 + zCode, out);
                         writeWkbLine(member, out);
                     } else {
-                        writeWkbInt(3, out);
+                        writeWkbInt(3 + zCode, out);
                         writeWkbInt(member.size(), out);
                         for (final JsonNode ring : member) {
                             writeWkbLine(ring, out);
@@ -620,6 +768,9 @@ public final class GeoShapes {
     private static void writeWkbPoint(final JsonNode pt, final List<Byte> out) {
         writeWkbDouble(pt.get(0).asDouble(), out);
         writeWkbDouble(pt.get(1).asDouble(), out);
+        if (pt.size() >= 3) {
+            writeWkbDouble(pt.get(2).asDouble(), out);
+        }
     }
 
     private static void writeWkbInt(final int v, final List<Byte> out) {

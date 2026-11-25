@@ -186,7 +186,7 @@ final class LateralInputFilter {
     }
 
     /** Every name the left relations offer a subquery, upper-cased: bare columns and relation-qualified ones. */
-    private static Set<String> offeredNames(final Map<String, Table> scope, final List<Table> scopeTables) {
+    static Set<String> offeredNames(final Map<String, Table> scope, final List<Table> scopeTables) {
         final Set<String> names = new HashSet<>();
         for (final Table relation : scopeTables) {
             if (relation != null) {

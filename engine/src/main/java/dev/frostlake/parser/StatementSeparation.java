@@ -98,6 +98,9 @@ public final class StatementSeparation {
                                          final TokenStream tokens, final String sql) {
         rejectSplitSelectInto(script, tokens, sql);
         final MissingSeparator fault = firstFault(script, tokens, sql, true);
+        if (fault != null && fault.isAnchored()) {
+            throw readPastRunIns(script, tokens, sql, fault);
+        }
         if (fault != null) {
             // A bracket after a LIMIT read as an alias is the clause's value to the account (see RowLimitWordLines).
             final List<String> bracketed = sql == null ? null
@@ -141,6 +144,15 @@ public final class StatementSeparation {
             return;
         }
         final MissingSeparator fault = firstFault(script, tokens, sql, true);
+        if (fault != null && fault.isAnchored() && fault.precedes(parseFaultAt)
+                && separatesRealStatements(script, fault, false)) {
+            // The statement run in is read past to its end, and the parse's faults after that are reported on.
+            final Token word = script.flowChain().get(fault.secondChain()).getStart();
+            final List<String> lines = new ArrayList<>(fault.lines());
+            lines.addAll(listener.reportedLinesAfter(
+                SyntaxErrorListener.sentenceCoordinates(SyntaxErrorListener.sentence(statementEnd(tokens, word)))));
+            throw new SqlSyntaxException(SqlCompilationError.of(String.join("\n", lines)), lines, sql);
+        }
         if (fault != null && fault.precedes(parseFaultAt) && separatesRealStatements(script, fault, queryOrDml)
                 && (queryOrDml || opensOnlyAStatement(script, fault))) {
             // A bracket after a LIMIT read as an alias is the clause's value to the account (see RowLimitWordLines).
@@ -418,11 +430,18 @@ public final class StatementSeparation {
     private static MissingSeparator firstFault(final FrostlakeParser.SqlScriptContext script,
                                                final TokenStream tokens, final String sql,
                                                final boolean stackSecondLine) {
+        return firstFault(script, tokens, sql, stackSecondLine, 0);
+    }
+
+    /** The first missing separator after the statement chain at index {@code from} opens, or null. */
+    private static MissingSeparator firstFault(final FrostlakeParser.SqlScriptContext script,
+                                               final TokenStream tokens, final String sql,
+                                               final boolean stackSecondLine, final int from) {
         if (script == null || tokens == null) {
             return null;
         }
         final List<FrostlakeParser.FlowChainContext> chains = script.flowChain();
-        for (int i = 0; i + 1 < chains.size(); i++) {
+        for (int i = from; i + 1 < chains.size(); i++) {
             final FrostlakeParser.FlowChainContext chain = chains.get(i);
             final FrostlakeParser.FlowChainContext next = chains.get(i + 1);
             if (separated(chain, next, tokens)) {
@@ -432,6 +451,10 @@ public final class StatementSeparation {
                 return fault("<EOF>", EndOfInput.line(sql), EndOfInput.position(sql), null).between(i + 1);
             }
             final Token word = next.getStart();
+            final MissingSeparator alterFault = alterRunIn(chain, next, tokens);
+            if (alterFault != null) {
+                return alterFault.between(i + 1);
+            }
             if (word.getType() == FrostlakeLexer.INSERT && chain.getStop() != null
                     && chain.getStop().getType() == FrostlakeLexer.COMMA) {
                 // INSERT after a select list's trailing comma is the string function's name, and the token after it
@@ -467,6 +490,28 @@ public final class StatementSeparation {
                         .between(i + 1);
                 }
             }
+            final List<FrostlakeParser.StatementContext> statements = chain.statement();
+            final List<Token> queryTail = statements == null || statements.isEmpty()
+                || statements.get(statements.size() - 1).queryStatement() == null
+                ? null : QueryTailWordLines.after(tokens, word);
+            if (queryTail != null) {
+                // A START or a FOR after a query opens the query's own clause (see QueryTailWordLines).
+                final List<String> told = new ArrayList<>();
+                for (final Token each : queryTail) {
+                    told.add(SyntaxErrorListener.sentence(each));
+                }
+                final int[] at = SyntaxErrorListener.sentenceCoordinates(told.get(0));
+                return new MissingSeparator(at[0], at[1], told).anchored().between(i + 1);
+            }
+            if (readsWordAsPropertyName(chain, word)) {
+                // A word live reads as the name of a property the statement goes on to assign: the fault lies after
+                // it, as it does after any name there - CREATE TABLE t (a INT) BEGIN runs out of input (live-verified).
+                final List<String> asProperty = propertyNameLines(sql, word);
+                if (asProperty != null) {
+                    final int[] at = SyntaxErrorListener.sentenceCoordinates(asProperty.get(0));
+                    return new MissingSeparator(at[0], at[1], asProperty).between(i + 1);
+                }
+            }
             if (swallowsWord(chain, word)) {
                 final Token follower = nextSpoken(tokens, word.getTokenIndex());
                 if (follower != null && follower.getType() != Token.EOF
@@ -494,11 +539,96 @@ public final class StatementSeparation {
         return null;
     }
 
+    /**
+     * The fault of a statement run into a complete ALTER whose statement live gives up further back: the lines
+     * {@link AlterStatementAnchor} names, or those {@link AlterPropertyListLines} tells for a schema's, a database's
+     * or a view's property list — {@code ALTER VIEW v SET COMMENT = 'y' SELECT 1} is the COMMENT, {@code ALTER
+     * SCHEMA s SET COMMENT = 'y' SET COMMENT = 'z'} the COMMENT and the ''y'' (live-verified). Nothing of the statement
+     * run in is read on. A property list's lines stand only where the statement run in parses whole: a word that
+     * opens no statement — {@code ALTER SCHEMA s UNSET MAX_DATA_EXTENSION_TIME_IN_DAYS DATA_RETENTION_TIME_IN_DAYS} —
+     * is told after the list's first name as the parse tells it. Null for any other statement.
+     */
+    private static MissingSeparator alterRunIn(final FrostlakeParser.FlowChainContext chain,
+                                               final FrostlakeParser.FlowChainContext runIn, final TokenStream tokens) {
+        final Token word = runIn.getStart();
+        final List<FrostlakeParser.StatementContext> statements = chain.statement();
+        if (statements == null || statements.isEmpty()) {
+            return null;
+        }
+        final FrostlakeParser.StatementContext last = statements.get(statements.size() - 1);
+        final List<Token> named = AlterStatementAnchor.runInRefusal(last, tokens, word);
+        final List<String> lines = new ArrayList<>();
+        if (named != null) {
+            for (final Token token : named) {
+                lines.add(SyntaxErrorListener.sentence(token));
+            }
+        } else if (last.ddlStatement() != null && last.ddlStatement().alterStatement() != null && isClean(runIn)) {
+            final List<Token> spoken = new ArrayList<>();
+            for (int i = 0; i < tokens.size(); i++) {
+                if (tokens.get(i).getChannel() == Token.DEFAULT_CHANNEL) {
+                    spoken.add(tokens.get(i));
+                }
+            }
+            // Nothing of the statement run in is told after the list's own lines.
+            final List<String> told = new ArrayList<>();
+            final List<String> listed = AlterPropertyListLines.lines(spoken, word.getTokenIndex(), told);
+            if (listed != told) {
+                lines.addAll(listed);
+            }
+        }
+        if (lines.isEmpty()) {
+            return null;
+        }
+        final int[] at = SyntaxErrorListener.sentenceCoordinates(lines.get(0));
+        return new MissingSeparator(at[0], at[1], lines).anchored();
+    }
+
+    /**
+     * The refusal of a statement run into an ALTER live gives up further back (see {@link #alterRunIn}): the
+     * statement run in is read past to its end, and each such fault of a later statement is reported too — {@code
+     * ALTER FILE FORMAT ff SET COMMENT = 'y' SET x = 1; ALTER FILE FORMAT ff SET COMMENT = 'y' SET x = 1} names both
+     * FILE FORMATs (live-verified).
+     */
+    private static SqlSyntaxException readPastRunIns(final FrostlakeParser.SqlScriptContext script,
+                                                     final TokenStream tokens, final String sql,
+                                                     final MissingSeparator fault) {
+        final List<FrostlakeParser.FlowChainContext> chains = script.flowChain();
+        final List<String> lines = new ArrayList<>(fault.lines());
+        MissingSeparator current = fault;
+        while (current != null && current.isAnchored()) {
+            final Token end = statementEnd(tokens, chains.get(current.secondChain()).getStart());
+            int from = -1;
+            for (int i = current.secondChain() + 1; i < chains.size() && from < 0; i++) {
+                final Token start = chains.get(i).getStart();
+                if (start != null && start.getTokenIndex() > end.getTokenIndex()) {
+                    from = i;
+                }
+            }
+            current = from < 0 ? null : firstFault(script, tokens, sql, true, from);
+            if (current != null && current.isAnchored()) {
+                lines.addAll(current.lines());
+            }
+        }
+        return new SqlSyntaxException(SqlCompilationError.of(String.join("\n", lines)), lines, sql);
+    }
+
     /** Whether a chain's last statement is a DROP or DESCRIBE ending with the object name it takes. */
     private static boolean endsInSignableName(final FrostlakeParser.FlowChainContext chain) {
         final List<FrostlakeParser.StatementContext> statements = chain.statement();
         return statements != null && !statements.isEmpty()
             && UnseparatedStatementOpener.endsInSignableName(statements.get(statements.size() - 1));
+    }
+
+    /**
+     * Whether a chain's last statement reads the next word, a keyword, as the name of a property it goes on to assign;
+     * the text is then read again with the word written as a plain name.
+     */
+    private static boolean readsWordAsPropertyName(final FrostlakeParser.FlowChainContext chain, final Token word) {
+        final List<FrostlakeParser.StatementContext> statements = chain.statement();
+        return statements != null && !statements.isEmpty()
+            && UnseparatedStatementOpener.readsWordAsProperty(statements.get(statements.size() - 1))
+            && UnseparatedStatementOpener.namesProperty(word) && word.getType() != FrostlakeLexer.IDENTIFIER
+            && word.getType() != FrostlakeLexer.QUOTED_IDENTIFIER;
     }
 
     /**
@@ -537,6 +667,34 @@ public final class StatementSeparation {
         // A fault at the word itself names the word as written, never the name it was read as.
         return at[0] == word.getLine() && at[1] == word.getCharPositionInLine()
             ? SyntaxErrorListener.sentence(word) : firstLine;
+    }
+
+    /**
+     * The lines of the text read again with {@code word} written as a plain name of its own length, as live reads a
+     * property's name: null when that text has no fault, or a first fault that carries no position.
+     *
+     * @param sql  the text
+     * @param word the word live reads as a property's name
+     * @return the lines, or null
+     */
+    static List<String> propertyNameLines(final String sql, final Token word) {
+        if (sql == null) {
+            return null;
+        }
+        final StringBuilder text = new StringBuilder(sql);
+        for (int i = word.getStartIndex(); i <= word.getStopIndex() && i < text.length(); i++) {
+            text.setCharAt(i, 'x');
+        }
+        final List<String> lines = new ArrayList<>(SyntaxErrorListener.linesReportedFor(text.toString(), true));
+        final int[] at = lines.isEmpty() ? null : SyntaxErrorListener.sentenceCoordinates(lines.get(0));
+        if (at == null) {
+            return null;
+        }
+        // A fault at the word itself names the word as written, never the name it was read as.
+        if (at[0] == word.getLine() && at[1] == word.getCharPositionInLine()) {
+            lines.set(0, SyntaxErrorListener.sentence(word));
+        }
+        return lines;
     }
 
     /**

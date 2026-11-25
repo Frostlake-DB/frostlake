@@ -340,6 +340,49 @@ public final class AutoTemporalParser {
         }
     }
 
+    /**
+     * Whether a text starts with a sign, as a year before the first and an epoch do.
+     *
+     * @param text the trimmed text
+     * @return whether its first character is {@code +} or {@code -}
+     */
+    public static boolean startsSigned(final String text) {
+        return !text.isEmpty() && (text.charAt(0) == '-' || text.charAt(0) == '+');
+    }
+
+    /**
+     * A DATE written with a signed year: the sign, the proleptic year of one to nine digits, then a month
+     * and a day of one or two digits each, dash-separated and with nothing after them — {@code -0044-03-15},
+     * {@code -4-3-5}, {@code +0044-03-15}, {@code -0-03-15} for the year 0. A time, a zone or another
+     * separator after a signed year is no date, and a timestamp is never read from one (live-verified).
+     *
+     * @param text the trimmed text
+     * @return the date, or null when the text is not of this form or names no calendar day
+     */
+    public static LocalDate parseSignedDate(final String text) {
+        if (!startsSigned(text)) {
+            return null;
+        }
+        final int[] pos = {1};
+        final int yearStart = pos[0];
+        final int year = scanDigitRun(text, pos);
+        if (year < 0 || pos[0] - yearStart > MAX_FIELD_DIGITS || pos[0] >= text.length()
+                || text.charAt(pos[0]) != '-') {
+            return null;
+        }
+        pos[0]++;
+        final int month = scanDigits(text, pos, 2);
+        if (month < 0 || pos[0] >= text.length() || text.charAt(pos[0]) != '-') {
+            return null;
+        }
+        pos[0]++;
+        final int day = scanDigits(text, pos, 2);
+        if (day < 0 || pos[0] != text.length()) {
+            return null;
+        }
+        return dateOf(text.charAt(0) == '-' ? -year : year, month, day);
+    }
+
     /** Parse a date, tolerating (and discarding) a trailing time and zone; null if unrecognised. */
     public static LocalDate parseDate(final String raw) {
         final LocalDateTime dt = parseDateTime(raw);

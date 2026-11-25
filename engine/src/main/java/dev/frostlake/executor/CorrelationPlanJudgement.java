@@ -21,7 +21,6 @@ import dev.frostlake.executor.expressions.CastExpression;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
-import dev.frostlake.executor.expressions.LateConstantRefusal;
 import dev.frostlake.executor.expressions.LiteralExpression;
 import dev.frostlake.executor.expressions.PlannedCorrelations;
 import dev.frostlake.executor.expressions.SourcePosition;
@@ -37,8 +36,6 @@ import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
-import dev.frostlake.storage.ResultSet;
-import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.storage.Row;
 import dev.frostlake.values.RelationStatistics;
 
@@ -50,7 +47,6 @@ import org.antlr.v4.runtime.tree.TerminalNode;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -129,6 +125,8 @@ public final class CorrelationPlanJudgement {
     private final Map<String, Table> bodyRelations;
     private Boolean pruned;
     private final Set<String> refusedKeys = new LinkedHashSet<>();
+    /** Whether the query judged stands for a DELETE's or an UPDATE's WHERE (see {@link #forDml}). */
+    private boolean judgingDml;
 
     private CorrelationPlanJudgement(final QueryExecutor executor, final FrostlakeParser.SelectStatementContext statement,
                                      final FrostlakeParser.SelectClauseContext clause, final Table table,
@@ -191,7 +189,7 @@ public final class CorrelationPlanJudgement {
             new CorrelationPlanJudgement(executor, statement, clause, table, relations, outerJoined, null, null);
         return judgement.judgedClauses().isEmpty()
                 && (where == null || judgement.subqueries(where.booleanExpr()).isEmpty())
-                && judgement.notInsOutsideWhere().isEmpty()
+                && judgement.antiJoins().isEmpty() && judgement.outerJoinMemberships().isEmpty()
             ? null : judgement;
     }
 
@@ -403,6 +401,17 @@ public final class CorrelationPlanJudgement {
     }
 
     /**
+     * Marks the query judged as the one a DELETE's or an UPDATE's WHERE is read into (see DmlCorrelationJudgement),
+     * whose positive memberships are held to no rule a membership standing as a value is held to.
+     *
+     * @return this judgement
+     */
+    CorrelationPlanJudgement forDml() {
+        judgingDml = true;
+        return this;
+    }
+
+    /**
      * The refusal of the correlated subquery live cannot evaluate, or null. Of several it reports one, and which one
      * goes by why each is refused (live-verified):
      *
@@ -425,6 +434,10 @@ public final class CorrelationPlanJudgement {
         final RuntimeException bound = outerBoundRefusal();
         if (bound != null) {
             return bound;
+        }
+        final RuntimeException joined = outerJoinMembershipRefusal();
+        if (joined != null) {
+            return joined;
         }
         final boolean pruned = pruned();
         final boolean spared = pruned || readRowByRow();
@@ -490,30 +503,44 @@ public final class CorrelationPlanJudgement {
     }
 
     /**
-     * The refusal of a NOT IN live cannot evaluate (see {@link #refusesNullableNotIn}) where it stands inside a CASE
-     * or a conditional call, whose operands are judged no further: {@code CASE WHEN id NOT IN (SELECT gn.id FROM gn)
-     * THEN 1 END} in a select list is refused as the bare NOT IN is (live-verified). Null for none.
+     * Whether the statistics of the statement's relations prove one side of an OR false of every row: an anti-join
+     * beside it stands as the filter it would be alone (see {@link NullableAntiJoins}).
+     */
+    boolean provesFalse(final FrostlakeParser.BooleanExprContext side) {
+        return provenFalse(side, clause, relations);
+    }
+
+    /**
+     * The refusal of an anti-join live cannot evaluate (see {@link NullableAntiJoins}) where it stands inside a CASE
+     * or a conditional call, whose operands are judged no further, or anywhere else the judgement of the clause's
+     * subqueries passed it by: {@code CASE WHEN id NOT IN (SELECT gn.id FROM gn) THEN 1 END} in a select list is
+     * refused as the bare NOT IN is (live-verified). Null for none.
      */
     private RuntimeException conditionalNotInRefusal(final Set<String> outerNames) {
-        final CorrelatedSubqueryRule rule = new CorrelatedSubqueryRule(executor, outerNames, relations, null);
-        for (final FrostlakeParser.InSubqueryExprContext in : notInsOutsideWhere()) {
-            if (refusesNullableNotIn(in, in.selectStatement(), rule)) {
-                final FrostlakeParser.SelectStatementContext subquery = in.selectStatement();
+        final NullableAntiJoins antiJoins = new NullableAntiJoins(executor,
+            new CorrelatedSubqueryRule(executor, outerNames, relations, null), relations).within(this);
+        for (final ParserRuleContext antiJoin : antiJoins()) {
+            if (antiJoins.refuses(antiJoin)) {
+                final FrostlakeParser.SelectStatementContext subquery = NullableAntiJoins.queryOf(antiJoin);
                 refusedKeys.add(PlannedCorrelations.membershipKey(ParseTreeText.getOriginalText(subquery)));
-                return placedRefusal(subquery.getStart());
+                return placedRefusal(NullableAntiJoins.anchor(antiJoin));
             }
         }
         return null;
     }
 
     /**
-     * The NOT IN memberships over a query that the select list, the HAVING and the ORDER BY hold outside any nested
-     * select, in the order the plan reads those clauses.
+     * The anti-joins over a query (see {@link NullableAntiJoins}) that the select list, the WHERE, the HAVING and the
+     * ORDER BY hold outside any nested select, in the order the plan reads those clauses.
      */
-    private List<FrostlakeParser.InSubqueryExprContext> notInsOutsideWhere() {
+    private List<ParserRuleContext> antiJoins() {
         final List<ParseTree> parts = new ArrayList<>();
         for (final FrostlakeParser.SelectItemContext item : clause.selectList().selectItem()) {
             parts.add(item);
+        }
+        final FrostlakeParser.WhereClauseContext where = ParseTreeText.getWhereClause(clause);
+        if (where != null) {
+            parts.add(where);
         }
         if (clause.havingClause() != null) {
             parts.add(clause.havingClause());
@@ -521,25 +548,135 @@ public final class CorrelationPlanJudgement {
         if (statement.orderByClause() != null && statement.selectOperand().size() == 1 && !answersOneRow()) {
             parts.add(statement.orderByClause());
         }
-        final List<FrostlakeParser.InSubqueryExprContext> notIns = new ArrayList<>();
+        final List<ParserRuleContext> found = new ArrayList<>();
         for (final ParseTree part : parts) {
-            collectNotIns(part, notIns);
+            NullableAntiJoins.collect(part, found);
         }
-        return notIns;
+        return found;
     }
 
-    /** The NOT IN memberships over a query that {@code node} holds outside any nested select, in written order. */
-    private static void collectNotIns(final ParseTree node, final List<FrostlakeParser.InSubqueryExprContext> into) {
-        if (node instanceof FrostlakeParser.SelectStatementContext) {
-            return;
+    /**
+     * The memberships standing as conjuncts of the ON of an outer join, through AND and parentheses, each with its
+     * join, in the order written: IN, quantified comparisons and EXISTS.
+     */
+    private List<ParseTree[]> outerJoinMemberships() {
+        final List<ParseTree[]> found = new ArrayList<>();
+        final FrostlakeParser.TableExpressionContext from = clause.tableExpression();
+        if (from == null) {
+            return found;
         }
-        if (node instanceof FrostlakeParser.InSubqueryExprContext
-                && ((FrostlakeParser.InSubqueryExprContext) node).NOT() != null) {
-            into.add((FrostlakeParser.InSubqueryExprContext) node);
+        for (final FrostlakeParser.JoinClauseContext join : from.joinClause()) {
+            if (join.booleanExpr() == null || join.joinType() == null || join.joinType().LEFT() == null
+                    && join.joinType().RIGHT() == null && join.joinType().FULL() == null) {
+                continue;
+            }
+            final List<FrostlakeParser.BooleanExprContext> conjuncts = new ArrayList<>();
+            collectConjuncts(join.booleanExpr(), conjuncts);
+            for (final FrostlakeParser.BooleanExprContext conjunct : conjuncts) {
+                final ParseTree membership = conjunct instanceof FrostlakeParser.ValueExprContext
+                    ? ((FrostlakeParser.ValueExprContext) conjunct).expression() : null;
+                if (membership instanceof FrostlakeParser.InSubqueryExprContext
+                        || membership instanceof FrostlakeParser.ExistsExprContext
+                        || membership instanceof FrostlakeParser.QuantifiedComparisonExprContext
+                            && ((FrostlakeParser.QuantifiedComparisonExprContext) membership).selectStatement() != null) {
+                    found.add(new ParseTree[] {join, membership});
+                }
+            }
         }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            collectNotIns(node.getChild(i), into);
+        return found;
+    }
+
+    /**
+     * The refusal of the first membership in the ON of an outer join that no join answers, or null. Of a LEFT or a
+     * RIGHT join, a positive IN or an ANY / SOME comparison is refused where it reads both the joined relation and
+     * one before it, through its subject and its query together: {@code o LEFT JOIN i ON i.k = o.k AND i.val IN
+     * (SELECT val FROM i i2 WHERE i2.k = o.k)}, the same over a constant filter {@code o.k = 2} of the query, with
+     * {@code o.id + val} for its item or with {@code i.val + o.id} for an uncorrelated query's subject are refused,
+     * as are the RIGHT join so written either way round and {@code i.val > ANY (…)}; one reading the joined relation
+     * alone, the same IN uncorrelated, an EXISTS and a scalar subquery are answered. Of a FULL join every correlated
+     * membership is refused, an EXISTS too, a scalar subquery answered. A membership the statistics fold away first —
+     * a query proven empty, a subject never equal to its item — is not judged; NOT IN and {@code ALL} are left to
+     * the rest of the judgement (live-verified).
+     */
+    private RuntimeException outerJoinMembershipRefusal() {
+        if (readRowByRow()) {
+            return null;
         }
+        final Set<String> outerNames = outerNames();
+        final CorrelatedSubqueryRule rule = new CorrelatedSubqueryRule(executor, outerNames, relations, null);
+        for (final ParseTree[] found : outerJoinMemberships()) {
+            final FrostlakeParser.JoinClauseContext join = (FrostlakeParser.JoinClauseContext) found[0];
+            final ParseTree node = found[1];
+            final FrostlakeParser.SelectStatementContext query = selectOf(node);
+            final FrostlakeParser.ExpressionContext subject;
+            final Token at;
+            if (node instanceof FrostlakeParser.InSubqueryExprContext) {
+                final FrostlakeParser.InSubqueryExprContext in = (FrostlakeParser.InSubqueryExprContext) node;
+                if (in.NOT() != null) {
+                    continue;
+                }
+                subject = in.expression();
+                at = query.getStart();
+            } else if (node instanceof FrostlakeParser.QuantifiedComparisonExprContext) {
+                final FrostlakeParser.QuantifiedComparisonExprContext quantified =
+                    (FrostlakeParser.QuantifiedComparisonExprContext) node;
+                if (quantified.quantifier().ALL() != null) {
+                    continue;
+                }
+                subject = quantified.expression(0);
+                at = quantified.quantifier().getStart();
+            } else {
+                subject = null;
+                at = ((FrostlakeParser.ExistsExprContext) node).EXISTS().getSymbol();
+            }
+            final boolean full = join.joinType().FULL() != null;
+            if (subject == null && !full) {
+                continue;
+            }
+            final Set<Table> read = new HashSet<>();
+            if (subject != null && !tablesRead(subject, read, relations)) {
+                continue;
+            }
+            boolean placed = true;
+            for (final FrostlakeParser.QualifiedNameExprContext reference : rule.enclosingReferences(query)) {
+                final Table owner = ownerOf(reference.qualifiedName(), relations);
+                if (owner == null) {
+                    placed = false;
+                    break;
+                }
+                read.add(owner);
+            }
+            final Table joined = joinedTable(join);
+            if (!placed || joined == null) {
+                continue;
+            }
+            final boolean bothSides = read.contains(joined) && read.size() > 1;
+            final boolean correlated = !rule.readsNoOuterName(query);
+            if (!(bothSides || full && correlated) || rule.provesNoRow(query)
+                    || subject != null && rule.subjectRuledOut(query, ParseTreeText.getOriginalText(subject))) {
+                continue;
+            }
+            refusedKeys.add(PlannedCorrelations.membershipKey(ParseTreeText.getOriginalText(query)));
+            return placedRefusal(at);
+        }
+        return null;
+    }
+
+    /** The catalog table a join adds to the FROM, or null where it is not one of the statement's relations. */
+    private Table joinedTable(final FrostlakeParser.JoinClauseContext join) {
+        final FrostlakeParser.TableReferenceContext reference = join.tableReference();
+        final String name;
+        if (reference.aliasName() != null) {
+            name = ParseTreeText.getIdentifier(reference.aliasName());
+        } else if (reference.nonJoinKeywordIdentifier() != null) {
+            name = SqlIdentifiers.canonicalText(reference.nonJoinKeywordIdentifier().getText());
+        } else if (reference.tableSource() != null && reference.tableSource().tableQualifiedName() != null) {
+            final String[] parts = ParseTreeText.qualifiedNameParts(reference.tableSource().tableQualifiedName());
+            name = parts[parts.length - 1];
+        } else {
+            name = null;
+        }
+        return name == null ? null : relations.get(name.toUpperCase(Locale.ROOT));
     }
 
     /**
@@ -610,6 +747,9 @@ public final class CorrelationPlanJudgement {
         if (node instanceof FrostlakeParser.InSubqueryExprContext) {
             return ((FrostlakeParser.InSubqueryExprContext) node).selectStatement();
         }
+        if (node instanceof FrostlakeParser.TupleInSubqueryExprContext) {
+            return ((FrostlakeParser.TupleInSubqueryExprContext) node).selectStatement();
+        }
         if (node instanceof FrostlakeParser.QuantifiedComparisonExprContext) {
             return ((FrostlakeParser.QuantifiedComparisonExprContext) node).selectStatement();
         }
@@ -663,6 +803,10 @@ public final class CorrelationPlanJudgement {
             subquery = ((FrostlakeParser.InSubqueryExprContext) node).selectStatement();
             scalar = false;
             at = subquery.getStart();
+        } else if (node instanceof FrostlakeParser.TupleInSubqueryExprContext) {
+            subquery = ((FrostlakeParser.TupleInSubqueryExprContext) node).selectStatement();
+            scalar = false;
+            at = subquery.getStart();
         } else if (node instanceof FrostlakeParser.QuantifiedComparisonExprContext) {
             // A quantified comparison's query is judged as an IN's is, and refused at its quantifier, whatever the
             // comparison operator (live-verified).
@@ -683,6 +827,12 @@ public final class CorrelationPlanJudgement {
                 ? HavingAggregateSubqueries.enclosingAggregate(node, executor) : null;
         if (havingAggregate != null && HavingAggregateSubqueries.settledAround(havingAggregate, executor)) {
             // The HAVING never plans it: an OR the aggregate stands under is settled TRUE.
+            return null;
+        }
+        if (havingAggregate != null && HavingAggregateSubqueries.settledCount(executor, relations, havingAggregate,
+                (FrostlakeParser.ScalarSubqueryExprContext) node)) {
+            // A COUNT the table's statistics settle counts the subquery's rows, row by row.
+            refusedKeys.add(PlannedCorrelations.answeredKey(ParseTreeText.getOriginalText(subquery)));
             return null;
         }
         if (havingAggregate != null && !rule.readsNoOuterName(subquery)) {
@@ -747,15 +897,27 @@ public final class CorrelationPlanJudgement {
                 ? (FrostlakeParser.QuantifiedComparisonExprContext) node : null;
         // Under ANY or SOME a quantified query is a membership, under ALL a NOT IN; only an equality has the
         // subject an IN has.
+        final FrostlakeParser.TupleInSubqueryExprContext rowIn =
+            node instanceof FrostlakeParser.TupleInSubqueryExprContext
+                ? (FrostlakeParser.TupleInSubqueryExprContext) node : null;
         final boolean any = quantified != null && quantified.quantifier().ALL() == null;
-        final boolean semiJoin = in != null ? in.NOT() == null && whereConjunct(in) : any && whereConjunct(quantified);
+        final boolean semiJoin = in != null ? in.NOT() == null && whereConjunct(in)
+            : rowIn != null ? rowIn.NOT() == null && whereConjunct(rowIn) : any && whereConjunct(quantified);
         final String subject = in != null ? ParseTreeText.getOriginalText(in.expression())
             : any && quantified.op.getType() == FrostlakeParser.EQ
                 ? ParseTreeText.getOriginalText(quantified.expression(0)) : null;
+        rule.quantifiedAs(in != null ? in.NOT() != null : quantified != null && !any,
+            quantified != null && quantified.op.getType() != FrostlakeParser.NEQ,
+            in != null ? !whereConjunct(in) : quantified != null && !whereConjunct(quantified));
+        // A DELETE's or an UPDATE's WHERE is planned otherwise: DELETE FROM t WHERE EXISTS (SELECT 1 FROM i WHERE t.k
+        // IS NULL) OR id = 99 is answered where the same filter of a query is refused (live-verified).
+        rule.membershipStandsAsValue(!judgingDml && (in != null ? !whereConjunct(in)
+            : quantified != null ? !whereConjunct(quantified) : rowIn != null ? !whereConjunct(rowIn)
+            : node instanceof FrostlakeParser.ExistsExprContext && !whereExistence((ParserRuleContext) node)));
         if (!(scalar ? rule.refusesScalar(subquery)
-                : rule.refusesMembership(subquery, in != null || quantified != null, semiJoin, subject,
-                    in != null && in.NOT() != null))
-                && !refusesNullableNotIn(in, subquery, rule)) {
+                : rule.refusesMembership(subquery, in != null || rowIn != null || quantified != null, semiJoin,
+                    subject, in != null && in.NOT() != null || rowIn != null && rowIn.NOT() != null))
+                && !new NullableAntiJoins(executor, rule, relations).within(this).refuses(node)) {
             return null;
         }
         // A membership test keeps the order the aggregate shape has: of several the last is reported.
@@ -767,11 +929,30 @@ public final class CorrelationPlanJudgement {
             // Inside a SQL function's arguments the refusal names the function and gives no place.
             return UnsupportedSubqueryException.inside(called);
         }
-        if (rule.outerReadDepth() == 2 && standsInWhere(node)) {
-            // A WHERE's subquery whose own subquery reads the outer row is refused with no place given, where one
-            // read from three levels in, and any of a select list or a HAVING, is placed (live-verified) — unless
-            // the statement holds another subquery, see refusal().
+        final Token antiJoin = !scalar && standsInWhere(node) ? NestedSubqueryRefusalPlace.antiJoinOf(subquery, rule)
+            : null;
+        if (antiJoin != null) {
+            return placedRefusal(antiJoin);
+        }
+        final ParserRuleContext judgedNode = (ParserRuleContext) node;
+        final Token nested = rule.outerReadDepth() == 2 ? NestedSubqueryRefusalPlace.of(judgedNode, subquery, rule)
+            : null;
+        if (nested != null) {
+            return placedRefusal(nested);
+        }
+        if (rule.outerReadDepth() == 2 && standsInWhere(node)
+                && NestedSubqueryRefusalPlace.unplacedAtDepthTwo(judgedNode, subquery, rule)) {
+            // A WHERE's IN or EXISTS over plain rows whose own subquery reads the outer row is refused with no place
+            // given, where one read from three levels in, a scalar one, one over an aggregate, and any of a select
+            // list or a HAVING, is placed (live-verified) — unless the statement holds another subquery, see
+            // refusal().
             unplacedAt = at;
+            return new UnsupportedSubqueryException(
+                SqlCompilationError.of("Unsupported subquery type cannot be evaluated"));
+        }
+        if (NestedSubqueryRefusalPlace.readsThroughAnExpressionQuery(judgedNode, subquery, rule)) {
+            // One reading the outer row through a FROM-less query of its filter gives no place, beside another
+            // subquery too (live-verified).
             return new UnsupportedSubqueryException(
                 SqlCompilationError.of("Unsupported subquery type cannot be evaluated"));
         }
@@ -806,59 +987,6 @@ public final class CorrelationPlanJudgement {
     }
 
     /**
-     * Whether live refuses a NOT IN over a query that reads nothing of the outer row because the query's one column
-     * may hold NULL and the NOT IN stands outside the WHERE — in the select list, a CASE there, the HAVING or the
-     * ORDER BY: {@code SELECT id NOT IN (SELECT gn.id FROM gn WHERE gn.k = 'a') FROM fo} is "Unsupported subquery
-     * type cannot be evaluated", at the query's SELECT, where the same NOT IN in the WHERE, one over a column
-     * declared NOT NULL or over a literal, one over a query the statistics prove reads no row, and a correlated one
-     * are answered (live-verified).
-     */
-    private boolean refusesNullableNotIn(final FrostlakeParser.InSubqueryExprContext in,
-                                         final FrostlakeParser.SelectStatementContext subquery,
-                                         final CorrelatedSubqueryRule rule) {
-        return in != null && in.NOT() != null && !standsInWhere(in) && rule.readsNoOuterName(subquery)
-            && !rule.provesNoRow(subquery) && answersNullable(subquery);
-    }
-
-    /**
-     * Whether the one column a query answers may hold NULL, read from its planned shape; a query that cannot be
-     * planned here on its own is taken as one that cannot, so that its own fault is met where it runs.
-     */
-    private boolean answersNullable(final FrostlakeParser.SelectStatementContext subquery) {
-        if (projectsLiteral(subquery)) {
-            return false;
-        }
-        final boolean previous = RelationShapeOnly.begin();
-        LateConstantRefusal.beginProbe();
-        try {
-            final List<ResultSet> shapes = executor.executeWithLateralContext(ParseTreeText.getOriginalText(subquery),
-                new HashMap<String, Object>());
-            if (shapes.isEmpty() || shapes.get(0) == null || shapes.get(0).getColumns().size() != 1) {
-                return false;
-            }
-            final ResultSetColumn column = shapes.get(0).getColumns().get(0);
-            return !column.isNullabilityKnown() || column.isNullable();
-        } catch (final RuntimeException undetermined) {
-            return false;
-        } finally {
-            LateConstantRefusal.endProbe();
-            RelationShapeOnly.end(previous);
-        }
-    }
-
-    /** Whether a query is one SELECT whose one item is a literal that is not NULL: {@code (SELECT 5)}. */
-    private static boolean projectsLiteral(final FrostlakeParser.SelectStatementContext subquery) {
-        if (subquery.selectOperand().size() != 1 || subquery.selectOperand(0).selectClause() == null) {
-            return false;
-        }
-        final List<FrostlakeParser.SelectItemContext> items =
-            subquery.selectOperand(0).selectClause().selectList().selectItem();
-        final FrostlakeParser.ExpressionContext value =
-            items.size() == 1 ? SelectItemAccessors.getItemValueExpr(items.get(0)) : null;
-        return value instanceof FrostlakeParser.LiteralExprContext && !"NULL".equalsIgnoreCase(value.getText());
-    }
-
-    /**
      * Whether a membership stands as a conjunct of the WHERE, through AND and parentheses, where a semi-join answers
      * it: {@code WHERE v IN (…) AND v > 0} does, {@code WHERE v IN (…) OR v = 2}, {@code WHERE NOT (v IN (…))},
      * {@code WHERE v IN (…) = FALSE}, a CASE and a select list do not (live-verified). A HAVING the planner moves
@@ -872,6 +1000,20 @@ public final class CorrelationPlanJudgement {
         }
         return at instanceof FrostlakeParser.WhereClauseContext || at instanceof FrostlakeParser.HavingClauseContext
             && movesToWhere(((FrostlakeParser.HavingClauseContext) at).booleanExpr());
+    }
+
+    /**
+     * Whether an EXISTS stands as a conjunct of the WHERE, through AND, parentheses and NOT, where a semi-join or an
+     * anti-join answers it: {@code WHERE NOT EXISTS (…)} and {@code WHERE NOT (EXISTS (…))} do, {@code WHERE EXISTS
+     * (…) OR id = 1}, {@code WHERE EXISTS (…) = TRUE}, an ON, a HAVING and a select list do not (live-verified).
+     */
+    private static boolean whereExistence(final ParserRuleContext exists) {
+        ParserRuleContext at = exists.getParent();
+        while (at instanceof FrostlakeParser.ValueExprContext || at instanceof FrostlakeParser.AndExprContext
+                || at instanceof FrostlakeParser.ParenExprContext || at instanceof FrostlakeParser.NotExprContext) {
+            at = at.getParent();
+        }
+        return at instanceof FrostlakeParser.WhereClauseContext;
     }
 
     /**
@@ -970,6 +1112,7 @@ public final class CorrelationPlanJudgement {
     private void collectSubqueries(final ParseTree node, final List<ParseTree> into) {
         if (node instanceof FrostlakeParser.ScalarSubqueryExprContext || node instanceof FrostlakeParser.ExistsExprContext
                 || node instanceof FrostlakeParser.InSubqueryExprContext
+                || node instanceof FrostlakeParser.TupleInSubqueryExprContext
                 || node instanceof FrostlakeParser.QuantifiedComparisonExprContext
                     && ((FrostlakeParser.QuantifiedComparisonExprContext) node).selectStatement() != null
                 || node instanceof FrostlakeParser.FunctionArgContext

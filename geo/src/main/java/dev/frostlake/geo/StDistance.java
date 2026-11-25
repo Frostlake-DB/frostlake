@@ -36,6 +36,7 @@ public class StDistance extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null) return null;
         GeoShapes.requireSameKind("ST_DISTANCE", a, b);
+        GeoShapes.requireSameSrid(a, b);
         return GeoRelation.distance(a, b);
     }
 

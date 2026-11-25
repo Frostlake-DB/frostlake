@@ -58,7 +58,8 @@ import java.util.Map;
  * {@code java.sql.Time} the time of day it counts - refused when it counts none, {@code Time value out of range:
  * 86401000 ms} - a {@code java.sql.Timestamp} its wall clock at UTC with its
  * nanoseconds for a timestamp without a zone and its instant for a zoned one. A {@code String[]} is an ARRAY of
- * texts, a null element one of its SQL NULLs; a {@code Map} an OBJECT; a {@code byte[]} a BINARY, refused past
+ * texts, a null element one of its SQL NULLs; an {@code int[]}, a {@code long[]} or a {@code short[]} an ARRAY of whole numbers,
+ * a {@code float[]} or a {@code double[]} one of DOUBLEs and a {@code boolean[]} one of BOOLEANs; a {@code Map} an OBJECT; a {@code byte[]} a BINARY, refused past
  * a declared width; a text returned for a VARIANT, an ARRAY or an OBJECT is read as JSON, and refused when it
  * is none or, for an ARRAY and an OBJECT, of another kind; a text returned for a TIME is read as the cast reads
  * it.
@@ -118,6 +119,12 @@ public final class HandlerResults {
         }
         if ("ARRAY".equals(name) && value instanceof Object[]) {
             return array((Object[]) value);
+        }
+        if ("ARRAY".equals(name) && value.getClass().isArray() && value.getClass().getComponentType().isPrimitive()) {
+            final VariantValue elements = primitives(value);
+            if (elements != null) {
+                return elements;
+            }
         }
         if (declared instanceof ObjectType && value instanceof Map) {
             return object((Map<?, ?>) value);
@@ -202,6 +209,42 @@ public final class HandlerResults {
             } else {
                 array.add(String.valueOf(element));
             }
+        }
+        return VariantValue.ofNode(array);
+    }
+
+    /**
+     * A primitive array's elements: an {@code int[]}'s, a {@code long[]}'s and a {@code short[]}'s whole numbers, a
+     * {@code float[]}'s and a {@code double[]}'s DOUBLEs, a {@code boolean[]}'s BOOLEANs; null for another array.
+     */
+    private static VariantValue primitives(final Object elements) {
+        final ArrayNode array = ArrayFunctionHelper.MAPPER.createArrayNode();
+        if (elements instanceof int[]) {
+            for (final int element : (int[]) elements) {
+                array.add(element);
+            }
+        } else if (elements instanceof long[]) {
+            for (final long element : (long[]) elements) {
+                array.add(element);
+            }
+        } else if (elements instanceof float[]) {
+            for (final float element : (float[]) elements) {
+                array.add((double) element);
+            }
+        } else if (elements instanceof double[]) {
+            for (final double element : (double[]) elements) {
+                array.add(element);
+            }
+        } else if (elements instanceof short[]) {
+            for (final short element : (short[]) elements) {
+                array.add(element);
+            }
+        } else if (elements instanceof boolean[]) {
+            for (final boolean element : (boolean[]) elements) {
+                array.add(element);
+            }
+        } else {
+            return null;
         }
         return VariantValue.ofNode(array);
     }

@@ -40,6 +40,8 @@ import dev.frostlake.executor.expressions.WindowFunctionExpression;
 import dev.frostlake.metastore.model.JoinedRelations;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
+import dev.frostlake.types.DataType;
+import dev.frostlake.types.StringType;
 
 import java.util.Arrays;
 import java.util.HashSet;
@@ -192,7 +194,10 @@ final class ResultNullability {
         }
         if (expression instanceof CastExpression) {
             final CastExpression cast = (CastExpression) expression;
-            return cast.isTryMode() || of(cast.getExpression());
+            if (cast.isTryMode() && !(HeldNullReading.current() != null && keepsText(cast))) {
+                return true;
+            }
+            return of(cast.getExpression());
         }
         if (expression instanceof BinaryOperationExpression) {
             final BinaryOperationExpression binary = (BinaryOperationExpression) expression;
@@ -277,6 +282,43 @@ final class ResultNullability {
         return false;
     }
 
+    /**
+     * Whether a TRY_CAST converts a text to a text that holds every text, so that it never fails and answers NULL only
+     * where its operand does. Read by the rows held (see {@link HeldNullReading}), {@code TRY_CAST(s AS VARCHAR)} of a
+     * column holding no NULL answers none, where {@code TRY_CAST(s AS VARCHAR(5))} may (live-verified).
+     */
+    private boolean keepsText(final CastExpression cast) {
+        return holdsEveryText(cast) && readsText(cast.getExpression());
+    }
+
+    /**
+     * Whether a cast's target is a text type of the greatest width, which every text fits.
+     *
+     * @param cast the cast
+     * @return whether it targets such a text
+     */
+    static boolean holdsEveryText(final CastExpression cast) {
+        final DataType target = cast.getTargetDataType();
+        return target instanceof StringType
+            && ((StringType) target).getMaxLength() >= StringType.VARCHAR.getMaxLength();
+    }
+
+    /** Whether an operand is a text: a column declared one, or a cast to one. */
+    private boolean readsText(final Expression operand) {
+        if (operand instanceof CastExpression) {
+            return ((CastExpression) operand).getTargetDataType() instanceof StringType;
+        }
+        if (!(operand instanceof ColumnReferenceExpression)) {
+            return false;
+        }
+        final ColumnReferenceExpression reference = (ColumnReferenceExpression) operand;
+        TableColumn column = qualifiedColumn(reference, aliasToTable);
+        if (column == null && !reference.isQualified() && table != null && table.hasColumn(reference.getColumnName())) {
+            column = table.getColumns().get(table.getColumnIndex(reference.getColumnName()));
+        }
+        return column != null && column.getDataType() instanceof StringType;
+    }
+
     /** A column's own NOT NULL, and the NULLs an outer join extends its relation with. */
     private boolean column(final ColumnReferenceExpression reference) {
         final String name = reference.getColumnName();
@@ -284,13 +326,51 @@ final class ResultNullability {
             final Table relation = relationNamed(aliasToTable, reference.getTableName());
             if (relation != null && relation.hasColumn(name)) {
                 final JoinedRelations joined = table == null ? null : table.getJoinedRelations();
-                return nullable(relation.getColumns().get(relation.getColumnIndex(name)))
+                return nullable(relation, relation.getColumns().get(relation.getColumnIndex(name)))
                     || joined != null && joined.includes(relation) && joined.isNullExtended(relation);
             }
         }
         // A name no column answers to is a word of the call it stands in — DATEADD(day, …) — and no value.
         return table != null && table.hasColumn(name)
-            && nullable(table.getColumns().get(table.getColumnIndex(name)));
+            && nullable(ownerOf(name), table.getColumns().get(table.getColumnIndex(name)));
+    }
+
+    /**
+     * The relation an unqualified name reads: the select's own, or of a join the one relation holding a column of
+     * the name.
+     */
+    private Table ownerOf(final String name) {
+        if (table.residentSource() != null || aliasToTable == null) {
+            return table;
+        }
+        Table owner = null;
+        for (final Table relation : aliasToTable.values()) {
+            if (relation != null && relation != owner && relation.hasColumn(name)) {
+                if (owner != null) {
+                    return table;
+                }
+                owner = relation;
+            }
+        }
+        return owner != null ? owner : table;
+    }
+
+    /**
+     * A column's judgement, or where its rows are read for their NULLs (see {@link HeldNullReading}) whether a row of
+     * its catalog table, or of its VALUES clause, holds one.
+     */
+    private boolean nullable(final Table owner, final TableColumn column) {
+        final StoredColumnValues held = HeldNullReading.current();
+        if (held != null && owner != null) {
+            final Boolean holds = held.holdsNull(owner, column.getName());
+            if (holds != null) {
+                return holds.booleanValue();
+            }
+            if (column.getHeldNull() != null) {
+                return column.getHeldNull().booleanValue();
+            }
+        }
+        return nullable(column);
     }
 
     /**

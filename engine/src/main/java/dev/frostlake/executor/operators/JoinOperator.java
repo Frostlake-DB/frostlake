@@ -304,6 +304,8 @@ public class JoinOperator implements Operator {
             }
             return executeConditionalJoin(leftRows);
         }
+        final List<List<Object>> rightVariantKeys = variantKeysOf(rightKeys);
+        final List<List<Object>> leftVariantKeys = rightVariantKeys == null ? null : variantKeysOf(leftKeys);
         normalizeKeys(rightKeys);
         normalizeKeys(leftKeys);
         final Map<List<Object>, List<Integer>> rightIndex = new HashMap<>();
@@ -329,7 +331,8 @@ public class JoinOperator implements Operator {
             if (candidates != null) {
                 for (final int idx : candidates) {
                     final Row rightRow = rightRows.get(idx);
-                    if (matchesBeyondKeys(leftRow, rightRow)) {
+                    if ((leftVariantKeys == null || variantKeysAgree(leftVariantKeys.get(l), rightVariantKeys.get(idx)))
+                            && matchesBeyondKeys(leftRow, rightRow)) {
                         resultRows.add(combineRows(leftRow, rightRow));
                         leftMatchFound = true;
                         matchedRight[idx] = true;
@@ -401,6 +404,50 @@ public class JoinOperator implements Operator {
                 kind = joinKind(kind, key.get(i));
             }
             if (kind == KIND_MIXED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Every row's raw key, copied before the keys are bucketed, when some key value is a VARIANT; otherwise null. A
+     * VARIANT key meets another VARIANT key only when the two key alike (see {@link #variantKeysAgree}).
+     */
+    private static List<List<Object>> variantKeysOf(final List<List<Object>> keys) {
+        boolean anyVariant = false;
+        for (final List<Object> key : keys) {
+            for (final Object value : key) {
+                if (value instanceof VariantValue) {
+                    anyVariant = true;
+                    break;
+                }
+            }
+            if (anyVariant) {
+                break;
+            }
+        }
+        if (!anyVariant) {
+            return null;
+        }
+        final List<List<Object>> copies = new ArrayList<>(keys.size());
+        for (final List<Object> key : keys) {
+            copies.add(new ArrayList<>(key));
+        }
+        return copies;
+    }
+
+    /**
+     * Whether two raw keys agree where both sides hold a VARIANT: an equi-join keys two VARIANTs as DISTINCT does,
+     * number by exact value, so an integer never meets the double it rounds to there although {@code =} finds the
+     * pair equal (live-verified). Other positions are the condition's to judge.
+     */
+    private static boolean variantKeysAgree(final List<Object> left, final List<Object> right) {
+        for (int i = 0; i < left.size(); i++) {
+            final Object one = left.get(i);
+            final Object other = right.get(i);
+            if (one instanceof VariantValue && other instanceof VariantValue
+                    && !ValueComparisons.canonicalGroupKeyValue(one).equals(ValueComparisons.canonicalGroupKeyValue(other))) {
                 return false;
             }
         }

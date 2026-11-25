@@ -335,6 +335,10 @@ final class TypeInferencer {
     }
 
     private DataType inferUncached(final Expression expr) {
+        if (expr instanceof AnonymousCallExpression) {
+            // The wrapper a procedure's answer travels in is a text (see AnonymousCallExpression).
+            return StringType.VARCHAR;
+        }
         if (expr instanceof BindVariableExpression) {
             // ★ THE DECLARATION IS THE VARIABLE'S TYPE (live): a column derived from :v carries the
             // DECLARED type WITH its width — declare v varchar(2) := 42 makes a VARCHAR(2) column

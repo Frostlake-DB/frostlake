@@ -18,6 +18,7 @@ package dev.frostlake.jdbc;
 
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.StatementCount;
+import dev.frostlake.executor.commands.FailureCode;
 
 import java.sql.SQLException;
 
@@ -75,7 +76,10 @@ final class JdbcMultiStatement {
         try {
             QueryExecutor.requireParses(sql);
         } catch (final RuntimeException syntaxError) {
-            return new SQLException(syntaxError.getMessage(), syntaxError);
+            // It carries its family's code and SQLSTATE, as the statement's own refusal does (live-verified).
+            final FailureCode family = FailureCode.ofClient(syntaxError);
+            return family == null ? new SQLException(syntaxError.getMessage(), syntaxError)
+                : new SQLException(syntaxError.getMessage(), family.state(), family.code(), syntaxError);
         }
         return countMismatch(actual, desired);
     }

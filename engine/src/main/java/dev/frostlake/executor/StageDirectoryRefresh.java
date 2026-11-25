@@ -51,7 +51,6 @@ import java.util.TreeMap;
  */
 public final class StageDirectoryRefresh {
 
-    private static final String ID_ALPHABET = "0123456789abcdef";
     private static final String[] REGISTERED_NEW = {"REGISTERED_NEW", "File registered successfully."};
     private static final String[] REGISTERED_UPDATE = {"REGISTERED_UPDATE", "File registered (updated) successfully."};
     private static final String[] UNREGISTERED = {"UNREGISTERED", "File unregistered successfully."};
@@ -121,22 +120,12 @@ public final class StageDirectoryRefresh {
         if (executor.getStreamManager() != null) {
             executor.getStreamManager().trackRefresh(database, StreamSourceType.STAGE, qualified, removed, added);
         }
-        final String prefix = "stages/" + idOf(stage) + "/";
+        final String prefix = "stages/" + StageStorageId.of(stage) + "/";
         final List<Row> rows = new ArrayList<>();
         for (final Map.Entry<String, String[]> outcome : outcomes.entrySet()) {
             rows.add(new Row(Arrays.asList(prefix + outcome.getKey(), outcome.getValue()[0], outcome.getValue()[1])));
         }
         return rows;
-    }
-
-    /** The stage's id, given the first time a refresh needs it. */
-    private static String idOf(final Stage stage) {
-        if (stage.getDirectoryId() == null) {
-            final String hex = StatementTokens.draw(ID_ALPHABET, 32);
-            stage.setDirectoryId(hex.substring(0, 8) + "-" + hex.substring(8, 12) + "-" + hex.substring(12, 16) + "-"
-                + hex.substring(16, 20) + "-" + hex.substring(20));
-        }
-        return stage.getDirectoryId();
     }
 
     /** Whether two directory rows describe the same file: same path, size, modification time and content. */

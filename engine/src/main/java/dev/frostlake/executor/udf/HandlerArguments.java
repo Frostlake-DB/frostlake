@@ -24,9 +24,11 @@ import dev.frostlake.types.DataType;
 import dev.frostlake.types.DecimalText;
 import dev.frostlake.types.TypeCategory;
 import dev.frostlake.values.BinaryValue;
+import dev.frostlake.values.VariantUndefined;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 
+import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -49,8 +51,9 @@ import java.util.Map;
  * {@code long}, a {@code short}, their boxes, a {@code BigDecimal} at the declared scale or a {@code BigInteger};
  * a FLOAT a {@code double} or a {@code float}; a BOOLEAN a {@code boolean}; any scalar a {@code String}; a DATE a
  * {@code java.sql.Date} at midnight UTC, a TIME a {@code java.sql.Time} and a TIMESTAMP a
- * {@code java.sql.Timestamp} with its nanoseconds; an ARRAY a {@code String[]}, an OBJECT a
- * {@code Map<String, String>} and a BINARY a {@code byte[]}.
+ * {@code java.sql.Timestamp} with its nanoseconds; an ARRAY a {@code String[]}, or an {@code int[]}, a
+ * {@code long[]}, a {@code short[]}, a {@code float[]}, a {@code double[]} or a {@code boolean[]} of its elements
+ * (see {@link #primitives}), an OBJECT a {@code Map<String, String>} and a BINARY a {@code byte[]}.
  *
  * <p>A NULL reaches a box or an object as {@code null} and is refused for a primitive, and a number its class
  * cannot hold is refused, each naming the function and its handler.
@@ -139,6 +142,10 @@ public final class HandlerArguments {
         if (target == String[].class) {
             return strings(value);
         }
+        if (target.isArray() && target.getComponentType().isPrimitive() && target != byte[].class
+                && target != char[].class) {
+            return primitives(target, value, where);
+        }
         if (target == Map.class) {
             return map(value);
         }
@@ -190,6 +197,66 @@ public final class HandlerArguments {
             out[i] = HandlerTexts.member(array.get(i));
         }
         return out;
+    }
+
+    /**
+     * An ARRAY's elements as a primitive array, each read as the element class takes it, in order: a NULL element
+     * is refused, {@code Argument type int[] cannot have a null element}; for a number class a number with
+     * decimals is refused, {@code Failed to cast variant value with non-zero scale to FIXED}, as is an element of
+     * another kind, named by its storage type ({@code Failed to cast variant value of type TEXT to REAL}); a whole
+     * number past the class is refused as a scalar argument is.
+     */
+    private static Object primitives(final Class<?> target, final Object value, final String where) {
+        final JsonNode array = json(value);
+        if (array == null || !array.isArray()) {
+            return value;
+        }
+        final Class<?> element = target.getComponentType();
+        final Object out = Array.newInstance(element, array.size());
+        for (int i = 0; i < array.size(); i++) {
+            final JsonNode node = array.get(i);
+            if (node == null || node.isNull() || VariantUndefined.isUndefined(node)) {
+                throw new RuntimeException("Argument type " + element.getName() + "[] cannot have a null element"
+                    + where);
+            }
+            if (element == boolean.class) {
+                if (!node.isBoolean()) {
+                    throw new RuntimeException(notCast(node, "BOOLEAN") + where);
+                }
+                Array.setBoolean(out, i, node.booleanValue());
+            } else if (element == float.class || element == double.class) {
+                if (!node.isNumber()) {
+                    throw new RuntimeException(notCast(node, "REAL") + where);
+                }
+                if (element == float.class) {
+                    Array.setFloat(out, i, (float) node.doubleValue());
+                } else {
+                    Array.setDouble(out, i, node.doubleValue());
+                }
+            } else {
+                Array.set(out, i, convert(element, fixed(node, where), where));
+            }
+        }
+        return out;
+    }
+
+    /** An element read as a whole number, refused when it is of another kind or has decimals. */
+    private static BigDecimal fixed(final JsonNode node, final String where) {
+        if (!node.isIntegralNumber() && !node.isBigDecimal()) {
+            throw new RuntimeException(notCast(node, "FIXED") + where);
+        }
+        final BigDecimal number = node.decimalValue();
+        if (number.signum() != 0 && number.stripTrailingZeros().scale() > 0) {
+            throw new RuntimeException("Failed to cast variant value with non-zero scale to FIXED" + where);
+        }
+        return number;
+    }
+
+    /** The refusal of an element no cast to {@code storage} takes, naming the element's own storage type. */
+    private static String notCast(final JsonNode node, final String storage) {
+        final String kind = node.isTextual() ? "TEXT" : node.isBoolean() ? "BOOLEAN" : node.isArray() ? "ARRAY"
+            : node.isObject() ? "OBJECT" : node.isIntegralNumber() || node.isBigDecimal() ? "FIXED" : "REAL";
+        return "Failed to cast variant value of type " + kind + " to " + storage;
     }
 
     /** An OBJECT's values as texts (see {@link HandlerTexts#member}), by key, in the object's order. */

@@ -87,7 +87,7 @@ public class TimestampFromParts extends BuiltInFunction {
         // The parts are a wall clock in the session's zone — or, for a TIMESTAMP_TZ, in the zone named last — and
         // one the zone's clocks skip moves forward, as a TIMESTAMP_NTZ converted to a zoned type does
         // (live-verified: TIMESTAMP_LTZ_FROM_PARTS(2024, 3, 10, 2, 30, 0) is 03:30 -0700 in Los Angeles).
-        final ZoneId zone = args.size() > 7 ? ZoneId.of(String.valueOf(args.get(7))) : SessionZone.current();
+        final ZoneId zone = args.size() > 7 ? namedZone(String.valueOf(args.get(7))) : SessionZone.current();
         final ZonedDateTime placed = wall.atZone(zone);
         if (!keepsWrittenOffset) {
             return placed.toOffsetDateTime();
@@ -151,4 +151,20 @@ public class TimestampFromParts extends BuiltInFunction {
 
     @Override
     public int getMaxArgCount() { return keepsWrittenOffset ? 8 : 7; }
+
+    /**
+     * The zone the last argument names, by its own name in the zone database as a TIMEZONE parameter takes it: an
+     * offset ({@code +05:00}, {@code GMT+2}, {@code Z}) or another case ({@code utc}) is "Unknown timezone: 'utc'"
+     * (live-verified).
+     *
+     * @param name the argument
+     * @return the zone
+     */
+    private static ZoneId namedZone(final String name) {
+        final ZoneId known = SessionZone.named(name);
+        if (known == null) {
+            throw new RuntimeException("Unknown timezone: '" + name + "'");
+        }
+        return known;
+    }
 }

@@ -54,8 +54,10 @@ public class DecryptRaw extends BuiltInFunction {
         // Live's order: the method, the key's size, the IV's size, whether the mode takes AAD, then the tag.
         final EncryptionMethod method = EncryptionMethod.of(methodArg);
         RawCipherSupport.requireKeySize(RawCipherSupport.binaryBytes("DECRYPT_RAW", args.get(1)));
-        if (args.get(2) != null) {
-            RawCipherSupport.requireIvSize(method, RawCipherSupport.binaryBytes("DECRYPT_RAW", args.get(2)));
+        // The account counts the call against two arguments; a call of two reads no IV.
+        final Object ivArg = n >= 3 ? args.get(2) : null;
+        if (ivArg != null) {
+            RawCipherSupport.requireIvSize(method, RawCipherSupport.binaryBytes("DECRYPT_RAW", ivArg));
         }
         method.requireAadSupport(aadArg != null);
         byte[] tag = null;
@@ -72,7 +74,7 @@ public class DecryptRaw extends BuiltInFunction {
         try {
             final byte[] ciphertext = RawCipherSupport.binaryBytes("DECRYPT_RAW", args.get(0));
             final byte[] key = RawCipherSupport.binaryBytes("DECRYPT_RAW", args.get(1));
-            final byte[] iv = RawCipherSupport.ivOrDrawn("DECRYPT_RAW", method, args.get(2));
+            final byte[] iv = RawCipherSupport.ivOrDrawn("DECRYPT_RAW", method, ivArg);
             byte[] input = ciphertext;
             if (tag != null) {
                 // Java's authenticated ciphers expect the tag appended to the ciphertext; reassemble the two.
@@ -91,7 +93,7 @@ public class DecryptRaw extends BuiltInFunction {
     }
 
     @Override
-    public int getMinArgCount() { return 3; }
+    public int getMinArgCount() { return 2; }
     @Override
     public int getMaxArgCount() { return 6; }
 }

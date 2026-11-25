@@ -71,7 +71,8 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  * <p>A routine's body is judged in the frame it compiles in, its positions its own: a SQL UDF's expression body and a
  * policy's body inside a frame of parentheses — one character on either side, so a place on the body's first line
  * moves by one — their refusals opening with "Compilation of SQL UDF failed: "; a procedure's block, a UDF's query,
- * a table function's too, and a scalar UDF's block as a statement of their own.
+ * a table function's too, and a scalar UDF's block as a statement of their own — but a UDF's query whose stage this
+ * syntax refuses is read in the expression's frame instead.
  */
 public final class StageArgumentSyntax {
 
@@ -216,6 +217,31 @@ public final class StageArgumentSyntax {
         } finally {
             LeadingCommentOffset.end(displaced);
         }
+    }
+
+    /**
+     * The bare stages a parsed text holds, in the order written.
+     *
+     * @param root the parsed text, or any part of it
+     * @return its stages
+     */
+    public static List<FrostlakeParser.StageReferenceExprContext> stagesIn(final ParseTree root) {
+        return stages(root);
+    }
+
+    /**
+     * Whether a stage of a parsed text is one the text's syntax refuses as it parses (see {@link #requireSyntax}).
+     *
+     * @param root the parsed text, or any part of it
+     * @return whether a stage breaks its syntax
+     */
+    public static boolean breaksSyntax(final ParseTree root) {
+        for (final FrostlakeParser.StageReferenceExprContext stage : stages(root)) {
+            if (syntaxRefusal(stage, false) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

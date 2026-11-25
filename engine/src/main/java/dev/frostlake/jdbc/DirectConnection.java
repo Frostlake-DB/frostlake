@@ -18,6 +18,8 @@ package dev.frostlake.jdbc;
 
 import dev.frostlake.DatabaseEngine;
 import dev.frostlake.ExecutionResult;
+import dev.frostlake.executor.RequestQueryCancels;
+import dev.frostlake.executor.RequestSessionAborts;
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.security.AbortableSession;
@@ -223,6 +225,23 @@ public class DirectConnection extends AbstractFrostlakeConnection
         // (variable scopes, handler stacks) is not safe under concurrent execution, and direct
         // connections can be driven from many threads (the test harness's pooled bulk checks).
         // The HTTP front-end serializes through its own lock; direct connections serialize here.
+        if (sessionSettings == null) {
+            return executeOnMonitor(sql);
+        }
+        // An abort of another session and a cancel of a running statement are carried out as the statement is read,
+        // before it waits for the engine: what they name holds the engine while it runs, and ends at its next
+        // checkpoint rather than running on to its end (see RequestSessionAborts and RequestQueryCancels).
+        RequestSessionAborts.carryOut(sql, sessionSettings.getSessionNumber(), engine.getSessionDirectory());
+        final Set<String> canceledBefore = RequestQueryCancels.carryOut(sql);
+        try {
+            return executeOnMonitor(sql);
+        } finally {
+            RequestQueryCancels.end(canceledBefore);
+        }
+    }
+
+    /** {@link #executeScoped}'s statement, run alone on the engine's monitor. */
+    private ExecutionResult executeOnMonitor(final String sql) {
         synchronized (engine) {
             final Thread outer = runningOn;
             runningOn = Thread.currentThread();
@@ -265,7 +284,7 @@ public class DirectConnection extends AbstractFrostlakeConnection
                 // keeps what its earlier statements did — a transaction a BEGIN opened stays open in the
                 // session (live-verified) — so the connection must take it as its own. Left on the thread
                 // uncaptured, it was adopted by whichever connection ran next there, or orphaned.
-                sessionDatabase = catalog.getCurrentDatabase();
+                sessionDatabase = catalog.heldDatabaseName();
                 sessionSchema = catalog.heldSchemaName();
                 sessionWarehouse = catalog.getCurrentWarehouse();
                 sessionAutoCommit = transactions.isAutoCommit();

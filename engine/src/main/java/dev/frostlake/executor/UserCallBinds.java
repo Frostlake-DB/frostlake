@@ -20,13 +20,17 @@ import dev.frostlake.executor.expressions.AstPrinterVisitor;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.functions.FunctionRegistry;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.types.ArrayType;
+import dev.frostlake.types.BinaryType;
 import dev.frostlake.types.BooleanType;
 import dev.frostlake.types.DataType;
 import dev.frostlake.types.DateTimeType;
 import dev.frostlake.types.NumericType;
+import dev.frostlake.types.ObjectType;
 import dev.frostlake.types.StringType;
+import dev.frostlake.types.VariantType;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -37,24 +41,40 @@ import org.antlr.v4.runtime.tree.ParseTree;
  * How the refusal of a miscounted call of a user's function writes the block variables the call reads: the call
  * compiles as a query, which reads each variable as a bind named by the variable and a number the block's compilation
  * drew for it, converted to the variable's type - {@code TO_NUMBER(:X_9)}, a text bare as {@code :S_9},
- * {@code CAST(:X_9 AS FLOAT)}, {@code CAST(:X_9 AS BOOLEAN)}, {@code CAST(:X_11 AS DATE)} (live-verified). The numbers
- * count up from 3: two for every literal the block writes, anywhere in it, then, declaration by declaration in the
- * block's order, what the variable's initial value computes - one for a name it reads or a sign, two for a call or a
- * cast, three for an operator between two values - and four for the variable itself, whose bind takes the first; an
- * assignment's value computes alike and takes none. A variable declared without a value and assigned one later reads
- * one lower on the account, which this does not follow (live-verified over 41 blocks).
+ * {@code CAST(:X_9 AS FLOAT)}, {@code CAST(:X_9 AS BOOLEAN)}, {@code CAST(:X_11 AS DATE)},
+ * {@code CAST(:X_7 AS TIME(9))} and each timestamp so with its precision, {@code PARSE_JSON(:X_7)} for a VARIANT,
+ * {@code CAST(PARSE_JSON(:X_7) AS ARRAY)} and the same AS OBJECT, {@code CAST(:X_7 AS BINARY(10))} (BINARY(67108864)
+ * for a binary of the default width), a FOR counter as {@code TO_NUMBER(:I_15, 9, 0)} (live-verified). The numbers
+ * start past two for every literal of the request that holds the block - two plus two for each literal the block
+ * writes, anywhere in it, a NULL statement among them - and a block that a dynamic text holds starts from the text's
+ * own start, four, or five where a block runs the text; from there the block's statements draw them in its order (see
+ * BlockBindNumbers). A procedure's body starts where its CALL sets it (see ProcedureBindStart).
  */
 final class UserCallBinds {
 
     private static final String CALL_OPENS = "function [";
-    private static final int FIRST_NUMBER = 3;
+    private static final int REQUEST_START = 2;
+    private static final int TEXT_START = 4;
+    private static final int TEXT_IN_A_BLOCK_START = 5;
     private static final int PER_LITERAL = 2;
-    private static final int PER_VARIABLE = 4;
-    private static final int PER_NAME = 1;
-    private static final int PER_SIGN = 1;
-    private static final int PER_CALL = 2;
-    private static final int PER_OPERATOR = 3;
     private static final int WHOLE_PRECISION = 38;
+
+    /** The procedure bodies running on this thread, each with the names of its procedure's parameters. */
+    private static final ThreadLocal<Map<ParseTree, List<String>>> BODIES =
+        new ThreadLocal<Map<ParseTree, List<String>>>() {
+            @Override
+            protected Map<ParseTree, List<String>> initialValue() {
+                return new IdentityHashMap<>();
+            }
+        };
+
+    /** The dynamic texts running on this thread, each with the number its blocks start from. */
+    private static final ThreadLocal<Map<ParseTree, Integer>> TEXTS = new ThreadLocal<Map<ParseTree, Integer>>() {
+        @Override
+        protected Map<ParseTree, Integer> initialValue() {
+            return new IdentityHashMap<>();
+        }
+    };
 
     private UserCallBinds() {
     }
@@ -90,7 +110,7 @@ final class UserCallBinds {
         if (block == null) {
             return null;
         }
-        final Map<String, Integer> numbers = numbers(block);
+        final Map<String, Integer> numbers = numbers(block, functions);
         final StringBuilder call = new StringBuilder(message.substring(start, closes));
         int from = 0;
         for (final String name : variablesRead(expression)) {
@@ -136,6 +156,23 @@ final class UserCallBinds {
         if (type instanceof DateTimeType && "DATE".equals(type.getName())) {
             return "CAST(" + read + " AS DATE)";
         }
+        if (type instanceof DateTimeType && (type.getName().startsWith("TIME"))) {
+            return "CAST(" + read + " AS " + type.getName() + "(" + ((DateTimeType) type).getPrecision() + "))";
+        }
+        if (type.getClass() == VariantType.class) {
+            return "PARSE_JSON(" + read + ")";
+        }
+        if (type.getClass() == ArrayType.class) {
+            return "CAST(PARSE_JSON(" + read + ") AS ARRAY)";
+        }
+        if (type.getClass() == ObjectType.class) {
+            return "CAST(PARSE_JSON(" + read + ") AS OBJECT)";
+        }
+        if (type instanceof BinaryType) {
+            final int width = ((BinaryType) type).getMaxLength();
+            return "CAST(" + read + " AS BINARY(" + (width == BinaryType.DEFAULT_WIDTH ? BinaryType.NOMINAL_MAXIMUM
+                : width) + "))";
+        }
         return null;
     }
 
@@ -150,16 +187,71 @@ final class UserCallBinds {
         return found;
     }
 
-    /** The numbers the block's compilation draws for its variables, by upper-cased name: the first declaration's. */
-    private static Map<String, Integer> numbers(final FrostlakeParser.BeginEndBlockContext block) {
-        final Map<String, Integer> numbers = new HashMap<>();
-        final int[] counter = {FIRST_NUMBER + PER_LITERAL * literals(block)};
-        declare(block, numbers, counter);
-        return numbers;
+    /**
+     * A dynamic text starts running its statement: a block in it draws its numbers from the text's own start, which
+     * the request's literals do not move.
+     *
+     * @param text     the text as parsed
+     * @param inABlock whether a block runs the text
+     */
+    static void textRuns(final ParseTree text, final boolean inABlock) {
+        TEXTS.get().put(text, Integer.valueOf(inABlock ? TEXT_IN_A_BLOCK_START : TEXT_START));
     }
 
+    /**
+     * A procedure's body starts running: a block in it draws its numbers from {@code start}, which the CALL's
+     * arguments set (see ProcedureBindStart), and its parameters take theirs after the body's.
+     *
+     * @param body       the body as parsed
+     * @param start      the number its blocks start from
+     * @param parameters the names of the procedure's parameters, in their order
+     */
+    static void bodyRuns(final ParseTree body, final int start, final List<String> parameters) {
+        TEXTS.get().put(body, Integer.valueOf(start));
+        BODIES.get().put(body, parameters);
+    }
+
+    /**
+     * Whether the statement is a dynamic text's own statement, run as the text.
+     *
+     * @param statement the statement as parsed
+     * @return whether a text holds it
+     */
+    static boolean runsAsAText(final ParseTree statement) {
+        ParseTree root = statement;
+        while (root.getParent() != null) {
+            root = root.getParent();
+        }
+        return TEXTS.get().containsKey(root) && !BODIES.get().containsKey(root);
+    }
+
+    /**
+     * The dynamic text {@link #textRuns} named, or the body {@link #bodyRuns} named, has run.
+     *
+     * @param text the text as parsed
+     */
+    static void textRan(final ParseTree text) {
+        TEXTS.get().remove(text);
+        BODIES.get().remove(text);
+    }
+
+    /** The numbers the block's compilation draws for its variables, by upper-cased name: the first declaration's. */
+    private static Map<String, Integer> numbers(final FrostlakeParser.BeginEndBlockContext block,
+                                                final FunctionRegistry functions) {
+        ParseTree root = block;
+        while (root.getParent() != null) {
+            root = root.getParent();
+        }
+        final Integer textStart = TEXTS.get().get(root);
+        final List<String> parameters = BODIES.get().get(root);
+        return BlockBindNumbers.of(block, textStart != null ? textStart.intValue()
+            : REQUEST_START + PER_LITERAL * literals(block),
+            parameters != null ? parameters : new ArrayList<String>(), functions);
+    }
+
+    /** The literals the block writes, a NULL statement among them. */
     private static int literals(final ParseTree node) {
-        if (node instanceof FrostlakeParser.LiteralExprContext) {
+        if (node instanceof FrostlakeParser.LiteralExprContext || node instanceof FrostlakeParser.NullStatementContext) {
             return 1;
         }
         int count = 0;
@@ -167,83 +259,6 @@ final class UserCallBinds {
             count += literals(node.getChild(i));
         }
         return count;
-    }
-
-    /** Walks the block in its order, drawing each declaration's value and variable and each assignment's value. */
-    private static void declare(final ParseTree node, final Map<String, Integer> numbers, final int[] counter) {
-        if (node instanceof FrostlakeParser.DeclarationItemContext) {
-            final FrostlakeParser.DeclarationItemContext item = (FrostlakeParser.DeclarationItemContext) node;
-            if (item.dataTypeName() != null) {
-                variable(item.identifier().getText(), item.booleanExpr(), numbers, counter);
-            }
-            return;
-        }
-        if (node instanceof FrostlakeParser.UntypedDeclarationItemContext) {
-            final FrostlakeParser.UntypedDeclarationItemContext item =
-                (FrostlakeParser.UntypedDeclarationItemContext) node;
-            if (item.booleanExpr() != null) {
-                variable(item.identifier().getText(), item.booleanExpr(), numbers, counter);
-            }
-            return;
-        }
-        if (node instanceof FrostlakeParser.LetStatementContext) {
-            final FrostlakeParser.LetStatementContext let = (FrostlakeParser.LetStatementContext) node;
-            if (let.CURSOR() == null && let.RESULTSET() == null) {
-                variable(let.variableName().getText(), let.booleanExpr(), numbers, counter);
-            }
-            return;
-        }
-        if (node instanceof FrostlakeParser.AssignmentStatementContext) {
-            final FrostlakeParser.AssignmentStatementContext assignment =
-                (FrostlakeParser.AssignmentStatementContext) node;
-            if (assignment.booleanExpr() != null) {
-                counter[0] += computed(assignment.booleanExpr());
-            }
-            return;
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            declare(node.getChild(i), numbers, counter);
-        }
-    }
-
-    private static void variable(final String written, final ParseTree value, final Map<String, Integer> numbers,
-                                 final int[] counter) {
-        if (value != null) {
-            counter[0] += computed(value);
-        }
-        final String name = SqlIdentifiers.canonicalText(written).toUpperCase(Locale.ROOT);
-        if (!numbers.containsKey(name)) {
-            numbers.put(name, Integer.valueOf(counter[0]));
-        }
-        counter[0] += PER_VARIABLE;
-    }
-
-    /** What a value computes beyond its literals: names and signs, calls and casts, operators. */
-    private static int computed(final ParseTree node) {
-        int cost = 0;
-        if (node instanceof FrostlakeParser.QualifiedNameExprContext
-                || node instanceof FrostlakeParser.BindVarExprContext) {
-            cost += PER_NAME;
-        } else if (node instanceof FrostlakeParser.UnaryExprContext
-                || node instanceof FrostlakeParser.NotExprContext) {
-            cost += PER_SIGN;
-        } else if (node instanceof FrostlakeParser.FunctionCallExprContext
-                || node instanceof FrostlakeParser.FunctionCallNamedArgsExprContext
-                || node instanceof FrostlakeParser.FunctionCallMixedArgsExprContext
-                || node instanceof FrostlakeParser.CastExprContext
-                || node instanceof FrostlakeParser.CastExpr2Context) {
-            cost += PER_CALL;
-        } else if (node instanceof FrostlakeParser.AdditiveExprContext
-                || node instanceof FrostlakeParser.MultiplicativeExprContext
-                || node instanceof FrostlakeParser.ComparisonExprContext
-                || node instanceof FrostlakeParser.AndExprContext
-                || node instanceof FrostlakeParser.OrExprContext) {
-            cost += PER_OPERATOR;
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            cost += computed(node.getChild(i));
-        }
-        return cost;
     }
 
     /** The names an expression reads as variables, by name or as a bind, in the order written. */

@@ -91,7 +91,19 @@ final class ConstantRootFold {
         BinaryOperator.ADD, BinaryOperator.SUBTRACT, BinaryOperator.MULTIPLY, BinaryOperator.DIVIDE,
         BinaryOperator.MODULO));
 
+    /** The comparisons a text beside a block's variable is read as a number written out in. */
+    private static final Set<BinaryOperator> COMPARISONS = new HashSet<>(Arrays.asList(
+        BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL, BinaryOperator.LESS_THAN, BinaryOperator.LESS_THAN_OR_EQUAL,
+        BinaryOperator.GREATER_THAN, BinaryOperator.GREATER_THAN_OR_EQUAL));
+
+    /** The calls over numbers written out the plan folds to their value beside a block's variable. */
+    private static final Set<String> WRITTEN_FOLDING_CALLS = new HashSet<>(Arrays.asList(
+        "ABS", "FLOOR", "MOD", "GREATEST"));
+
     private static final int MAX_PRECISION = 38;
+
+    /** The digits a text term beside a block's variable reads with at the least. */
+    private static final int TEXT_TERM_DIGITS = 18;
 
     /** How many whole digits a term raised to another's scale keeps at least. */
     private static final int TERM_WHOLE_DIGITS = 2;
@@ -256,6 +268,10 @@ final class ConstantRootFold {
             kept.add(new WhenClause(condition, result));
         }
         final Expression otherwise = chosen.getElseExpression() == null ? null : folded(chosen.getElseExpression());
+        final Expression picked = pickedBesideBinding(kept, otherwise);
+        if (picked != null) {
+            return picked;
+        }
         if (kept.isEmpty()) {
             return otherwise != null ? otherwise : new LiteralExpression(null, LiteralType.NULL);
         }
@@ -376,6 +392,12 @@ final class ConstantRootFold {
             changed = changed || one != argument;
             folded.add(one);
         }
+        if (name.equals("IFF") && folded.size() == 3) {
+            final Expression chosen = chosenBesideBinding(folded.get(0), folded.subList(1, 3));
+            if (chosen != null) {
+                return chosen;
+            }
+        }
         final boolean number = NUMBER_CONVERSIONS.contains(name) && widthOnly(args);
         final boolean approximate = FLOAT_CONVERSIONS.contains(name) && args.size() == 1;
         if (number || approximate) {
@@ -418,6 +440,11 @@ final class ConstantRootFold {
             "COALESCE", new ArrayList<Expression>(values.subList(1, values.size()))));
         if (isUntypedNull(head)) {
             return keptAs(rest, type);
+        }
+        if (head instanceof FoldedConstantExpression && ((FoldedConstantExpression) head).isBlockBinding()
+                && ((FoldedConstantExpression) head).getValue() != null) {
+            // A block's variable holding a value is the answer itself, typed as the variable is (live-verified).
+            return head;
         }
         if (isUntypedNull(rest) && head instanceof LiteralExpression) {
             return keptAs(new NullableConstantExpression(head), type);
@@ -500,6 +527,11 @@ final class ConstantRootFold {
         }
         Expression left = folded(binary.getLeft());
         Expression right = folded(binary.getRight());
+        if (BlockConstantTyping.holdsBinding(right) && !BlockConstantTyping.holdsBinding(left)) {
+            left = besideBinding(operator, binary.getLeft(), left);
+        } else if (BlockConstantTyping.holdsBinding(left) && !BlockConstantTyping.holdsBinding(right)) {
+            right = besideBinding(operator, binary.getRight(), right);
+        }
         if (TEXT_READING_OPERATORS.contains(operator)) {
             final String leftText = textConstant(binary.getLeft(), left);
             final String rightText = textConstant(binary.getRight(), right);
@@ -532,7 +564,13 @@ final class ConstantRootFold {
         }
         // A conditional over texts and a NULL is converted where it stands, and its product by one is not folded
         // (see PlanTextNumber#settlesOverNull).
-        if (operator == BinaryOperator.MULTIPLY && !PlanTextNumber.settlesOverNull(binary.getLeft())
+        // A text factor beside a block's variable is not folded away either (see BlockConstantTyping).
+        final boolean textBesideBinding = TEXT_READING_OPERATORS.contains(operator)
+            && (textConstant(binary.getLeft(), binary.getLeft()) != null && BlockConstantTyping.holdsBinding(right)
+                || textConstant(binary.getRight(), binary.getRight()) != null
+                    && BlockConstantTyping.holdsBinding(left));
+        if (operator == BinaryOperator.MULTIPLY && !textBesideBinding
+                && !PlanTextNumber.settlesOverNull(binary.getLeft())
                 && !PlanTextNumber.settlesOverNull(binary.getRight())) {
             final Expression product = foldedProduct(left, right);
             if (product != null) {
@@ -635,7 +673,16 @@ final class ConstantRootFold {
                 && ((NumericType) own).getScale() == type.getScale()) {
             return factor;
         }
-        return new CastExpression(factor, "NUMBER(" + type.getPrecision() + "," + type.getScale() + ")");
+        final String target = "NUMBER(" + type.getPrecision() + "," + type.getScale() + ")";
+        if (isExactNumber(own) && BlockConstantTyping.holdsBinding(factor)
+                && !BlockConstantTyping.sameStorage(((NumericType) own).getPrecision(), type.getPrecision())) {
+            // A block's variable keeps its own type where the product is stored at another width:
+            // CAST(CAST(2 AS NUMBER(9,2)) AS NUMBER(10,2)) for n * 1 over a NUMBER(9,2).
+            final NumericType kept = (NumericType) own;
+            return new CastExpression(new PlannedCastExpression(factor,
+                "NUMBER(" + kept.getPrecision() + "," + kept.getScale() + ")"), target);
+        }
+        return new CastExpression(factor, target);
     }
 
     /**
@@ -674,6 +721,14 @@ final class ConstantRootFold {
         final DataType otherType = visitor.inferStaticType(other);
         final int otherScale = otherType instanceof NumericType ? Math.max(0, ((NumericType) otherType).getScale()) : 0;
         final int scale = Math.max(own.getScale(), otherScale);
+        if (otherType instanceof NumericType && BlockConstantTyping.holdsBinding(other)) {
+            // Beside a block's variable the text reads at the variable's whole digits, eighteen digits at the least.
+            final NumericType term = (NumericType) otherType;
+            // A term of a smaller scale is raised from the text's own spelled width, not from that reading.
+            return new FoldedConstantExpression(spelled, new NumericType("NUMBER", Math.min(MAX_PRECISION,
+                Math.max(TEXT_TERM_DIGITS, term.getPrecision() - term.getScale() + scale)), scale))
+                .withSpelledType(own);
+        }
         return new FoldedConstantExpression(spelled, new NumericType("NUMBER",
             Math.min(MAX_PRECISION, own.getPrecision() + scale - own.getScale()), scale));
     }
@@ -728,6 +783,153 @@ final class ConstantRootFold {
         }
         final BigDecimal exact = value instanceof BigDecimal ? (BigDecimal) value : DecimalText.parse(value.toString());
         return new FoldedConstantExpression(exact, target);
+    }
+
+    /**
+     * An operand beside a block's variable, as the plan types it there (live-verified): arithmetic over numbers
+     * written out - {@code +}, {@code -}, {@code *}, {@code %}, a quotient that comes out exact, a minus, ABS,
+     * FLOOR, MOD and GREATEST - is folded to its value, printed as a number written out at the arithmetic's type
+     * ({@code (1 + 2) + n} is {@code 3 + …}, {@code (6 / 3) + n} the {@code 2} of a NUMBER(7,6)), and a text
+     * compared with the variable reads as the number it spells, written out too ({@code n > '1.5'} is
+     * {@code 2 > 1.5}), at its own width, or at a text value's where a blank is about it. Any other operand stays
+     * as folded.
+     */
+    private Expression besideBinding(final BinaryOperator operator, final Expression written,
+                                     final Expression folded) {
+        final boolean comparison = COMPARISONS.contains(operator);
+        if (!comparison && !TEXT_READING_OPERATORS.contains(operator)) {
+            return folded;
+        }
+        final String text = comparison ? textOf(written) : null;
+        if (text != null) {
+            final BigDecimal spelled = PlanTextNumber.spelled(text);
+            if (spelled == null) {
+                // A text with a blank about it reads at the width a text value does: n > ' 1 ' is
+                // (CAST(2 AS NUMBER(18,5))) > 1.
+                final BigDecimal read = PlanTextNumber.value(text);
+                return read == null ? folded
+                    : new FoldedConstantExpression(read, PlanTextNumber.type(text)).markWritten();
+            }
+            final BigDecimal number = spelled.scale() < 0 ? spelled.setScale(0) : spelled;
+            return new FoldedConstantExpression(number, NumericLiteralTypes.forDecimal(number)).markWritten();
+        }
+        // What a conditional picked is judged as it stands: IFF(FALSE, n, 1 + 2) + n is 3 + ….
+        final Expression arithmetic = foldsToWritten(written) ? written : foldsToWritten(folded) ? folded : null;
+        if (arithmetic == null) {
+            return folded;
+        }
+        final DataType type = visitor.inferStaticType(arithmetic);
+        final Object value = evaluated(arithmetic);
+        if (!isExactNumber(type) || !(value instanceof Number)) {
+            return folded;
+        }
+        return new FoldedConstantExpression(DecimalText.parse(value.toString()), type).markWritten();
+    }
+
+    /** Whether an operand is arithmetic over numbers written out that the plan folds beside a block's variable. */
+    private boolean foldsToWritten(final Expression expr) {
+        if (expr instanceof BinaryOperationExpression) {
+            final BinaryOperationExpression binary = (BinaryOperationExpression) expr;
+            if (!TEXT_READING_OPERATORS.contains(binary.getOperator()) || !overNumbers(binary.getLeft())
+                    || !overNumbers(binary.getRight())) {
+                return false;
+            }
+            if (binary.getOperator() != BinaryOperator.DIVIDE) {
+                return true;
+            }
+            final Object dividend = evaluated(binary.getLeft());
+            final Object divisor = evaluated(binary.getRight());
+            if (!(dividend instanceof Number) || !(divisor instanceof Number)) {
+                return false;
+            }
+            final BigDecimal by = DecimalText.parse(divisor.toString());
+            return by.signum() != 0 && DecimalText.parse(dividend.toString()).remainder(by).signum() == 0;
+        }
+        if (expr instanceof UnaryOperationExpression) {
+            final UnaryOperationExpression unary = (UnaryOperationExpression) expr;
+            return unary.getOperator() == UnaryOperator.NEGATE && negatedNumber(unary) == null
+                && overNumbers(unary.getOperand());
+        }
+        if (expr instanceof FunctionCallExpression) {
+            final FunctionCallExpression call = (FunctionCallExpression) expr;
+            if (call.getFunctionName() == null || call.getNameExpression() != null || call.isStar()
+                    || call.getArguments().isEmpty()
+                    || !WRITTEN_FOLDING_CALLS.contains(call.getFunctionName().toUpperCase(Locale.ROOT))) {
+                return false;
+            }
+            for (final Expression argument : call.getArguments()) {
+                if (!overNumbers(argument)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** A number written out, a minus before one, or arithmetic over them {@link #foldsToWritten} folds. */
+    private boolean overNumbers(final Expression expr) {
+        if (expr instanceof UnaryOperationExpression && negatedNumber((UnaryOperationExpression) expr) != null) {
+            return true;
+        }
+        if (expr instanceof LiteralExpression) {
+            final LiteralType type = ((LiteralExpression) expr).getType();
+            return !(expr instanceof FoldedConstantExpression)
+                && (type == LiteralType.INTEGER || type == LiteralType.DECIMAL);
+        }
+        return foldsToWritten(expr);
+    }
+
+    /**
+     * The branch an IFF over a block's variable picks where its condition is a constant reading no variable -
+     * {@code IFF(TRUE, n, 0)} is the variable itself, {@code IFF(NULL, 0, n)} too - or null where it is kept
+     * (live-verified).
+     */
+    private Expression chosenBesideBinding(final Expression condition, final List<Expression> branches) {
+        if (!BlockConstantTyping.holdsBinding(branches.get(0)) && !BlockConstantTyping.holdsBinding(branches.get(1))
+                || BlockConstantTyping.holdsBinding(condition)
+                || !literalLeaves(condition, visitor.getFunctionRegistry())) {
+            return null;
+        }
+        final Object met = evaluated(condition);
+        if (met == FAILED || met != null && !(met instanceof Boolean)) {
+            return null;
+        }
+        return Boolean.TRUE.equals(met) ? branches.get(0) : branches.get(1);
+    }
+
+    /**
+     * The result a CASE of conditions with an ELSE over a block's variable picks where each condition up to it is a
+     * constant reading no variable - the first one met, or the ELSE where none is - as an IFF's is; null where it
+     * is kept (live-verified).
+     */
+    private Expression pickedBesideBinding(final List<WhenClause> whens, final Expression otherwise) {
+        if (otherwise == null) {
+            // A CASE with no ELSE is kept, the branch it would pick among the others.
+            return null;
+        }
+        boolean binding = BlockConstantTyping.holdsBinding(otherwise);
+        for (final WhenClause when : whens) {
+            binding = binding || BlockConstantTyping.holdsBinding(when.getResult());
+        }
+        if (!binding) {
+            return null;
+        }
+        for (final WhenClause when : whens) {
+            final Expression condition = when.getCondition();
+            if (BlockConstantTyping.holdsBinding(condition)
+                    || !literalLeaves(condition, visitor.getFunctionRegistry())) {
+                return null;
+            }
+            final Object met = evaluated(condition);
+            if (met == FAILED || met != null && !(met instanceof Boolean)) {
+                return null;
+            }
+            if (Boolean.TRUE.equals(met)) {
+                return when.getResult();
+            }
+        }
+        return otherwise;
     }
 
     private Object evaluated(final Expression expr) {

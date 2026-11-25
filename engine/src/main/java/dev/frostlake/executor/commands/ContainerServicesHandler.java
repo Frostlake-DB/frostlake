@@ -230,11 +230,15 @@ public final class ContainerServicesHandler {
     // ---- image repositories -------------------------------------------------------------------------------
 
     private ImageRepository imageRepository(final FrostlakeParser.QualifiedNameContext name, final boolean require) {
-        final Schema schema = schemaOf(name);
-        final ImageRepository repository = schema.getContainerObjects().getImageRepository(last(name));
+        return imageRepository(parts(name), require);
+    }
+
+    private ImageRepository imageRepository(final String[] parts, final boolean require) {
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        final String name = parts[parts.length - 1];
+        final ImageRepository repository = schema.getContainerObjects().getImageRepository(name);
         if (repository == null && require) {
-            throw new RuntimeException(SqlCompilationError.doesNotExist("Image repository",
-                fullName(schema, last(name))));
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Image repository", fullName(schema, name)));
         }
         return repository;
     }
@@ -286,8 +290,7 @@ public final class ContainerServicesHandler {
      * @param comment  the comment
      * @param ifExists whether IF EXISTS forgives a missing repository
      */
-    public void commentImageRepository(final FrostlakeParser.QualifiedNameContext name, final String comment,
-                                       final boolean ifExists) {
+    public void commentImageRepository(final String[] name, final String comment, final boolean ifExists) {
         final ImageRepository repository = imageRepository(name, !ifExists);
         if (repository != null) {
             repository.setComment(comment);
@@ -302,8 +305,7 @@ public final class ContainerServicesHandler {
      * @param comment  the comment
      * @param ifExists whether IF EXISTS forgives a missing service
      */
-    public void commentService(final FrostlakeParser.QualifiedNameContext name, final String comment,
-                               final boolean ifExists) {
+    public void commentService(final String[] name, final String comment, final boolean ifExists) {
         final ContainerService service = service(name, !ifExists);
         if (service != null) {
             service.setComment(comment);
@@ -400,10 +402,15 @@ public final class ContainerServicesHandler {
     // ---- services -----------------------------------------------------------------------------------------
 
     private ContainerService service(final FrostlakeParser.QualifiedNameContext name, final boolean require) {
-        final Schema schema = schemaOf(name);
-        final ContainerService service = schema.getContainerObjects().getService(last(name));
+        return service(parts(name), require);
+    }
+
+    private ContainerService service(final String[] parts, final boolean require) {
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
+        final String name = parts[parts.length - 1];
+        final ContainerService service = schema.getContainerObjects().getService(name);
         if (service == null && require) {
-            throw new RuntimeException(SqlCompilationError.doesNotExist("Service", fullName(schema, last(name))));
+            throw new RuntimeException(SqlCompilationError.doesNotExist("Service", fullName(schema, name)));
         }
         return service;
     }

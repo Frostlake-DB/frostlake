@@ -21,8 +21,11 @@ import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlStringLiterals;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.parser.SqlSyntaxException;
+import dev.frostlake.parser.TagActionLines;
 
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -75,7 +78,11 @@ final class AlteredViewProperties {
     static void judgeSet(final List<FrostlakeParser.ViewSetItemContext> items, final boolean materialized,
                          final String name, final String sql) {
         for (final FrostlakeParser.ViewSetItemContext item : items) {
-            if (item.copyOptionValue() == null && item.NULL() == null) {
+            if (!hasValue(item)) {
+                final Token tagFault = materialized ? null : tagListFault(items);
+                if (tagFault != null) {
+                    throw syntaxError(tagFault, sql);
+                }
                 final boolean secureFirst = !hasValue(items.get(0)) && items.size() > 1
                     && "SECURE".equalsIgnoreCase(items.get(0).propertyName().getText());
                 throw syntaxError(items.get(secureFirst ? 1 : 0).getStart(), sql);
@@ -93,6 +100,10 @@ final class AlteredViewProperties {
         for (final Integer i : order) {
             final String key = ParameterRegistry.canonical(names.get(i));
             final FrostlakeParser.CopyOptionValueContext value = items.get(i).copyOptionValue();
+            if (items.get(i).parenOptionList() != null || items.get(i).constantList() != null) {
+                judgeList(key, items.get(i));
+                continue;
+            }
             if (value == null) {
                 // NULL: a view's change tracking takes no NULL, in a sentence of its own (live-verified).
                 if (CHANGE_TRACKING.equals(key)) {
@@ -109,6 +120,32 @@ final class AlteredViewProperties {
             }
         }
         rejectParameters(names, order, materialized, name);
+    }
+
+    /**
+     * A list given a view's own property, judged as a table's is (live-verified): the comment takes a list of
+     * properties and holds the parser's word for it, and refuses a list of constants by its first element that is no
+     * text; change tracking refuses a list of properties as {@code invalid value [TOK_PROPERTY_LIST]} and an empty
+     * list or a list of constants as an invalid value specified.
+     */
+    private static void judgeList(final String key, final FrostlakeParser.ViewSetItemContext item) {
+        final FrostlakeParser.ParenOptionListContext list = item.parenOptionList();
+        final boolean empty = list != null && list.parenOption().isEmpty();
+        if (CHANGE_TRACKING.equals(key)) {
+            if (list == null || empty) {
+                throw new RuntimeException("Invalid value specified for property '" + CHANGE_TRACKING + "'");
+            }
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.PROPERTY_LIST, key));
+        }
+        if (COMMENT.equals(key)) {
+            if (list == null) {
+                throw CreatedObjectProperties.listedTextValue(COMMENT, item.constantList().propertyListConstant());
+            }
+            if (empty) {
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(ListValues.CONSTANT_LIST,
+                    key));
+            }
+        }
     }
 
     /**
@@ -129,6 +166,9 @@ final class AlteredViewProperties {
      */
     static String commentOf(final List<FrostlakeParser.ViewSetItemContext> items) {
         final FrostlakeParser.ViewSetItemContext item = lastItem(items, COMMENT);
+        if (item != null && item.parenOptionList() != null) {
+            return ListValues.PROPERTY_LIST;
+        }
         if (item == null || item.copyOptionValue() == null) {
             return null;
         }
@@ -179,7 +219,8 @@ final class AlteredViewProperties {
 
     /** Whether an item carries a value, NULL included. */
     private static boolean hasValue(final FrostlakeParser.ViewSetItemContext item) {
-        return item.copyOptionValue() != null || item.NULL() != null;
+        return item.copyOptionValue() != null || item.NULL() != null || item.parenOptionList() != null
+            || item.constantList() != null;
     }
 
     /**
@@ -303,6 +344,34 @@ final class AlteredViewProperties {
             }
         }
         return false;
+    }
+
+    /**
+     * Where a view's SET TAG that reads as properties is refused: a SET whose first item is the bare word TAG reads
+     * as a tag list (see {@link TagActionLines}), or null when that reading leaves it alone.
+     */
+    private static Token tagListFault(final List<FrostlakeParser.ViewSetItemContext> items) {
+        final FrostlakeParser.ViewSetItemContext first = items.get(0);
+        if (items.size() < 2 || hasValue(first) || !"TAG".equalsIgnoreCase(first.propertyName().getText())) {
+            return null;
+        }
+        final List<Token> written = new ArrayList<Token>();
+        collectTokens(first.getParent(), written);
+        final int tag = written.indexOf(first.getStart());
+        return tag < 0 ? null : TagActionLines.viewListFault(written.subList(tag, written.size()));
+    }
+
+    private static void collectTokens(final ParseTree node, final List<Token> into) {
+        if (node instanceof TerminalNode) {
+            final Token token = ((TerminalNode) node).getSymbol();
+            if (token.getType() != Token.EOF) {
+                into.add(token);
+            }
+            return;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            collectTokens(node.getChild(i), into);
+        }
     }
 
     /** The syntax error at a token, the one line the account gives. */

@@ -19,6 +19,7 @@ package dev.frostlake.functions.scalar.datetime;
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 import dev.frostlake.types.DateTimeType;
 
 import java.time.LocalDate;
@@ -57,7 +58,7 @@ public class AddMonths extends BuiltInFunction {
         }
         if (input instanceof ZonedDateTime) {
             final ZonedDateTime written = (ZonedDateTime) input;
-            return shiftMonths(written.toLocalDateTime(), months).atZone(written.getOffset());
+            return WideOffsetZone.atOffsetOf(shiftMonths(WideOffsetZone.wallClock(written), months), written);
         }
         if (input instanceof OffsetDateTime) {
             final ZoneId zone = SessionZone.current();

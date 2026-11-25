@@ -50,4 +50,16 @@ public interface DefinitionOwnership {
     default String missedContainer(final String databaseName, final String schemaName) {
         return null;
     }
+
+    /**
+     * Whether the session sees a database role: it holds the role, through a role it acts with, or sees it as
+     * {@link #sees} sees an object.
+     *
+     * @param qualifiedName the role's name with its database's
+     * @param owner         the role that owns it, or null when none is recorded
+     * @return whether the session sees the database role
+     */
+    default boolean seesDatabaseRole(final String qualifiedName, final String owner) {
+        return sees("DATABASE_ROLE", qualifiedName, owner);
+    }
 }

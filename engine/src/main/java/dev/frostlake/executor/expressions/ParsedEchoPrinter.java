@@ -220,6 +220,10 @@ public final class ParsedEchoPrinter extends AstPrinterVisitor {
 
     @Override
     public String visitColumnReference(final ColumnReferenceExpression expr) {
+        final String own = spelled == null ? null : spelled.spellColumn(expr, this);
+        if (own != null) {
+            return own;
+        }
         final StarArgument star = expr.getStarArgument();
         if (star != null && star.getExcludes().isEmpty() && star.getIlike() == null) {
             // A star among a call's arguments prints as written: NOSUCH(*, …), NOSUCH(RC_T.*, …) (live-verified).

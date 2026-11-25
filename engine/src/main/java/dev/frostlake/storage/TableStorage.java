@@ -24,7 +24,12 @@ import dev.frostlake.metastore.model.TableStructure;
 import dev.frostlake.metastore.model.UniqueConstraint;
 import dev.frostlake.types.DataType;
 import dev.frostlake.types.NumericType;
+import dev.frostlake.types.VariantType;
 import dev.frostlake.values.ExactValues;
+import dev.frostlake.values.FloatOriginNode;
+import dev.frostlake.values.ScaledDecimalNode;
+import dev.frostlake.values.VariantValue;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -554,7 +559,9 @@ public class TableStorage {
      * The row with every exact-numeric cell in the ONE carrier its column holds — a scale-0 column's
      * Long, a scaled column's BigDecimal at that scale (see {@link ExactValues}). Every write lands here
      * (INSERT, UPDATE, MERGE, CTAS, COPY, a clone), so a value written by any of them is the same class
-     * as one written by any other. The row is copied before a cell is replaced: a caller's row — a
+     * as one written by any other. A VARIANT holding a folded FLOAT drops that origin (see
+     * {@link FloatOriginNode#withoutOrigin}), and a VARIANT column holds a scaled NUMBER's number descaled, 2.5 out
+     * of a NUMBER(10,3), as its cast to VARIANT does. The row is copied before a cell is replaced: a caller's row — a
      * result set's, a snapshot's — is never rewritten under it.
      */
     private Row inDeclaredCarriers(final Row row) {
@@ -562,15 +569,30 @@ public class TableStorage {
         final int count = Math.min(row.size(), metadata.columnCount());
         for (int i = 0; i < count; i++) {
             final Object value = row.getValue(i);
+            final Object stripped = FloatOriginNode.withoutOrigin(value);
+            if (stripped != value) {
+                // A stored double has lost the folded FLOAT's origin: it reads back as any computed one.
+                if (stored == row) {
+                    stored = row.copy();
+                }
+                stored.setValue(i, stripped);
+                continue;
+            }
             if (!(value instanceof Number)) {
                 continue;
             }
             final DataType type = metadata.columnAt(i).getDataType();
-            if (!(type instanceof NumericType) || ExactValues.isCarrier(value, (NumericType) type)
+            final Object carrier;
+            if (type instanceof VariantType) {
+                final VariantValue variant = value instanceof BigDecimal
+                    ? ScaledDecimalNode.variantOf((BigDecimal) value) : null;
+                carrier = variant != null ? variant : value;
+            } else if (!(type instanceof NumericType) || ExactValues.isCarrier(value, (NumericType) type)
                     || NumericType.isApproximate(type)) {
                 continue;
+            } else {
+                carrier = ExactValues.written(value, (NumericType) type);
             }
-            final Object carrier = ExactValues.written(value, (NumericType) type);
             if (carrier != value) {
                 if (stored == row) {
                     stored = row.copy();
@@ -659,6 +681,10 @@ public class TableStorage {
             return value;
         }
         final DataType type = metadata.columnAt(index).getDataType();
+        if (type instanceof VariantType && value instanceof BigDecimal) {
+            final VariantValue variant = ScaledDecimalNode.variantOf((BigDecimal) value);
+            return variant != null ? variant : value;
+        }
         if (!(type instanceof NumericType) || ExactValues.isCarrier(value, (NumericType) type)
                 || NumericType.isApproximate(type)) {
             return value;

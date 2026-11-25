@@ -26,7 +26,8 @@ public enum RelationKind {
     VIEW,
     MATERIALIZED_VIEW,
     DYNAMIC_TABLE,
-    STREAM;
+    STREAM,
+    SEMANTIC_VIEW;
 
     /** The kind as a refusal spells it. */
     public String spelling() {

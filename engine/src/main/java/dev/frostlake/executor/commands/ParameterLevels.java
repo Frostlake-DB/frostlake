@@ -97,15 +97,7 @@ final class ParameterLevels {
                            final String objectName) {
         final List<Integer> order = rejectUnknown(names, taken, kind);
         if (values != null) {
-            for (final Integer i : order) {
-                final WrittenParameterValue value = values.get(i);
-                final String canonical = ParameterRegistry.canonical(names.get(i));
-                if (value != null && (ParameterRegistry.takesNoValue(kind, canonical)
-                        || !value.fits(LeveledParameterSettings.valueTypeOf(canonical)))) {
-                    throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.written(),
-                        canonical));
-                }
-            }
+            rejectValuesOfAnotherKind(names, values, kind, order);
         }
         final boolean commentChange = isCommentChange(names, kind);
         for (final Integer i : order) {
@@ -123,6 +115,33 @@ final class ParameterLevels {
                         + "' at '" + kind + "'"));
                 }
                 throw new RuntimeException(SqlAccessControlError.insufficientPrivileges(privilegeKind, objectName));
+            }
+        }
+    }
+
+    /**
+     * Judges an ALTER's names, then the values it sets them to, as {@link #judgeAlter} does, before the object is
+     * looked up: an unknown name is an invalid property, a value of another kind than its parameter's type is refused
+     * as written (live-verified, of a table).
+     *
+     * @param names  the names as written
+     * @param taken  per name, whether the object takes it
+     * @param values per name, the value written or null
+     * @param kind   the object's kind as an invalid property names it
+     */
+    static void judgeValueKinds(final List<String> names, final List<Boolean> taken,
+                                final List<WrittenParameterValue> values, final String kind) {
+        rejectValuesOfAnotherKind(names, values, kind, rejectUnknown(names, taken, kind));
+    }
+
+    private static void rejectValuesOfAnotherKind(final List<String> names, final List<WrittenParameterValue> values,
+                                                  final String kind, final List<Integer> order) {
+        for (final Integer i : order) {
+            final WrittenParameterValue value = values.get(i);
+            final String canonical = ParameterRegistry.canonical(names.get(i));
+            if (value != null && (ParameterRegistry.takesNoValue(kind, canonical)
+                    || !value.fits(LeveledParameterSettings.valueTypeOf(canonical)))) {
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(value.written(), canonical));
             }
         }
     }
@@ -161,6 +180,26 @@ final class ParameterLevels {
      */
     static void rejectUnknownNames(final List<String> names, final List<Boolean> taken, final String kind) {
         rejectUnknown(names, taken, kind);
+    }
+
+    /**
+     * Refuses an UNSET's first name, in the hashed order, that is neither taken nor a parameter written bare: a
+     * quoted name is no property and no parameter there, {@code ALTER TABLE t UNSET "COMMENT"} naming
+     * {@code '"COMMENT"'} (live-verified).
+     *
+     * @param names the names as written
+     * @param taken per name, whether the object's kind takes it
+     * @param kind  the object's kind as an invalid property names it
+     */
+    static void rejectUnknownUnsetNames(final List<String> names, final List<Boolean> taken, final String kind) {
+        for (final Integer i : CreatedObjectProperties.judgedOrder(names)) {
+            final String name = names.get(i);
+            final boolean parameter = !name.startsWith("\"")
+                && CreatedObjectProperties.isParameter(ParameterRegistry.canonical(name));
+            if (!taken.get(i).booleanValue() && !parameter) {
+                throw ParameterRegistry.invalidProperty(ParameterRegistry.spell(name), kind);
+            }
+        }
     }
 
     /**

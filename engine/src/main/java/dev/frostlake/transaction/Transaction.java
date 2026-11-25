@@ -595,7 +595,28 @@ public class Transaction {
      * @param moved the old storage name of each moved table, mapped to its new one
      */
     void retargetTableLocks(final Map<String, String> moved) {
-        MovedTables.rekey(tableLocks, MovedTables.upperCased(moved));
+        final Map<String, String> upper = MovedTables.upperCased(moved);
+        MovedTables.rekey(tableLocks, upper);
+        MovedTables.rekey(insertLocks, upper);
+    }
+
+    /**
+     * Moves the operations this transaction logged where DML applies at once ({@code transaction.deferredApply=false})
+     * to the tables' new storage names, as its write set's move (see {@link TransactionManager#tablesMoved}): a
+     * ROLLBACK, or a failed statement's rollback, undoes them in the storage they wrote, never in a table that took
+     * the name since.
+     *
+     * @param moved the old storage name of each moved table, mapped to its new one
+     */
+    void retargetLogs(final Map<String, String> moved) {
+        for (final TransactionLog log : logs) {
+            for (final Map.Entry<String, String> entry : moved.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(log.getTableName())) {
+                    log.moveTo(entry.getValue());
+                    break;
+                }
+            }
+        }
     }
 
     /**

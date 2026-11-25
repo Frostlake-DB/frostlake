@@ -510,6 +510,18 @@ public class SystemViews {
         return "NULL".equals(stored) ? null : ShowResultHelpers.renderDefaultExpression(stored);
     }
 
+    /** A string column's CHARACTER_MAXIMUM_LENGTH: a table's own column as declared, any other stopping at the
+     *  widest a column can declare. */
+    private static int characterLength(final int declared, final boolean fromBaseTable) {
+        return fromBaseTable || declared <= SqlTypeNames.DESCRIBED_STRING_MAXIMUM
+            ? declared : (int) SqlTypeNames.DESCRIBED_STRING_MAXIMUM;
+    }
+
+    /** A string column's CHARACTER_OCTET_LENGTH: four bytes a character, stopping at the widest a value can be. */
+    private static int octetLength(final int characters) {
+        return characters >= StringResultWidths.UNBOUNDED / 4 ? StringResultWidths.UNBOUNDED : characters * 4;
+    }
+
     /**
      * One COLUMNS row. {@code fromBaseTable} tells apart the columns of a real table — which carry a
      * DEFAULT, an IDENTITY and a PRIMARY KEY — from a view's, which live reports without any of the
@@ -517,7 +529,7 @@ public class SystemViews {
      */
     private Row columnRow(final Database db, final Schema schema, final String relationName,
                           final TableColumn col, final int position, final boolean fromBaseTable) {
-        final DataType dataType = col.getDataType();
+        final DataType dataType = col.getDefinedType();
         final String typeName = dataType.getName().toUpperCase(Locale.ROOT);
         // An interval reports its fields without their precisions, INTERVAL DAY TO SECOND (live-verified).
         final String canonical = dataType instanceof IntervalDayTimeType
@@ -532,15 +544,16 @@ public class SystemViews {
         // A UUID reports neither length, as a BINARY does not (live-verified).
         // A table's own column keeps the length it was declared with, and the octets stop at the widest a value
         // can be: VARCHAR(134217728) reads 134217728 in both and VARCHAR(16777217) 67108868 octets (live-verified).
-        final Integer charLen = dataType instanceof StringType && !(dataType instanceof UuidType)
-            ? Integer.valueOf(fromBaseTable ? ((StringType) dataType).getMaxLength()
-                : (int) Math.min(((StringType) dataType).getMaxLength(), SqlTypeNames.DESCRIBED_STRING_MAXIMUM))
-            : null;
+        // Both lengths are worked out on a plain int before either is boxed: JDK 17's server compiler, with a
+        // coverage agent's probes in this method, has folded the octet cap away for a table's column when the width
+        // reached it through the boxed character length, so VARCHAR(134217728) read 536870912 octets.
+        final boolean hasLength = dataType instanceof StringType && !(dataType instanceof UuidType);
+        final int characters = hasLength ? characterLength(((StringType) dataType).getMaxLength(), fromBaseTable) : 0;
+        final Integer charLen = hasLength ? Integer.valueOf(characters) : null;
         // A BINARY column reports NEITHER length, declared width or not — live leaves both NULL for a
         // table column, a view column and a CTAS column alike; its size reaches JDBC through SHOW
         // COLUMNS instead (live-verified).
-        final Integer octetLen = charLen == null ? null
-            : Integer.valueOf((int) Math.min(charLen.longValue() * 4, StringResultWidths.UNBOUNDED));
+        final Integer octetLen = hasLength ? Integer.valueOf(octetLength(characters)) : null;
         // Live reports precision/scale only for the exact-numeric family: a FLOAT column
         // leaves both NULL, and every non-numeric type leaves both NULL too.
         Integer numPrec = null;
@@ -861,7 +874,7 @@ public class SystemViews {
                         proc.getCreatedTime(), proc.getLastDdlTime(), proc.getComment(),
                         listOrNull(proc.getEnvironment().getExternalAccessIntegrations()),
                         textOrNull(proc.getEnvironment().secretsText(db.getName(), schema.getName())),
-                        proc.getRuntimeVersion(), listOrNull(proc.getPackages()),
+                        proc.getRuntimeVersion(), packages(proc.getEnvironment(), proc.getPackages()),
                         installedPackages(proc.getLanguage()),
                         artifactRepository(proc.getLanguage(), proc.getEnvironment(), proc.getPackages())
                     ));
@@ -918,7 +931,7 @@ public class SystemViews {
                         YES_NO_FALSE, null, null, null, null, null,
                         null, listOrNull(func.getImports()), func.getHandler(),
                         func.getEnvironment().getTargetPath(),
-                        func.getRuntimeVersion(), listOrNull(func.getEnvironment().getPackages()),
+                        func.getRuntimeVersion(), packages(func.getEnvironment(), func.getEnvironment().getPackages()),
                         installedPackages(func.getLanguage()),
                         yesNo(func.isMemoizable()),
                         listOrNull(func.getEnvironment().getExternalAccessIntegrations()),
@@ -1425,6 +1438,19 @@ public class SystemViews {
     /** A list as the JSON array live tells IMPORTS, PACKAGES and the like by, or null when it holds nothing. */
     private String listOrNull(final List<String> values) {
         return values == null || values.isEmpty() ? null : JsonTextList.of(values);
+    }
+
+    /**
+     * A routine's PACKAGES cell: the packages it takes from its artifact repository - for a Python routine that
+     * writes ARTIFACT_REPOSITORY_PACKAGES those, told even when there are none - or null when it names none.
+     */
+    private String packages(final RoutineEnvironment environment, final List<String> packages) {
+        final RoutineEnvironment described = environment.copy();
+        described.setPackages(packages);
+        if (described.getArtifactRepositoryPackages() != null) {
+            return JsonTextList.of(described.repositoryPackages());
+        }
+        return listOrNull(packages);
     }
 
     /** A cell that is NULL where a listing leaves it empty. */

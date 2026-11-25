@@ -419,11 +419,14 @@ class _JavaResult(object):
 
 class _Outcome(object):
     """What a statement the handler issued came to: its result, or the engine's refusal as text with the refused
-    statement's query ID."""
+    statement's query ID, the refusal's vendor code and its wordings."""
 
     def __init__(self, payload):
         self._refusal = payload.get("refusal")
         self._query_id = payload.get("queryId")
+        self._sql_error_code = payload.get("sqlErrorCode")
+        self._message = payload.get("message")
+        self._raw_message = payload.get("rawMessage")
         result = payload.get("result")
         self._result = _decode(result) if result is not None else None
 
@@ -435,6 +438,15 @@ class _Outcome(object):
 
     def queryId(self):
         return self._query_id
+
+    def sqlErrorCode(self):
+        return self._sql_error_code
+
+    def message(self):
+        return self._message
+
+    def rawMessage(self):
+        return self._raw_message
 
     def result(self):
         return self._result

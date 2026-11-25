@@ -39,6 +39,7 @@ public class GeoFunctionProvider implements FunctionProvider {
         registry.register(new StAsEwkt());
         registry.register(new StAsGeojson());
         registry.register(new StAsWkb());
+        registry.register(new StAsEwkb());
         registry.register(new StX());
         registry.register(new StY());
         registry.register(new StSrid());
@@ -54,6 +55,8 @@ public class GeoFunctionProvider implements FunctionProvider {
         registry.register(new StPerimeter());
         registry.register(new StContains());
         registry.register(new StWithin());
+        registry.register(new StCovers());
+        registry.register(new StCoveredBy());
         registry.register(new StIntersects());
         registry.register(new StDisjoint());
         registry.register(new StDwithin());

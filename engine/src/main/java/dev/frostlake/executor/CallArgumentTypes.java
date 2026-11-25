@@ -122,7 +122,7 @@ final class CallArgumentTypes {
         refuse("TZ", "FIXED", "FLOAT", "DECFLOAT", "BOOLEAN", "BINARY", "OBJECT", "ARRAY");
         refuse("TIME", "FIXED", "FLOAT", "DECFLOAT", "BOOLEAN", "DATE", "BINARY", "OBJECT", "ARRAY");
         refuse("BINARY", "TEXT", "FIXED", "FLOAT", "DECFLOAT", "BOOLEAN", "DATE", "TIME", "NTZ", "LTZ", "TZ", "OBJECT",
-            "ARRAY");
+            "ARRAY", "VARIANT");
         // A DECFLOAT parameter takes a DECFLOAT and nothing else (live-verified: CALL p(2) is refused).
         refuse("DECFLOAT", "TEXT", "FIXED", "FLOAT", "BOOLEAN", "DATE", "TIME", "NTZ", "LTZ", "TZ", "BINARY", "OBJECT",
             "ARRAY", "VARIANT");

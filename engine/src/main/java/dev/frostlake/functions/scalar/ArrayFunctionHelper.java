@@ -172,8 +172,10 @@ public final class ArrayFunctionHelper {
             // java.time's T-separated form — and, in a container, its own type: live reports
             // TYPEOF(OBJECT_CONSTRUCT('d', <date>):d) as DATE, not VARCHAR. TypedScalarNode carries the
             // typed value alongside that exact text, so the JSON stays byte-identical.
+            // A time or timestamp keeps the scale of its type too, which a bare FF prints (see FractionScale).
             return new TypedScalarNode(SharedFunctionHelpers.variantTemporalText(value instanceof LocalDate
-                ? SharedFunctionHelpers.variantDate((LocalDate) value) : value), value);
+                ? SharedFunctionHelpers.variantDate((LocalDate) value) : value), value,
+                value instanceof LocalDate ? -1 : FractionScale.of(value));
         }
         if (value instanceof VectorValue) {
             // A VECTOR embeds as an ARRAY of its elements at FULL precision — not the six-decimal
@@ -205,26 +207,29 @@ public final class ArrayFunctionHelper {
      */
     /**
      * The key an array function matches elements by: the element's JSON text, except that an element
-     * holding a UUID keys by its variant comparison key, since it prints as the string of its text and
-     * never equals it (ARRAY_DISTINCT keeps both, ARRAYS_OVERLAP finds no overlap — live-verified).
+     * holding a UUID, a DECFLOAT or a DATE, TIME, timestamp or BINARY keys by its variant comparison key, since
+     * it prints as the string of its text and never equals it (ARRAY_DISTINCT keeps both, ARRAYS_OVERLAP finds
+     * no overlap — live-verified).
      */
     public static String elementKey(final JsonNode element) {
         return UuidTextNode.anywhereIn(element) || DecfloatTextNode.anywhereIn(element)
+                || TypedScalarNode.anywhereIn(element)
             ? "U:" + VariantOrder.comparisonKey(element) : element.toString();
     }
 
     public static boolean nodesEqual(final JsonNode a, final JsonNode b) {
         // A UUID prints as the string of its text and never equals it, which only the variant key tells.
         if (UuidTextNode.anywhereIn(a) || UuidTextNode.anywhereIn(b)
-                || DecfloatTextNode.anywhereIn(a) || DecfloatTextNode.anywhereIn(b)) {
+                || DecfloatTextNode.anywhereIn(a) || DecfloatTextNode.anywhereIn(b)
+                || TypedScalarNode.anywhereIn(a) || TypedScalarNode.anywhereIn(b)) {
             return VariantOrder.comparisonKey(a).equals(VariantOrder.comparisonKey(b));
         }
         if (a.equals(b)) {
             return true;
         }
-        // Exact decimal comparison — a double comparison would merge NUMBER(38,0) values that differ
-        // only below double precision.
-        return a.isNumber() && b.isNumber() && a.decimalValue().compareTo(b.decimalValue()) == 0;
+        // Two exact numbers compare exactly — a double comparison would merge NUMBER(38,0) values that differ
+        // only below double precision — and a double beside any number as a double, as = does (see VariantOrder).
+        return a.isNumber() && b.isNumber() && VariantOrder.compare(a, b) == 0;
     }
 
     /**
@@ -235,7 +240,7 @@ public final class ArrayFunctionHelper {
      * ARRAY_MAX([10, TRUE]) is 10 and ARRAY_MAX([{"a":1}, [1]]) is [1].
      */
     public static int compareNodes(final JsonNode a, final JsonNode b) {
-        return VariantOrder.compare(a, b);
+        return VariantOrder.sortOrder(a, b);
     }
 
     /**

@@ -106,6 +106,16 @@ public class EncryptRaw extends BuiltInFunction {
 
     @Override
     public int getMinArgCount() { return 2; }
+    /** The account counts ENCRYPT_RAW against six arguments: a seventh is one too many (live-verified). */
     @Override
-    public int getMaxArgCount() { return 5; }
+    public int getMaxArgCount() { return 6; }
+
+    /**
+     * A sixth argument belongs to no signature: live refuses it by the argument types, "Invalid argument types for
+     * function 'ENCRYPT_RAW': (BINARY(67108864), ..., VARCHAR(7), BINARY(67108864))" (live-verified).
+     */
+    @Override
+    public boolean refusesArgumentCountByType(final int count) {
+        return count == 6;
+    }
 }

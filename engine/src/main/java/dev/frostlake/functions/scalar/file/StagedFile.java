@@ -34,11 +34,14 @@ public final class StagedFile {
     private final Path path;
     private final String stage;
     private final String relativePath;
+    private final boolean clientEncrypted;
 
-    public StagedFile(final Path path, final String stage, final String relativePath) {
+    public StagedFile(final Path path, final String stage, final String relativePath,
+                      final boolean clientEncrypted) {
         this.path = path;
         this.stage = stage;
         this.relativePath = relativePath;
+        this.clientEncrypted = clientEncrypted;
     }
 
     /** Where the staged file actually lives on this machine. */
@@ -54,5 +57,10 @@ public final class StagedFile {
     /** The descriptor's {@code RELATIVE_PATH} field, e.g. {@code sub/nested.txt}. */
     public String getRelativePath() {
         return relativePath;
+    }
+
+    /** Whether the file's stage encrypts it on the client, so it reads as its stored object (StoredStageObject). */
+    public boolean isClientEncrypted() {
+        return clientEncrypted;
     }
 }

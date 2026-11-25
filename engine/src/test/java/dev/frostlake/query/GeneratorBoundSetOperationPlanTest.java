@@ -123,8 +123,8 @@ public class GeneratorBoundSetOperationPlanTest extends MeasuredCellsTestSupport
                 + "SELECT 4))))");
         assertAnswer("REFUSED SQL compilation error: | argument 1 to function GENERATOR needs to be constant, found "
                 + "'(SELECT COUNT(*) AS \"COUNT(*)\" FROM (SELECT 1 AS \"1\" FROM (SELECT 1 AS \"1\" FROM TABLE "
-                + "(GENERATOR(ROWCOUNT => 1, rowCount => 1))) WB$0 SEMI JOIN (SELECT CAST(T1.A AS NUMBER(38,0)) AS "
-                + "\"A\" FROM T1 AS T1) WB$1 ON (WB$0.\"1\" = WB$1.A) GROUP BY 1) values)'",
+                + "(GENERATOR(ROWCOUNT => 1, rowCount => 1))) WB$0 SEMI JOIN (SELECT T1.A AS \"A\" FROM T1 AS T1) "
+                + "WB$1 ON (WB$0.\"1\" = WB$1.A) GROUP BY 1) values)'",
             "SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT COUNT(*) FROM (SELECT 1 INTERSECT SELECT a "
                 + "FROM t1))))");
         assertAnswer("REFUSED SQL compilation error: | argument 1 to function GENERATOR needs to be constant, found "
@@ -170,9 +170,9 @@ public class GeneratorBoundSetOperationPlanTest extends MeasuredCellsTestSupport
             "SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(x) FROM (SELECT a AS x FROM t1 UNION "
                 + "SELECT a FROM t2))))");
         assertAnswer("REFUSED SQL compilation error: | argument 1 to function GENERATOR needs to be constant, found "
-                + "'(SELECT MAX(\"values\".X) AS \"MAX(X)\" FROM (SELECT SET_COMBINE(WB$0.X, 5) AS \"X\" FROM (SELECT "
-                + "T1.A AS \"X\" FROM T1 AS T1) WB$0 UNION ALL (SELECT 5 AS \"5\" FROM TABLE (GENERATOR(ROWCOUNT => 1,"
-                + " rowCount => 1))) WB$1) values)'",
+                + "'(SELECT MAX(\"values\".X) AS \"MAX(X)\" FROM (SELECT SET_COMBINE(WB$0.X, WB$1.\"5\") AS \"X\" FROM "
+                + "(SELECT T1.A AS \"X\" FROM T1 AS T1) WB$0 UNION ALL (SELECT ENSURE_NULLABLE(5) AS \"5\" FROM (VALUES "
+                + "(null)) DUAL) WB$1) values)'",
             "SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => (SELECT MAX(x) FROM (SELECT a AS x FROM t1 UNION ALL "
                 + "SELECT 5))))");
     }

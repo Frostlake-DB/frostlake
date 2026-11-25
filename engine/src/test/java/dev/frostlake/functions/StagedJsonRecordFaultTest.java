@@ -29,7 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * the character, and the row being read with the line it starts on. The character is the place just past what was
  * read, counted in bytes, and a fault found at a line's end stands at the next line's character 0. INFER_SCHEMA
  * names the file a second time as the stage lists it; a staged-file query does not. A sign with nothing to sign is
- * a stray sign, in a file and in PARSE_JSON alike.
+ * a stray sign, in a file and in PARSE_JSON alike. A record that is a number or a keyword ends one character past
+ * its last, so a line feed straight after it starts the next record's line.
  */
 public class StagedJsonRecordFaultTest extends BaseDatabaseTest {
 
@@ -119,6 +120,28 @@ public class StagedJsonRecordFaultTest extends BaseDatabaseTest {
                 "not a number: '.'", "line 2, character 7", "Row 1 starts at line 1"},
             {"m18", "fj", "{\"a\":1}\n{\"a\":1e}\n",
                 "missing decimal exponent digits: '1e'", "line 2, character 8", "Row 1 starts at line 1"},
+            {"n1", "fj", "{\"a\":-NaN}\n",
+                "unknown keyword \"-NaN\"", "line 1, character 10", "Row 0"},
+            {"n2", "fj", "{\"a\":+.}\n",
+                "not a number: '.'", "line 1, character 8", "Row 0"},
+            {"n3", "fj", "{\"a\":1}\nundefined\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 3, character 9", "Row 2"},
+            {"n4", "fj", "true\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 2, character 9", "Row 1"},
+            {"n5", "fj", "1\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 2, character 9", "Row 1"},
+            {"n6", "fj", "\"s\"\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 2, character 9", "Row 1 starts at line 1"},
+            {"n7", "fj", "undefined {\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 1, character 19", "Row 1"},
+            {"n8", "fj", "null\n\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 3, character 9", "Row 1 starts at line 2"},
+            {"n9", "fj", "1\r\n{\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 2, character 9", "Row 1 starts at line 1"},
+            {"n10", "fjs", "[1,\n{\"a\":tru}]\n",
+                "unknown keyword \"tru\"", "line 2, character 9", "Row 1 starts at line 1"},
+            {"n11", "fj", "true {\"a\":tru}\n",
+                "unknown keyword \"tru\"", "line 1, character 14", "Row 1"},
             {"s1", "fjs", "[{\"a\":1},\n{\"a\":tru},\n{\"a\":3}]\n",
                 "unknown keyword \"tru\"", "line 2, character 9", "Row 1 starts at line 1"},
             {"s2", "fjs", "[{\"a\":1},{\"a\":2},{\"a\":tru\n",

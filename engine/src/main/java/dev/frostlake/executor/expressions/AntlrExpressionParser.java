@@ -21,10 +21,13 @@ import dev.frostlake.parser.FrostlakeParser;
 
 import dev.frostlake.parser.SqlCharStream;
 import dev.frostlake.parser.TypeParameterLines;
+import java.util.List;
 import org.antlr.v4.runtime.BailErrorStrategy;
 import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.ListTokenSource;
 import org.antlr.v4.runtime.RecognitionException;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.TokenSource;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
 
@@ -66,10 +69,22 @@ public final class AntlrExpressionParser {
      * @return the parse tree of the whole expression (the grammar's {@code booleanExpr} entry rule)
      */
     public static FrostlakeParser.BooleanExprContext parseTree(final String expression) {
-        FrostlakeParser.BooleanExprContext ctx = parsedWith(expression, PredictionMode.SLL);
+        return parseTree(expression, null);
+    }
+
+    /**
+     * {@link #parseTree(String)} over the tokens a lexer already read from {@code expression}, ending with its end
+     * of input, so the tree's terminals are those very tokens.
+     *
+     * @param expression the expression source text
+     * @param tokens     every token of the text, its end of input last, or null to read the text afresh
+     * @return the parse tree of the whole expression
+     */
+    static FrostlakeParser.BooleanExprContext parseTree(final String expression, final List<Token> tokens) {
+        FrostlakeParser.BooleanExprContext ctx = parsedWith(expression, tokens, PredictionMode.SLL);
         if (ctx == null) {
             // The quick prediction gave up: the full one decides, and its failure is the expression's.
-            final FrostlakeParser parser = parserOf(expression, PredictionMode.LL);
+            final FrostlakeParser parser = parserOf(expression, tokens, PredictionMode.LL);
             ctx = parser.booleanExpr();
             if (parser.getCurrentToken().getType() != Token.EOF) {
                 throw new IllegalStateException("Trailing input after expression: " + expression);
@@ -85,8 +100,9 @@ public final class AntlrExpressionParser {
      * reads a text at all, reads it exactly as full LL prediction does; full LL only for the rare text SLL gives
      * up on, so an expression is never refused, nor read differently, for the quicker mode.
      */
-    private static FrostlakeParser.BooleanExprContext parsedWith(final String expression, final PredictionMode mode) {
-        final FrostlakeParser parser = parserOf(expression, mode);
+    private static FrostlakeParser.BooleanExprContext parsedWith(final String expression, final List<Token> tokens,
+                                                                 final PredictionMode mode) {
+        final FrostlakeParser parser = parserOf(expression, tokens, mode);
         try {
             final FrostlakeParser.BooleanExprContext ctx = parser.booleanExpr();
             return parser.getCurrentToken().getType() == Token.EOF ? ctx : null;
@@ -95,10 +111,17 @@ public final class AntlrExpressionParser {
         }
     }
 
-    private static FrostlakeParser parserOf(final String expression, final PredictionMode mode) {
-        final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(expression));
-        lexer.removeErrorListeners();
-        final FrostlakeParser parser = new FrostlakeParser(new CommonTokenStream(lexer));
+    private static FrostlakeParser parserOf(final String expression, final List<Token> tokens,
+                                            final PredictionMode mode) {
+        final TokenSource source;
+        if (tokens != null) {
+            source = new ListTokenSource(tokens);
+        } else {
+            final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(expression));
+            lexer.removeErrorListeners();
+            source = lexer;
+        }
+        final FrostlakeParser parser = new FrostlakeParser(new CommonTokenStream(source));
         parser.removeErrorListeners();
         parser.setErrorHandler(new BailErrorStrategy());
         parser.getInterpreter().setPredictionMode(mode);

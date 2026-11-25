@@ -28,6 +28,7 @@ import dev.frostlake.metastore.model.MaterializedView;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
+import dev.frostlake.metastore.model.Tag;
 import dev.frostlake.metastore.model.View;
 import dev.frostlake.storage.ResultSet;
 import dev.frostlake.storage.ResultSetColumn;
@@ -69,7 +70,7 @@ public class PolicyReferencesFunction extends TableFunction {
 
     /**
      * The domains whose object POLICY_REFERENCES finds as TAG_REFERENCES does, listing no attachment of it but a
-     * user's authentication, password and session policies.
+     * user's authentication, password and session policies and the masking policies a tag carries.
      */
     private static final Set<String> OBJECT_DOMAINS = new HashSet<String>(Arrays.asList("TAG", "USER", "ACCOUNT",
         "INTEGRATION"));
@@ -144,8 +145,9 @@ public class PolicyReferencesFunction extends TableFunction {
     /**
      * The attachments on one entity. The domain is one a reference function knows, matched as written but for case,
      * or it is {@code Unknown domain: <as written>.}; TABLE and VIEW list their kind's attachments, EXTERNAL TABLE
-     * none here but refuses a name no table holds, TAG, USER, INTEGRATION and ACCOUNT find their object as
-     * TAG_REFERENCES finds it and list none but a user's authentication, password and session policies — the current account by its locator, in any case — an APPLICATION is
+     * a table's, external or not, none for a view, and refuses a name no table or view holds, TAG, USER, INTEGRATION and ACCOUNT find their object as
+     * TAG_REFERENCES finds it and list none but a user's authentication, password and session policies and a tag's
+     * masking policies — the current account by its locator, in any case — an APPLICATION is
      * looked for, and any other domain is an invalid value, named with underscores (live-verified).
      */
     private void appendByEntity(final String entityName, final String entityDomain,
@@ -160,12 +162,18 @@ public class PolicyReferencesFunction extends TableFunction {
             final String[] written = SqlIdentifiers.canonicalTextParts(entityName);
             requireContainers(written);
             final Schema schema = owningSchema(written);
-            if (schema == null || schema.tableExact(written[written.length - 1]) == null) {
+            final Table table = schema == null ? null : schema.tableExact(written[written.length - 1]);
+            if (table == null && schema != null && viewExact(schema, written[written.length - 1]) != null) {
+                // A view's name is no miss here: it answers no rows.
+                return;
+            }
+            if (table == null) {
                 final String[] full = completed(written);
                 throw new RuntimeException(SqlCompilationError.doesNotExist("External table",
                     full.length == 3 && full[0] != null && full[1] != null ? QualifiedName.join(full)
                         : QualifiedName.join(written)));
             }
+            appendTableRows(schema, table, true, rows);
             return;
         }
         if ("APPLICATION".equals(words)) {
@@ -180,6 +188,8 @@ public class PolicyReferencesFunction extends TableFunction {
             new TagReferencesFunction(catalog).requireObject(entityName, words);
             if ("USER".equals(words)) {
                 appendUserRows(entityName, rows);
+            } else if ("TAG".equals(words)) {
+                appendTagRows(entityName, rows);
             }
             return;
         }
@@ -204,7 +214,7 @@ public class PolicyReferencesFunction extends TableFunction {
         // Either domain takes a table or a view, and lists the attachments of its own kind only: a view named under
         // 'table', or a table under 'view', answers no rows (live-verified). A dynamic table's are a table's.
         if (table != null && "TABLE".equals(domain)) {
-            appendTableRows(schema, table, rows);
+            appendTableRows(schema, table, true, rows);
         } else if (view != null && "VIEW".equals(domain)) {
             appendViewRows(schema, view, rows);
         } else if (dynamic != null && "TABLE".equals(domain)) {
@@ -257,7 +267,8 @@ public class PolicyReferencesFunction extends TableFunction {
         for (final TableColumn column : materialized.getResolvedColumns()) {
             if (column.hasMaskingPolicy()) {
                 listed(byPolicy, attachment(schema, column.getMaskingPolicyName(), "MASKING_POLICY",
-                    materialized.getName(), MATERIALIZED_VIEW_DOMAIN, column.getName(), null));
+                    materialized.getName(), MATERIALIZED_VIEW_DOMAIN, column.getName(),
+                    conditionalArguments(column)));
             }
             if (column.hasProjectionPolicy()) {
                 listed(byPolicy, attachment(schema, column.getProjectionPolicyName(), "PROJECTION_POLICY",
@@ -290,7 +301,8 @@ public class PolicyReferencesFunction extends TableFunction {
         for (final TableColumn column : dynamic.getResolvedColumns()) {
             if (column.hasMaskingPolicy()) {
                 listed(byPolicy, attachment(schema, column.getMaskingPolicyName(), "MASKING_POLICY",
-                    dynamic.getName(), "TABLE", column.getName(), null));
+                    dynamic.getName(), "TABLE", column.getName(),
+                    conditionalArguments(column)));
             }
             if (column.hasProjectionPolicy()) {
                 listed(byPolicy, attachment(schema, column.getProjectionPolicyName(), "PROJECTION_POLICY",
@@ -304,7 +316,8 @@ public class PolicyReferencesFunction extends TableFunction {
 
     /**
      * The attachments of one policy. The policy is the one its name places — a bare name in the session's schema —
-     * and only attachments to that very policy are listed, not those to a namesake in another schema.
+     * and only attachments to that very policy are listed, not those to a namesake in another schema. A masking
+     * policy a tag carries lists the tag after the objects, and not the columns the tag masks (live-verified).
      */
     private void appendByPolicy(final String policyName, final List<Row> rows) {
         final String[] written = SqlIdentifiers.canonicalTextParts(policyName);
@@ -319,7 +332,7 @@ public class PolicyReferencesFunction extends TableFunction {
         for (final Database database : catalog.getAllDatabases()) {
             for (final Schema each : database.getAllSchemas()) {
                 for (final Table table : each.getTables()) {
-                    appendTableRows(each, table, rows);
+                    appendTableRows(each, table, false, rows);
                 }
                 for (final View view : each.getViews()) {
                     appendViewRows(each, view, rows);
@@ -329,6 +342,14 @@ public class PolicyReferencesFunction extends TableFunction {
                 }
                 for (final MaterializedView materialized : each.getMaterializedViews()) {
                     appendMaterializedViewRows(each, materialized, rows);
+                }
+            }
+        }
+        // The tags carrying the policy follow the objects it is attached to, each as an entity of its own.
+        for (final Database database : catalog.getAllDatabases()) {
+            for (final Schema each : database.getAllSchemas()) {
+                for (final Tag tag : each.getTags()) {
+                    appendTagRows(each, tag, rows);
                 }
             }
         }
@@ -425,21 +446,51 @@ public class PolicyReferencesFunction extends TableFunction {
     }
 
     /**
-     * One row per attachment on a table, ordered by policy name as live orders them, and a policy attached to
-     * several columns once for each.
+     * The masking policies a tag carries, one row each ordered by policy name, the tag the entity in the domain TAG
+     * with no column (live-verified).
      */
-    private void appendTableRows(final Schema schema, final Table table, final List<Row> rows) {
+    private void appendTagRows(final String entityName, final List<Row> rows) {
+        final String[] written = SqlIdentifiers.canonicalTextParts(entityName);
+        final Schema schema = owningSchema(written);
+        final String name = written[written.length - 1];
+        if (schema != null && schema.hasTagExact(name)) {
+            appendTagRows(schema, schema.getTagExact(name), rows);
+        }
+    }
+
+    private void appendTagRows(final Schema schema, final Tag tag, final List<Row> rows) {
         final Map<String, List<Row>> byPolicy = new TreeMap<>();
+        for (final String policy : tag.getMaskingPolicies()) {
+            listed(byPolicy, attachment(schema, policy, "MASKING_POLICY", tag.getName(), "TAG", null, null));
+        }
+        for (final List<Row> attachments : byPolicy.values()) {
+            rows.addAll(attachments);
+        }
+    }
+
+    /**
+     * One row per attachment on a table, ordered by policy name as live orders them, and a policy attached to
+     * several columns once for each. An external table's are listed in the EXTERNAL_TABLE domain. A policy a tag
+     * gives a column is listed for the table, not for the policy, which lists the tag instead (live-verified).
+     *
+     * @param withTagged whether the policies the columns' tags give them are listed
+     */
+    private void appendTableRows(final Schema schema, final Table table, final boolean withTagged,
+                                 final List<Row> rows) {
+        final Map<String, List<Row>> byPolicy = new TreeMap<>();
+        final String domain = table.getExternalMetadata() != null ? "EXTERNAL_TABLE" : "TABLE";
         for (final TableColumn column : table.getColumns()) {
             if (column.hasMaskingPolicy()) {
                 listed(byPolicy, attachment(schema, column.getMaskingPolicyName(), "MASKING_POLICY",
-                    table.getName(), "TABLE", column.getName(), null));
-            } else if (catalog.isTagMaskingInUse()) {
+                    table.getName(), domain, column.getName(),
+                    conditionalArguments(column)));
+            } else if (withTagged && catalog.isTagMaskingInUse()) {
                 // A policy a tag gives the column is listed with the tag (live-verified); two a column's tags give it
                 // are listed with the status that says so (documented).
-                final List<String[]> byTags = TagMaskingPolicies.sources(catalog, table, column);
+                final List<String[]> byTags = TagMaskingPolicies.sources(catalog, schema.getDatabaseName(),
+                    schema.getName(), table, column);
                 for (final String[] source : byTags) {
-                    final Row row = attachment(schema, source[0], "MASKING_POLICY", table.getName(), "TABLE",
+                    final Row row = attachment(schema, source[0], "MASKING_POLICY", table.getName(), domain,
                         column.getName(), null);
                     final List<Object> values = new ArrayList<>(row.getValues());
                     values.set(10, source[1]);
@@ -453,28 +504,28 @@ public class PolicyReferencesFunction extends TableFunction {
             }
             if (column.hasProjectionPolicy()) {
                 listed(byPolicy, attachment(schema, column.getProjectionPolicyName(), "PROJECTION_POLICY",
-                    table.getName(), "TABLE", column.getName(), null));
+                    table.getName(), domain, column.getName(), null));
             }
         }
         if (table.hasRowAccessPolicy()) {
             listed(byPolicy, attachment(schema, table.getRowAccessPolicyName(), "ROW_ACCESS_POLICY",
-                table.getName(), "TABLE", null, table.getRowAccessPolicyColumns()));
+                table.getName(), domain, null, table.getRowAccessPolicyColumns()));
         }
         if (table.hasAggregationPolicy()) {
             listed(byPolicy, attachment(schema, table.getAggregationPolicyName(), "AGGREGATION_POLICY",
-                table.getName(), "TABLE", null, table.getAggregationEntityKey()));
+                table.getName(), domain, null, table.getAggregationEntityKey()));
         }
         if (table.hasJoinPolicy()) {
-            listed(byPolicy, attachment(schema, table.getJoinPolicyName(), "JOIN_POLICY", table.getName(), "TABLE",
+            listed(byPolicy, attachment(schema, table.getJoinPolicyName(), "JOIN_POLICY", table.getName(), domain,
                 null, null));
         }
         if (table.hasPrivacyPolicy()) {
             listed(byPolicy, attachment(schema, table.getPrivacyPolicyName(), "PRIVACY_POLICY", table.getName(),
-                "TABLE", null, table.getPrivacyEntityKey()));
+                domain, null, table.getPrivacyEntityKey()));
         }
         if (table.hasStorageLifecyclePolicy()) {
             listed(byPolicy, attachment(schema, table.getStorageLifecyclePolicyName(), "STORAGE_LIFECYCLE_POLICY",
-                table.getName(), "TABLE", null, table.getStorageLifecycleColumns()));
+                table.getName(), domain, null, table.getStorageLifecycleColumns()));
         }
         for (final List<Row> attachments : byPolicy.values()) {
             rows.addAll(attachments);
@@ -505,7 +556,8 @@ public class PolicyReferencesFunction extends TableFunction {
             for (final TableColumn column : view.getResolvedColumns()) {
                 if (column.hasMaskingPolicy()) {
                     listed(byPolicy, attachment(schema, column.getMaskingPolicyName(), "MASKING_POLICY",
-                        view.getName(), "VIEW", column.getName(), null));
+                        view.getName(), "VIEW", column.getName(),
+                        conditionalArguments(column)));
                 }
                 if (column.hasProjectionPolicy()) {
                     listed(byPolicy, attachment(schema, column.getProjectionPolicyName(), "PROJECTION_POLICY",
@@ -552,6 +604,15 @@ public class PolicyReferencesFunction extends TableFunction {
             schema.getDatabaseName(), schema.getName(), entityName, domain,
             columnName, renderArgumentColumns(argumentColumns),
             null, null, null, ACTIVE));
+    }
+
+    /**
+     * The further columns a conditional masking policy reads, the ones its USING list names after the masked column
+     * itself, or null for a policy that reads the masked column alone (live-verified).
+     */
+    private static List<String> conditionalArguments(final TableColumn column) {
+        final List<String> using = column.getMaskingPolicyArguments();
+        return using == null || using.size() < 2 ? null : using.subList(1, using.size());
     }
 
     /** Live renders the argument columns as a spaced JSON array: {@code [ "A", "B" ]}. */

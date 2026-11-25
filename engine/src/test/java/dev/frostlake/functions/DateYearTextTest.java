@@ -26,9 +26,10 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * The YEAR in every text of a date or a timestamp is the year of the era, four digits at least and
- * never signed: a year past 9999 prints its digits — never java.time's {@code +20201} — and the second
- * year before the first prints {@code 0002}. Every cell is live-verified.
+ * The YEAR in the SQL text of a date or a timestamp is four digits at least and never carries a plus: a year
+ * past 9999 prints its digits — never java.time's {@code +20201} — the year 0 prints {@code 0000}, and a year
+ * before it its signed proleptic number, {@code -1} for the second year before the first. Every cell is
+ * live-verified.
  */
 public class DateYearTextTest extends BaseDatabaseTest {
 
@@ -65,13 +66,19 @@ public class DateYearTextTest extends BaseDatabaseTest {
     }
 
     @Test
-    public void aYearBeforeTheFirstPrintsTheEraYear() {
-        assertEquals("0002-01-01", text("SELECT DATEADD(year, -2021, TO_DATE('2020-01-01'))::VARCHAR"));
-        assertEquals("0001-01-01", text("SELECT DATEADD(year, -2020, TO_DATE('2020-01-01'))::VARCHAR"));
-        assertEquals("0002-01-01", text("SELECT DATEADD(year, -2021, TO_DATE('2020-01-01')) || ''"));
-        assertEquals("0002-01-01", text("SELECT TO_CHAR(DATEADD(year, -2021, TO_DATE('2020-01-01')), 'YYYY-MM-DD')"));
-        assertEquals("0002-01-01 10:00:00.000",
-            text("SELECT DATEADD(year, -2021, TO_TIMESTAMP_NTZ('2020-01-01 10:00:00'))::VARCHAR"));
+    public void aYearBeforeTheFirstPrintsTheSignedProlepticYear() {
+        engine.execute("CREATE OR REPLACE TABLE yk (k INT)");
+        engine.execute("INSERT INTO yk VALUES (-2021), (-2020)");
+        assertEquals("-1-01-01", text("SELECT DATEADD(year, k, TO_DATE('2020-01-01'))::VARCHAR FROM yk WHERE k = -2021"));
+        assertEquals("0000-01-01", text("SELECT DATEADD(year, k, TO_DATE('2020-01-01'))::VARCHAR FROM yk WHERE k = -2020"));
+        assertEquals("-1-01-01", text("SELECT DATEADD(year, k, TO_DATE('2020-01-01')) || '' FROM yk WHERE k = -2021"));
+        assertEquals("-1-01-01",
+            text("SELECT TO_CHAR(DATEADD(year, k, TO_DATE('2020-01-01')), 'YYYY-MM-DD') FROM yk WHERE k = -2021"));
+        assertEquals("-1-01-01 10:00:00.000",
+            text("SELECT DATEADD(year, k, TO_TIMESTAMP_NTZ('2020-01-01 10:00:00'))::VARCHAR FROM yk WHERE k = -2021"));
+        assertEquals("-44-03-15", text("SELECT DATE_FROM_PARTS(-44, 3, 15)::VARCHAR"));
+        assertEquals("-12345-03-15", text("SELECT TO_VARCHAR(DATE_FROM_PARTS(-12345, 3, 15))"));
+        assertEquals("0000-03-15 10:11:12.000", text("SELECT TIMESTAMP_FROM_PARTS(0, 3, 15, 10, 11, 12)::VARCHAR"));
         assertEquals("0999-01-01", text("SELECT TO_DATE('0999-01-01')::VARCHAR"));
     }
 

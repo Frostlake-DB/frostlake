@@ -113,23 +113,38 @@ public final class Decfloats {
         return held(DecimalText.parse(value.toString()));
     }
 
-    /** The significant digits a FLOAT written into a DECFLOAT column keeps. */
-    private static final MathContext WRITTEN_FLOAT = new MathContext(18, RoundingMode.HALF_UP);
+    /** The significant digits a FLOAT computed while a statement runs keeps as a DECFLOAT, ties to the even one. */
+    private static final MathContext COMPUTED_FLOAT = new MathContext(18, RoundingMode.HALF_EVEN);
 
     /**
-     * A number as a DECFLOAT column stores it: as {@link #of} holds it, except that a FLOAT keeps 18 significant
-     * digits of its binary value — INSERT, UPDATE and MERGE write 0.1::FLOAT as 0.100000000000000006 and 1e38::FLOAT
-     * as 99999999999999997700000000000000000000, where a cast keeps every digit (live-verified).
+     * A number computed while the statement runs as a DECFLOAT holds it: as {@link #of} holds it, except that a
+     * FLOAT keeps 18 significant digits of its binary value, a tie going to the even digit. A FLOAT the plan folds
+     * to a constant converts at its exact binary value instead ({@link #of}): {@code 0.1::FLOAT::DECFLOAT} is
+     * 1.0000000000000000555111512312578270212e-1, where a FLOAT column holding 0.1 converts to 0.100000000000000006
+     * and 1000000000000000.125 to 1000000000000000.12 (live-verified).
+     *
+     * @param value     the number
+     * @param operation the operation that converts it, for the refusal
+     * @return the value held
+     */
+    public static BigDecimal computed(final Number value, final String operation) {
+        if ((value instanceof Double || value instanceof Float) && Double.isFinite(value.doubleValue())) {
+            return held(new BigDecimal(value.doubleValue()).round(COMPUTED_FLOAT));
+        }
+        return of(value, operation);
+    }
+
+    /**
+     * A number as a DECFLOAT column stores it: a written value is computed, so a FLOAT keeps 18 significant digits
+     * (see {@link #computed}) — INSERT, UPDATE and MERGE write 0.1::FLOAT as 0.100000000000000006 and 1e38::FLOAT
+     * as 99999999999999997700000000000000000000, folded or not (live-verified).
      *
      * @param value     the number
      * @param operation the operation that converts it, for the refusal
      * @return the value stored
      */
     public static BigDecimal written(final Number value, final String operation) {
-        if ((value instanceof Double || value instanceof Float) && Double.isFinite(value.doubleValue())) {
-            return held(new BigDecimal(value.doubleValue()).round(WRITTEN_FLOAT));
-        }
-        return of(value, operation);
+        return computed(value, operation);
     }
 
     /**

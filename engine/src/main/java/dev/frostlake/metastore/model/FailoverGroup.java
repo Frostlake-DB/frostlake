@@ -21,9 +21,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A failover group: an account-level object naming the object types, databases, shares and integration types
- * replicated to a list of accounts, and on what schedule. Frostlake keeps what was declared; nothing is replicated
- * and no failover ever happens. A secondary group remembers the primary it was declared a replica of.
+ * A failover or a replication group: an account-level object naming the object types, databases, shares and
+ * integration types replicated to a list of accounts, and on what schedule. The two kinds share the account's names
+ * and differ in whether they may fail over. Frostlake keeps what was declared; nothing is replicated and no failover
+ * ever happens. A secondary group remembers the primary it was declared a replica of.
  */
 public class FailoverGroup extends SqlObject {
 
@@ -36,16 +37,36 @@ public class FailoverGroup extends SqlObject {
     private String errorIntegration;
     private String primary;
     private boolean optimizedRefresh;
+    private final String groupType;
 
     /** @param name the group's canonical name */
     public FailoverGroup(final String name) {
+        this(name, "FAILOVER");
+    }
+
+    /**
+     * @param name      the group's canonical name
+     * @param groupType FAILOVER or REPLICATION
+     */
+    public FailoverGroup(final String name, final String groupType) {
         super(name);
         this.owner = "ACCOUNTADMIN";
+        this.groupType = groupType;
     }
 
     @Override
     public String getObjectType() {
-        return "FAILOVER GROUP";
+        return groupType + " GROUP";
+    }
+
+    /** FAILOVER or REPLICATION: the word the group was created by, as its listing's type shows it. */
+    public String getGroupType() {
+        return groupType;
+    }
+
+    /** Whether the group is a failover group, rather than a replication group. */
+    public boolean isFailover() {
+        return "FAILOVER".equals(groupType);
     }
 
     /** The object types replicated, as their upper-case words. */

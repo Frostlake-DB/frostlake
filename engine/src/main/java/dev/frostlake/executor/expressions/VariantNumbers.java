@@ -17,6 +17,7 @@
 package dev.frostlake.executor.expressions;
 
 import dev.frostlake.executor.NumericConversionException;
+import dev.frostlake.values.ApproximateText;
 import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.HexDoubleText;
 import dev.frostlake.values.VariantValue;
@@ -63,6 +64,10 @@ public final class VariantNumbers {
         }
         final Number member = ExpressionArithmetic.variantAsNumber(variant);
         if (member != null) {
+            // A text member past the double's range fails its cast to REAL (see ApproximateText).
+            if (REAL.equals(target) && node.isTextual() && ApproximateText.overflows(node.asText())) {
+                throw refusal(node, target);
+            }
             return member;
         }
         // A text member spelling a hexadecimal number reads as a REAL (see HexDoubleText), never as a FIXED.

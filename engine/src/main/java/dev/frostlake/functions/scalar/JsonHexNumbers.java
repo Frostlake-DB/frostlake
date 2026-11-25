@@ -27,11 +27,13 @@ import java.math.BigInteger;
  *   0x10, 0X1F, 0xABCDEF, +0x10   the integer, exactly — 0x10000000000000000 is 18446744073709551616
  *   +0x10                         a leading plus belongs to the token; a leading minus never does
  *   0x1.5, 0x1., 0x.5, 0x1p3      a DOUBLE, the C99 hex float: 1.3125, 1.0, 0.3125, 8.0
+ *   0x., 0xp0, 0x.p1              a DOUBLE zero: a hex float needs no digit at all
+ *   0x1p1024                      a DOUBLE infinity: a hex float past the DOUBLE range overflows
  * </pre>
  *
  * <p>What live refuses is left as written, for {@code JsonFaultReader} to name: a leading minus
  * ({@code -0x10}), a token running into other characters ({@code 0x10x}, {@code 00x10}, {@code 0x1.5.5}),
- * {@code 0x} with no digits, an exponent with no digits, and an integer past the signed 128-bit range
+ * {@code 0x} with no digits and neither a point nor an exponent, an exponent with no digits, and an integer past the signed 128-bit range
  * ({@code 0x80000000000000000000000000000000}) — all live-verified.
  */
 public final class JsonHexNumbers {
@@ -142,14 +144,33 @@ public final class JsonHexNumbers {
             final BigInteger value = new BigInteger(digits, 16);
             return value.compareTo(LARGEST) > 0 ? null : value.toString();
         }
-        final String floating = digits.indexOf('p') < 0 && digits.indexOf('P') < 0 ? token + "p0" : token;
-        final double value = Double.parseDouble(floating);
-        if (Double.isNaN(value) || Double.isInfinite(value)) {
-            return null;
+        final double value = Double.parseDouble(hexFloat(digits));
+        if (Double.isInfinite(value)) {
+            return "inf";   // past the DOUBLE range the value is an infinity, which only the keyword spells
         }
         // Written in scientific notation, which is what marks the value as a DOUBLE rather than a decimal.
         final String plain = Double.toString(value);
         return plain.indexOf('E') >= 0 || plain.indexOf('e') >= 0 ? plain : plain + "E0";
+    }
+
+    /**
+     * The token as {@link Double#parseDouble(String)} reads it: a mantissa with no hex digit at all
+     * ({@code 0x.}, {@code 0xp0}) is zero, and a missing binary exponent is {@code p0}.
+     */
+    private static String hexFloat(final String digits) {
+        int exponentAt = digits.indexOf('p');
+        if (exponentAt < 0) {
+            exponentAt = digits.indexOf('P');
+        }
+        final String mantissa = exponentAt < 0 ? digits : digits.substring(0, exponentAt);
+        final String exponent = exponentAt < 0 ? "p0" : digits.substring(exponentAt);
+        boolean anyDigit = false;
+        for (int i = 0; i < mantissa.length(); i++) {
+            if (isHexDigit(mantissa.charAt(i))) {
+                anyDigit = true;
+            }
+        }
+        return "0x" + (anyDigit ? mantissa : "0") + exponent;
     }
 
     private static boolean isHexDigit(final char c) {

@@ -18,6 +18,7 @@ package dev.frostlake.executor;
 
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.parser.FrostlakeParser;
+import dev.frostlake.types.NumericType;
 import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.util.ArrayList;
@@ -162,7 +163,7 @@ final class SetOperationPlanText {
             }
             text.append(text.length() > 0 ? ", " : "").append(computed).append(" AS \"").append(named).append('"');
         }
-        final String inner = plan.text(executor, read.isEmpty());
+        final String inner = plan.text(executor, read.isEmpty(), read);
         return inner == null ? null : text + " FROM (" + inner;
     }
 
@@ -193,7 +194,8 @@ final class SetOperationPlanText {
         final String function = value instanceof FrostlakeParser.FunctionCallExprContext
             ? ((FrostlakeParser.FunctionCallExprContext) value).functionName().getText().toUpperCase(Locale.ROOT)
             : null;
-        if (read.size() != 1 || function == null || computed == null && !"SUM".equals(function)) {
+        if (read.size() != 1 || function == null
+                || computed == null && !"SUM".equals(function) && !"AVG".equals(function)) {
             return null;
         }
         final String column = read.iterator().next();
@@ -201,16 +203,50 @@ final class SetOperationPlanText {
             if (!column.equalsIgnoreCase(plan.label(c))) {
                 continue;
             }
-            if (plan.constant(c) != null) {
-                return "SUM".equals(function) ? null : function + "(" + plan.constant(c) + ")";
+            final String reading = plan.constant(c) != null ? plan.constant(c)
+                : qualifier + "." + SetOperationPlanNode.reference(plan.label(c));
+            if ("AVG".equals(function)) {
+                return average(reading, plan.constant(c) != null, plan.number(c), plan.widest(c));
             }
-            final String reading = qualifier + "." + SetOperationPlanNode.reference(plan.label(c));
-            if (!"SUM".equals(function)) {
+            if (plan.constant(c) != null || !"SUM".equals(function) || plan.widest(c)) {
                 return function + "(" + reading + ")";
             }
             return plan.type(c) == null ? null : "SUM(CAST(" + reading + " AS " + plan.type(c) + "))";
         }
         return null;
+    }
+
+    /**
+     * AVG of a column of a planned set operation, as the plan divides its sum by its count: a NUMBER(p,s) summed into
+     * a NUMBER whose scale is s+6, at most 12 unless s is more, and whose whole digits are p-s+12; one of more than 20
+     * digits by SCALED_ROUND_INT_DIVIDE of its sum widened by 12 digits, at most 38. A column the plan holds in sixteen
+     * bytes ({@code widest}) is summed as it stands, by SCALED_ROUND_INT_DIVIDE uncast. Null for another type.
+     */
+    private static String average(final String reading, final boolean constant, final NumericType type,
+                                  final boolean widest) {
+        if (type == null) {
+            return null;
+        }
+        final int precision = type.getPrecision();
+        final int scale = type.getScale();
+        final String count = "CAST(COUNT(" + reading + ") AS NUMBER(18,0))";
+        final String typed = "NUMBER(" + precision + "," + scale + ")";
+        final boolean bare = !constant && widest;
+        final String sum = constant || bare ? "SUM(" + reading + ")" : "SUM(CAST(" + reading + " AS " + typed + "))";
+        if (precision > 20) {
+            if (bare) {
+                return "SCALED_ROUND_INT_DIVIDE(" + sum + ", " + count + ")";
+            }
+            // Summed into a NUMBER twelve digits wider, at most 38, then divided by SCALED_ROUND_INT_DIVIDE.
+            return constant && scale != 0 ? null : "SCALED_ROUND_INT_DIVIDE(CAST(" + sum + " AS NUMBER("
+                + Math.min(38, precision + 12) + "," + scale + ")), " + count + ")";
+        }
+        final int widenedScale = Math.max(scale, Math.min(scale + 6, 12));
+        final String widened = "NUMBER(" + Math.min(38, precision - scale + 12 + widenedScale) + "," + widenedScale
+            + ")";
+        final String cast = "CAST(" + sum + " AS " + widened + ")";
+        return "(" + (precision == 1 && scale == 0 ? "CAST(" + cast + " AS " + widened + ")" : cast) + ") / ("
+            + count + ")";
     }
 
     /**
@@ -252,7 +288,7 @@ final class SetOperationPlanText {
         final FrostlakeParser.FunctionCallExprContext call = (FrostlakeParser.FunctionCallExprContext) value;
         final String function = call.functionName().getText().toUpperCase(Locale.ROOT);
         if (!"COUNT".equals(function) && !"MIN".equals(function) && !"MAX".equals(function)
-                && !"SUM".equals(function) || call.DISTINCT() != null || call.overClause() != null
+                && !"SUM".equals(function) && !"AVG".equals(function) || call.DISTINCT() != null || call.overClause() != null
                 || call.functionArgList() == null || call.functionArgList().functionArg().size() != 1
                 || call.functionArgList().functionArg(0).booleanExpr() == null) {
             return null;
@@ -269,6 +305,10 @@ final class SetOperationPlanText {
         final String column = parts[0].toUpperCase(Locale.ROOT);
         read.add(column);
         final String reading = qualifier + "." + column;
+        if ("AVG".equals(function)) {
+            // Printed over a planned set operation alone (see plannedItem).
+            return null;
+        }
         if (!"SUM".equals(function)) {
             return function + "(" + reading + ")";
         }
@@ -360,9 +400,11 @@ final class SetOperationPlanText {
         if (table == null || !table.isCatalogResident()) {
             return null;
         }
-        if (where == null) {
-            // A whole table's rows are as many rows of a GENERATOR, by its statistics.
-            final long rows = executor.statisticsRowsFor(executor.getFullyQualifiedTableName(written)).size();
+        if (where == null || provenFalse(executor, branch, reference, table, where)) {
+            // A whole table's rows are as many rows of a GENERATOR, by its statistics; a filter they prove false of
+            // every row leaves none.
+            final long rows = where != null ? 0 : executor.statisticsRowsFor(
+                executor.getFullyQualifiedTableName(written)).size();
             return "SELECT null AS \"CNULL\" FROM TABLE (GENERATOR(ROWCOUNT => " + rows + ", rowCount => " + rows
                 + "))";
         }
@@ -383,6 +425,31 @@ final class SetOperationPlanText {
         return "SELECT null AS \"CNULL\" FROM " + table.getName().toUpperCase(Locale.ROOT) + " AS " + relation
             + " WHERE " + printer.boundPlannedText(ExpressionEvaluator.parse(
                 ParseTreeText.getOriginalText(where.booleanExpr())));
+    }
+
+    /**
+     * Whether a branch's table statistics prove its filter false of every row: {@code WHERE a > 10} over 1, 2 and 3.
+     *
+     * @param executor  the executor whose statistics are read
+     * @param branch    the branch
+     * @param reference its one FROM item
+     * @param table     the table it names
+     * @param where     its filter
+     * @return true where the filter is proven false
+     */
+    static boolean provenFalse(final QueryExecutor executor, final FrostlakeParser.SelectClauseContext branch,
+                               final FrostlakeParser.TableReferenceContext reference, final Table table,
+                               final FrostlakeParser.WhereClauseContext where) {
+        final Map<String, Table> aliases = new LinkedHashMap<>();
+        aliases.put(reference.aliasName() != null ? reference.aliasName().getText()
+            : reference.nonJoinKeywordIdentifier() != null ? reference.nonJoinKeywordIdentifier().getText()
+            : table.getName(), table);
+        try {
+            return Boolean.FALSE.equals(new CountStatisticsBound(executor, branch, table, aliases, null, false, null)
+                .verdictOver(ExpressionEvaluator.parse(ParseTreeText.getOriginalText(where.booleanExpr()))));
+        } catch (final RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /**

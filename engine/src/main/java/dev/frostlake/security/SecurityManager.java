@@ -19,11 +19,14 @@ package dev.frostlake.security;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.GrantNames;
 import dev.frostlake.metastore.QualifiedName;
+import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.model.CallerGrant;
 import dev.frostlake.metastore.model.DatabaseRole;
 import dev.frostlake.metastore.model.Privilege;
 import dev.frostlake.metastore.model.Role;
 import dev.frostlake.metastore.model.Schema;
+import dev.frostlake.metastore.model.Table;
+import dev.frostlake.metastore.model.View;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,6 +36,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -548,6 +552,78 @@ public class SecurityManager {
     }
 
     /**
+     * Whether the rights a statement runs with hold anything in a database: a privilege on it or on an object in it,
+     * or the ownership of one of its database roles, schemas, tables or views. A session whose roles hold nothing there has no use
+     * of it as its current database (see {@link dev.frostlake.metastore.UnseenCurrentDatabase}). Inside a procedure
+     * running with its owner's or restricted caller's rights the session keeps its database, as it is the session's
+     * own roles this judges.
+     *
+     * @param databaseName the database's stored name
+     * @return whether they do
+     */
+    public boolean holdsAnythingIn(final String databaseName) {
+        if (!sessionContext.isSecurityEnabled() || restricted() || sessionContext.getExecutableOwner() != null) {
+            return true;
+        }
+        final Set<String> roles = askedRoles();
+        final String inside = databaseName + ".";
+        for (final Role holder : holdersUnder(roles)) {
+            for (final Map.Entry<String, Set<Privilege>> held : holder.getAllPrivileges().entrySet()) {
+                final String key = held.getKey();
+                final String name = key.substring(key.indexOf(':') + 1);
+                if (!held.getValue().isEmpty() && (name.equals(databaseName) || name.startsWith(inside))) {
+                    return true;
+                }
+            }
+        }
+        if (!catalog.hasDatabaseExact(databaseName)) {
+            return false;
+        }
+        for (final DatabaseRole owned : catalog.databaseExact(databaseName).getDatabaseRoles()) {
+            if (ownedBy(roles, owned.getOwner())) {
+                return true;
+            }
+        }
+        for (final Schema schema : catalog.databaseExact(databaseName).storedSchemas()) {
+            if (ownedBy(roles, schema.getOwner())) {
+                return true;
+            }
+            for (final Table table : schema.getTables()) {
+                if (ownedBy(roles, table.getOwner())) {
+                    return true;
+                }
+            }
+            for (final View view : schema.getViews()) {
+                if (ownedBy(roles, view.getOwner())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Whether an object's owner is one of the roles. */
+    private boolean ownedBy(final Set<String> roles, final String owner) {
+        return owner != null && roles.contains(catalog.resolveRoleName(owner));
+    }
+
+    /**
+     * Whether the rights a statement runs with see the whole SNOWFLAKE database: they reach ACCOUNTADMIN, as the
+     * primary role, a secondary one, or a role above it (live-verified), or hold IMPORTED PRIVILEGES on the database
+     * (documented). Other rights see only part of it (see {@link dev.frostlake.metastore.SystemDatabaseSight}).
+     *
+     * @return whether they do
+     */
+    public boolean seesWholeSystemDatabase() {
+        if (!sessionContext.isSecurityEnabled()) {
+            return true;
+        }
+        final Set<String> roles = reachingRoles();
+        return roles.contains("ACCOUNTADMIN") || holds(holdersUnder(roles), "DATABASE", SystemDatabase.NAME,
+            Privilege.IMPORTED_PRIVILEGES);
+    }
+
+    /**
      * Whether the rights a statement runs with see a role, which SHOW GRANTS lists the grants of: a role they hold,
      * directly or through another, one they own or hold a privilege on, or any role under MANAGE GRANTS (see
      * {@link #sees}).
@@ -565,6 +641,26 @@ public class SecurityManager {
         }
         final String owner = catalog.roleExists(canonical) ? catalog.getRoleExact(canonical).getOwner() : null;
         return owner == null || sees("ROLE", canonical, owner);
+    }
+
+    /**
+     * Whether the rights a statement runs with see a database role: one they hold, through a role or a database role
+     * they hold, or one they see as {@link #sees} sees an object.
+     *
+     * @param qualifiedName the role's name with its database's
+     * @param owner         the role that owns it, or null when none is recorded
+     * @return whether the database role is one the rights see
+     */
+    public boolean seesDatabaseRole(final String qualifiedName, final String owner) {
+        if (!sessionContext.isSecurityEnabled()) {
+            return true;
+        }
+        for (final Role holder : holdersUnder(reachingRoles())) {
+            if (holder instanceof DatabaseRole && qualifiedName.equals(((DatabaseRole) holder).getQualifiedName())) {
+                return true;
+            }
+        }
+        return sees("DATABASE_ROLE", qualifiedName, owner);
     }
 
     /**
@@ -860,7 +956,8 @@ public class SecurityManager {
     /**
      * The first container of a schema's object the session cannot use: a role uses an object of a schema only with
      * USAGE on the database and on the schema that contain it, whatever it holds on the object itself (documented).
-     * Owning the container, ALL and OWNERSHIP grants count as USAGE.
+     * Owning the container, ALL and OWNERSHIP grants count as USAGE. Every role uses the SNOWFLAKE database
+     * (live-verified: a schema missing there is named, not the database).
      *
      * @param databaseName the object's database
      * @param schemaName   the object's schema
@@ -878,7 +975,7 @@ public class SecurityManager {
             return usesByCallerGrant("SCHEMA", databaseName + "." + schemaName) ? null : "SCHEMA";
         }
         final Set<String> roles = askedRoles();
-        if (!uses(roles, "DATABASE", databaseName)) {
+        if (!SystemDatabase.is(databaseName) && !uses(roles, "DATABASE", databaseName)) {
             return "DATABASE";
         }
         return uses(roles, "SCHEMA", databaseName + "." + schemaName) ? null : "SCHEMA";

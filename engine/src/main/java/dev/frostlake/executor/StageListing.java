@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.functions.scalar.file.StoredStageObject;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.QualifiedName;
 import dev.frostlake.metastore.model.Schema;
@@ -31,8 +32,6 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -55,9 +54,6 @@ import java.util.Locale;
  */
 final class StageListing {
 
-    /** The block an internal stage's cipher pads a file to. */
-    private static final long CIPHER_BLOCK = 16L;
-
     private final QueryExecutor executor;
 
     StageListing(final QueryExecutor executor) {
@@ -78,8 +74,8 @@ final class StageListing {
         final String prefix = listed.path().isEmpty() ? "" : listed.path().substring(1);
         final String shownStage;
         final String location;
-        // An internal stage keeps its files encrypted, and a listing shows the size they are stored at; one
-        // encrypted on the server side shows the file's own (live-verified).
+        // An internal stage keeps its files encrypted, and a listing shows the size and digest they are stored at;
+        // one encrypted on the server side shows the file's own (live-verified).
         final boolean encrypted;
         if (stage.TILDE() != null) {
             shownStage = null;
@@ -98,7 +94,9 @@ final class StageListing {
                 && !"SNOWFLAKE_SSE".equalsIgnoreCase(named.getEncryptionType());
         }
         final Path root = executor.resolveCopyBaseDir(location);
-        final String stored = executor.copyPatternPrefix(location);
+        // A table stage's listing matches a PATTERN against the stage-relative name alone; any other stage's
+        // against the file's stored path (live-verified).
+        final String stored = stage.PERCENT() != null ? "" : executor.copyPatternPrefix(location);
         final String pattern = ctx.PATTERN() != null ? ParseTreeText.extractStringLiteral(ctx.STRING_LITERAL()) : null;
         // Each column of a listing is nullable to the driver, which reads it as known (live-verified).
         final List<ResultSetColumn> cols = Arrays.asList(
@@ -123,8 +121,8 @@ final class StageListing {
                     continue;
                 }
                 final String name = shownStage == null ? relative : shownStage + "/" + relative;
-                rows.add(new Row(Arrays.asList(name, encrypted ? storedSize(Files.size(file)) : Files.size(file),
-                    md5Hex(file),
+                rows.add(new Row(Arrays.asList(name, StoredStageObject.size(Files.size(file), encrypted),
+                    StoredStageObject.digest(file, encrypted),
                     DateTimeFormatter.RFC_1123_DATE_TIME
                         .format(Files.getLastModifiedTime(file).toInstant().atZone(ZoneOffset.UTC)))));
             }
@@ -132,14 +130,6 @@ final class StageListing {
             throw new RuntimeException("Failed to list stage: " + e.getMessage(), e);
         }
         return new ResultSet(cols, rows);
-    }
-
-    /**
-     * The size an internal stage stores a file at: its bytes padded to the cipher's 16-byte block, a whole block
-     * added when they already fill one — 2 bytes list as 16, 27 as 32, 47 as 48 (live-verified).
-     */
-    private static long storedSize(final long bytes) {
-        return (bytes / CIPHER_BLOCK + 1) * CIPHER_BLOCK;
     }
 
     /** A table's stage exists only with its table: a missing one is refused as the missing stage it would be. */
@@ -170,21 +160,6 @@ final class StageListing {
                     files.add(entry);
                 }
             }
-        }
-    }
-
-    /** The MD5 of a staged file's bytes, hex-encoded — what LIST's md5 column carries. */
-    private static String md5Hex(final Path file) throws IOException {
-        try {
-            final MessageDigest digest = MessageDigest.getInstance("MD5");
-            final byte[] hash = digest.digest(Files.readAllBytes(file));
-            final StringBuilder hex = new StringBuilder(hash.length * 2);
-            for (final byte b : hash) {
-                hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return hex.toString();
-        } catch (final NoSuchAlgorithmException e) {
-            throw new RuntimeException("MD5 unavailable", e);
         }
     }
 }

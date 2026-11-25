@@ -29,7 +29,9 @@ import dev.frostlake.metastore.model.Table;
  * TRUNCATE and a MERGE that only deletes run. The target is judged before anything else of the statement — a
  * column it does not have is never reached. A view is expanded before it is refused, so one whose table is gone
  * answers {@code Failure during expansion of view 'V': …} to every statement that would write it, a TRUNCATE
- * included (all live-verified).
+ * included. A view of the SNOWFLAKE database's share is refused as the share's: {@code SQL access control error:
+ * Insufficient privileges to operate on view 'ROLES'. Provider share does not have sufficient privileges.} (all
+ * live-verified).
  */
 final class DmlTarget {
 
@@ -48,6 +50,12 @@ final class DmlTarget {
             return;
         }
         final String kind = executor.storedRelationKind(name);
+        final String shared = "VIEW".equals(kind) ? executor.sharedViewName(name) : null;
+        if (shared != null) {
+            // A view of the SNOWFLAKE database's share is the provider's to write, which grants no one that.
+            throw new PrivilegeRefusal(SqlAccessControlError.insufficientPrivileges("view", shared)
+                + " Provider share does not have sufficient privileges.");
+        }
         if ("VIEW".equals(kind)) {
             // The view is expanded first: one whose body no longer compiles refuses the statement as it refuses
             // a reader, ahead of the rule that a view is written by no statement.

@@ -97,6 +97,30 @@ final class UdfOverloadPreference {
     }
 
     /**
+     * Whether the account refuses an argument family's conversion to this parameter type outright (see
+     * {@link OverloadConversionCosts#refuses}).
+     *
+     * @param family        the argument's family, or null for one no row names
+     * @param parameterType the candidate overload's parameter type
+     * @return whether the conversion is refused
+     */
+    static boolean refusesFamily(final String family, final DataType parameterType) {
+        return parameterType != null && OverloadConversionCosts.refuses(family, familyOfType(parameterType));
+    }
+
+    /**
+     * Whether the account refuses this value's conversion to this parameter type outright, the value read as its
+     * family (see {@link OverloadConversionCosts#refuses}).
+     *
+     * @param argument      the value being passed
+     * @param parameterType the candidate overload's parameter type
+     * @return whether the conversion is refused
+     */
+    static boolean refuses(final Object argument, final DataType parameterType) {
+        return refusesFamily(familyOfValue(argument), parameterType);
+    }
+
+    /**
      * Where a parameter type stands in the order signatures sort by, which tells overloads apart that weigh alike
      * for a call written by position.
      *
@@ -154,6 +178,9 @@ final class UdfOverloadPreference {
         }
         if (type instanceof UuidType) {
             return "UUID";
+        }
+        if (type instanceof BinaryType) {
+            return "BINARY";
         }
         if (type instanceof StringType) {
             return "VARCHAR";

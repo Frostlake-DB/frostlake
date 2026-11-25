@@ -43,7 +43,6 @@ import dev.frostlake.types.StringType;
 
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.misc.Interval;
-import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -160,6 +159,7 @@ public final class AlertCommandHandler {
     private void alterInPlace(final Schema schema, final Alert alert,
                               final FrostlakeParser.AlertDefinitionContext definition) {
         // The statement is judged on a copy first, so a refused statement leaves the alert as it was.
+        requireSameKind(alert, writesSchedule(definition.alertProperty()));
         final Alert judged = alert.copy(alert.getName());
         judged.setWarehouse(null);
         judged.setSchedule(null);
@@ -199,6 +199,8 @@ public final class AlertCommandHandler {
                 final String schedule = SqlStringLiterals.decode(property.scheduleClause().STRING_LITERAL().getText());
                 TaskOptions.requireValidSchedule(schedule);
                 alert.setSchedule(schedule);
+            } else if (property.SCHEDULE() != null) {
+                alert.setSchedule(null);
             } else if (property.warehouseClause() != null) {
                 final String warehouse = warehouseName(property.warehouseClause());
                 WarehouseReference.requireForTask(catalog, warehouse);
@@ -255,35 +257,46 @@ public final class AlertCommandHandler {
     }
 
     /**
-     * The condition of an alert on new data, one without a schedule: the alert runs when the table or the view its
-     * condition reads takes new rows, so a condition calling a stored procedure, or a query reading nothing but a
-     * VALUES clause, a query without a FROM among them, is refused as the alert is written (live-verified).
+     * The condition of an alert on new data, one without a schedule, judged as {@link NewDataAlertCondition} does;
+     * an alert on a schedule takes any condition.
      */
-    private static void requireNewDataCondition(final Alert alert,
-                                                final FrostlakeParser.AlertConditionContext condition) {
-        if (alert.getSchedule() != null || condition.showStatement() != null) {
-            return;
-        }
-        if (condition.callStatement() != null || !readsRelation(condition)) {
-            throw new RuntimeException(
-                "Streaming alert condition must not call a stored procedure or query from a VALUES clause");
+    private void requireNewDataCondition(final Alert alert, final FrostlakeParser.AlertConditionContext condition) {
+        if (alert.getSchedule() == null) {
+            NewDataAlertCondition.require(queryExecutor, condition);
         }
     }
 
-    /** Whether a query reads a relation: any source of a FROM but a VALUES clause and the brackets around one. */
-    private static boolean readsRelation(final ParseTree node) {
-        if (node instanceof FrostlakeParser.TableSourceContext) {
-            final FrostlakeParser.TableSourceContext source = (FrostlakeParser.TableSourceContext) node;
-            if (source.VALUES() == null && source.selectStatement() == null && source.tableReference() == null) {
+    /**
+     * Refuses a change of an alert's kind: an alert on new data takes no schedule and an alert on a schedule keeps
+     * one (live-verified), {@code Streaming alert A cannot be changed to a scheduled alert} and {@code Scheduled
+     * alert A cannot be changed to a streaming alert}. Judged before the alert's state and the schedule's text.
+     *
+     * @param alert     the alert as it stands
+     * @param scheduled whether the statement leaves it with a schedule
+     */
+    private static void requireSameKind(final Alert alert, final boolean scheduled) {
+        if (alert.getSchedule() == null && scheduled) {
+            throw new RuntimeException("Streaming alert " + alert.getName() + " cannot be changed to a scheduled alert");
+        }
+        if (alert.getSchedule() != null && !scheduled) {
+            throw new RuntimeException("Scheduled alert " + alert.getName() + " cannot be changed to a streaming alert");
+        }
+    }
+
+    /** Whether a list of properties writes a schedule; SCHEDULE = NULL writes none. */
+    private static boolean writesSchedule(final List<FrostlakeParser.AlertPropertyContext> properties) {
+        for (final FrostlakeParser.AlertPropertyContext property : properties) {
+            if (property.scheduleClause() != null) {
                 return true;
             }
         }
-        if (node instanceof FrostlakeParser.SelectOperandContext
-                && ((FrostlakeParser.SelectOperandContext) node).TABLE_QUERY() != null) {
-            return true;
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            if (readsRelation(node.getChild(i))) {
+        return false;
+    }
+
+    /** Whether a list of properties names the schedule at all, SCHEDULE = NULL included. */
+    private static boolean namesSchedule(final List<FrostlakeParser.AlertPropertyContext> properties) {
+        for (final FrostlakeParser.AlertPropertyContext property : properties) {
+            if (property.SCHEDULE() != null || property.scheduleClause() != null) {
                 return true;
             }
         }
@@ -314,7 +327,10 @@ public final class AlertCommandHandler {
 
     /** The alert an ALTER, a DESCRIBE or an EXECUTE names, refused in the does-not-exist family when absent. */
     public Alert require(final FrostlakeParser.QualifiedNameContext name) {
-        final String[] parts = ParseTreeText.qualifiedNameParts(name);
+        return require(ParseTreeText.qualifiedNameParts(name));
+    }
+
+    private Alert require(final String[] parts) {
         final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
         final String alertName = parts[parts.length - 1];
         if (!schema.hasAlertExact(alertName)) {
@@ -327,17 +343,16 @@ public final class AlertCommandHandler {
      * COMMENT ON ALERT, answered as ALTER ALERT … SET COMMENT is: a missing alert is refused unless IF EXISTS
      * forgives it, the change asks MODIFY, and a running alert must be suspended first.
      *
-     * @param name     the alert's name
+     * @param parts    the alert's name parts
      * @param comment  the comment
      * @param ifExists whether IF EXISTS forgives a missing alert
      */
-    public void comment(final FrostlakeParser.QualifiedNameContext name, final String comment, final boolean ifExists) {
-        final String[] parts = ParseTreeText.qualifiedNameParts(name);
+    public void comment(final String[] parts, final String comment, final boolean ifExists) {
         final Schema schema = catalog.requireOwningSchema(QualifiedName.of(parts));
         if (ifExists && !schema.hasAlertExact(parts[parts.length - 1])) {
             return;
         }
-        final Alert alert = require(name);
+        final Alert alert = require(parts);
         queryExecutor.requirePrivilege(Privilege.MODIFY, "ALERT", parts, null);
         if (alert.getState() == AlertState.STARTED) {
             throw notSuspended(alert);
@@ -353,6 +368,11 @@ public final class AlertCommandHandler {
         // OPERATE resumes and suspends an alert; every other change is its owner's (documented).
         queryExecutor.requirePrivilege(action.RESUME() != null || action.SUSPEND() != null ? Privilege.OPERATE
             : Privilege.MODIFY, "ALERT", parts, null);
+        requireKindKept(alert, action);
+        if (action.CONDITION() != null) {
+            // The condition is judged before the alert's state (live-verified).
+            requireNewDataCondition(alert, action.alertCondition());
+        }
         if (action.RESUME() == null && action.SUSPEND() == null && alert.getState() == AlertState.STARTED) {
             throw notSuspended(alert);
         }
@@ -403,6 +423,9 @@ public final class AlertCommandHandler {
             for (final FrostlakeParser.AlertParameterContext parameter : action.alertParameter()) {
                 if (parameter.identifier() != null) {
                     alert.getParameters().remove(ParameterRegistry.canonical(parameter.identifier().getText()));
+                } else if (parameter.SCHEDULE() != null) {
+                    // An alert on new data has no schedule to unset; an alert on a schedule was refused above.
+                    continue;
                 } else if (parameter.WAREHOUSE() != null) {
                     alert.setWarehouse(null);
                 } else if (parameter.COMMENT() != null) {
@@ -416,10 +439,35 @@ public final class AlertCommandHandler {
                 }
             }
         } else if (action.CONDITION() != null) {
-            requireNewDataCondition(alert, action.alertCondition());
             alert.setCondition(sourceText(action.alertCondition()));
         } else if (action.ACTION() != null) {
             alert.setAction(ParseTreeText.taskBodyText(action.taskBody()));
+        }
+    }
+
+    /**
+     * The kind an ALTER ALERT … SET or UNSET leaves the alert of: SET SCHEDULE = '…' makes it one on a schedule,
+     * SET SCHEDULE = NULL and UNSET SCHEDULE one on new data, and any other list keeps its kind.
+     */
+    private static void requireKindKept(final Alert alert, final FrostlakeParser.AlertActionContext action) {
+        if (action.SET() != null) {
+            final List<FrostlakeParser.AlertPropertyContext> properties = new ArrayList<>();
+            for (final FrostlakeParser.AlertSettingContext setting : action.alertSetting()) {
+                if (setting.alertProperty() != null) {
+                    properties.add(setting.alertProperty());
+                }
+            }
+            // A property written twice is refused first (live-verified).
+            rejectDuplicates(properties);
+            if (namesSchedule(properties)) {
+                requireSameKind(alert, writesSchedule(properties));
+            }
+        } else if (action.UNSET() != null) {
+            for (final FrostlakeParser.AlertParameterContext parameter : action.alertParameter()) {
+                if (parameter.SCHEDULE() != null) {
+                    requireSameKind(alert, false);
+                }
+            }
         }
     }
 

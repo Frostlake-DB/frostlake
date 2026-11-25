@@ -16,6 +16,7 @@
 
 package dev.frostlake.http.rest;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
@@ -32,6 +33,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * code 000004 and a name to start from passed over.
  */
 public class RestSystemSchemaFetchTest extends BaseRestTest {
+
+    /**
+     * Acts as ACCOUNTADMIN, the role these answers were measured under: a role below it sees only part of the
+     * SNOWFLAKE database.
+     */
+    @BeforeEach
+    public void actAsAccountAdministrator() {
+        server.getEngine().getEngine().setCurrentRole("ACCOUNTADMIN");
+    }
 
     private static final String DATABASE = "/api/v2/databases/SNOWFLAKE";
 

@@ -420,7 +420,7 @@ public class DropCommandHandler implements CommandHandler {
      * any object's does — a missing database or schema is refused, IF EXISTS or not, and so is a name with too
      * many parts — and then the object is missing, which IF EXISTS forgives. CASCADE and RESTRICT change nothing.
      * A session policy is read with these kinds and is modelled: one that is there is dropped. So is a resource
-     * monitor, a share, a failover group and an external table that was declared.
+     * monitor, a share, a connection, a failover or replication group and an external table that was declared.
      */
     private Object dropUnmodelled(final FrostlakeParser.DropClassStatementContext ctx, final UnmodelledDropKind kind) {
         final FrostlakeParser.ObjectNameContext instance = ctx.dropInstanceName().objectName();
@@ -450,6 +450,11 @@ public class DropCommandHandler implements CommandHandler {
             final boolean relationKind = kind == UnmodelledDropKind.EXTERNAL_TABLE
                 || kind == UnmodelledDropKind.SEMANTIC_VIEW;
             final RelationKind found = relationKind ? owner.relationKindOf(parts[parts.length - 1]) : null;
+            if (found == RelationKind.SEMANTIC_VIEW && kind == UnmodelledDropKind.SEMANTIC_VIEW) {
+                // A semantic view that is there is dropped.
+                owner.dropSemanticViewExact(parts[parts.length - 1]);
+                return null;
+            }
             if (found != null) {
                 // A relation of another kind holds the name, which IF EXISTS does not forgive (live-verified).
                 throw new RuntimeException(SqlCompilationError.objectOfOtherType(found.spelling(), kind.name()));
@@ -458,8 +463,8 @@ public class DropCommandHandler implements CommandHandler {
         } else if (parts.length > 1) {
             throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
         } else if (dropKept(kind, parts[0])) {
-            // The account's kinds kept as metadata: a resource monitor, a share or a failover group that is there
-            // is dropped.
+            // The account's kinds kept as metadata: a resource monitor, a share, a connection or a failover or
+            // replication group that is there is dropped.
             return null;
         } else if (kind == UnmodelledDropKind.SHARE) {
             missing = SqlCompilationError.doesNotExistAsSpelled(kind.noun(), shareName(catalog.getAccountLocator(),
@@ -485,8 +490,11 @@ public class DropCommandHandler implements CommandHandler {
         if (kind == UnmodelledDropKind.SHARE) {
             return new ShareCommandHandler(catalog, identity).drop(name);
         }
-        return kind == UnmodelledDropKind.FAILOVER_GROUP
-            && new FailoverGroupCommandHandler(catalog, identity).drop(name);
+        if (kind == UnmodelledDropKind.CONNECTION) {
+            return new ConnectionCommandHandler(catalog, identity).drop(name);
+        }
+        return (kind == UnmodelledDropKind.FAILOVER_GROUP || kind == UnmodelledDropKind.REPLICATION_GROUP)
+            && new FailoverGroupCommandHandler(catalog, identity).drop(name, kind == UnmodelledDropKind.FAILOVER_GROUP);
     }
 
     /**

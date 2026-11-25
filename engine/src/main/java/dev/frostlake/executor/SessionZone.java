@@ -16,6 +16,8 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.functions.scalar.WideOffsetZone;
+
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 
@@ -95,7 +97,8 @@ public final class SessionZone {
                 return true;
             }
         }
-        return !name.startsWith(UNKNOWN_FAMILY) && ZoneId.getAvailableZoneIds().contains(name);
+        return !name.startsWith(UNKNOWN_FAMILY) && !WideOffsetZone.isWideName(name)
+            && ZoneId.getAvailableZoneIds().contains(name);
     }
 
     /**

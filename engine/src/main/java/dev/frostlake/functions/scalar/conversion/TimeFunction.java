@@ -18,6 +18,7 @@ package dev.frostlake.functions.scalar.conversion;
 
 import dev.frostlake.executor.SessionZone;
 import dev.frostlake.functions.SemiStructuredRejection;
+import dev.frostlake.functions.scalar.WideOffsetZone;
 import dev.frostlake.types.DataType;
 import dev.frostlake.values.TypedScalarNode;
 import dev.frostlake.values.VariantJsonText;
@@ -67,7 +68,7 @@ public class TimeFunction extends ToTime {
         }
         if (value instanceof ZonedDateTime) {
             // A TIMESTAMP_TZ keeps the clock it was written with.
-            return ((ZonedDateTime) value).toLocalTime();
+            return WideOffsetZone.wallClock((ZonedDateTime) value).toLocalTime();
         }
         if (value instanceof VariantValue) {
             return fromVariant((VariantValue) value);

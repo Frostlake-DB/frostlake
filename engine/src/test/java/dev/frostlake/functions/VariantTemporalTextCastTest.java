@@ -25,8 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A cast to text out of a VARIANT that holds a date or time before the first year reads the VARIANT's own
- * spelling, the signed proleptic year, on every cast spelling — while the same value cast directly prints its
- * year of the era (live-verified).
+ * spelling, the signed proleptic year, on every cast spelling — the same text the value cast directly prints
+ * (live-verified).
  */
 public class VariantTemporalTextCastTest extends BaseDatabaseTest {
 
@@ -57,8 +57,8 @@ public class VariantTemporalTextCastTest extends BaseDatabaseTest {
     }
 
     @Test
-    public void theValueCastDirectlyKeepsItsEraYear() {
-        assertEquals("0002-01-15 10:00:00.000", value("DATEADD(year, -2025, " + TS + ")::VARCHAR"));
+    public void theValueCastDirectlyReadsTheSameYear() {
+        assertEquals("-1-01-15 10:00:00.000", value("TIMESTAMP_NTZ_FROM_PARTS(-1, 1, 15, 10, 0, 0)::VARCHAR"));
         assertEquals("2024-01-15 10:00:00.000", value("TO_VARIANT(" + TS + ")::VARCHAR"));
     }
 }

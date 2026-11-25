@@ -22,8 +22,8 @@ import org.antlr.v4.runtime.Token;
 
 /**
  * The lines live reports for an object constant whose key is no text: the parse's own line - the key, or the ':'
- * after a key the account reads as a word - then the first token of the value after each ':' from the faulty pair to
- * the constant's end (all live-verified):
+ * after a key the account reads as a word - then the value after each ':' from the faulty pair to the constant's
+ * end, as {@link ObjectConstantValueLines} tells it (all live-verified):
  *
  * <pre>
  *   SELECT {1: 'a'}                '1' at 8, then ''a'' at 11
@@ -31,6 +31,7 @@ import org.antlr.v4.runtime.Token;
  *   SELECT {1: 'a', 'b': 2}        '1' at 8, ''a'' at 11, then '2' at 21
  *   SELECT {TRUE: 1}               ':' at 12, then '1' at 14
  *   SELECT {-1: 'a'}               '-' at 8, then ''a'' at 12
+ *   SELECT {1: x}                  '1' at 8, then the '}' at 12
  * </pre>
  */
 final class ObjectConstantKeyLines {
@@ -62,22 +63,7 @@ final class ObjectConstantKeyLines {
         }
         final List<String> lines = new ArrayList<>();
         lines.add(SyntaxErrorListener.sentence(spoken.get(fault)));
-        int depth = 0;
-        for (int i = last + 1; i + 1 < spoken.size(); i++) {
-            final int type = spoken.get(i).getType();
-            if (type == FrostlakeLexer.LPAREN || type == FrostlakeLexer.LBRACKET || type == FrostlakeLexer.LBRACE) {
-                depth++;
-            } else if (type == FrostlakeLexer.RPAREN || type == FrostlakeLexer.RBRACKET) {
-                depth--;
-            } else if (type == FrostlakeLexer.RBRACE) {
-                if (depth == 0) {
-                    break;
-                }
-                depth--;
-            } else if (type == FrostlakeLexer.COLON && depth == 0) {
-                lines.add(SyntaxErrorListener.sentence(spoken.get(i + 1)));
-            }
-        }
+        ObjectConstantValueLines.addValues(spoken, ObjectConstantValueLines.openBrace(spoken, key), last + 1, lines);
         return lines;
     }
 

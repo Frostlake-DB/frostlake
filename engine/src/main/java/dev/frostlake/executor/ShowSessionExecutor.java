@@ -1340,17 +1340,28 @@ final class ShowSessionExecutor {
 
     /**
      * SHOW GRANTS ON ACCOUNT: the privileges roles hold on the account itself, the account named by its locator
-     * as every grant on it is.
+     * as every grant on it is, ordered by the grantee's name, then the privilege (live-verified).
      */
     public ResultSet showGrantsOnAccount() {
         final ResultSet granted = facade.showGrantsOnObject("ACCOUNT", "ACCOUNT", null);
         final int name = granted.getColumnIndex("name");
+        final int grantee = granted.getColumnIndex("grantee_name");
+        final int privilege = granted.getColumnIndex("privilege");
         final List<Row> rows = new ArrayList<>();
         for (final Row row : granted.getRows()) {
             final List<Object> values = new ArrayList<>(row.getValues());
             values.set(name, identity.getAccountLocator());
             rows.add(new Row(values));
         }
+        Collections.sort(rows, new Comparator<Row>() {
+            @Override
+            public int compare(final Row left, final Row right) {
+                final int byGrantee = String.valueOf(left.getValue(grantee))
+                    .compareTo(String.valueOf(right.getValue(grantee)));
+                return byGrantee != 0 ? byGrantee
+                    : String.valueOf(left.getValue(privilege)).compareTo(String.valueOf(right.getValue(privilege)));
+            }
+        });
         return new ResultSet(granted.getColumns(), rows);
     }
 

@@ -22,6 +22,8 @@ import dev.frostlake.metastore.CloneReferences;
 import dev.frostlake.metastore.NameKeys;
 import dev.frostlake.metastore.PolicyReferences;
 import dev.frostlake.metastore.SqlObject;
+import dev.frostlake.metastore.SystemDatabase;
+import dev.frostlake.metastore.SystemDatabaseSight;
 import dev.frostlake.metastore.TagAssignments;
 
 import java.util.ArrayList;
@@ -176,7 +178,12 @@ public class Database extends SqlObject {
      * @return whether it exists
      */
     public boolean hasSchemaExact(final String name) {
-        return schemas.containsKey(name);
+        return schemas.containsKey(name) && !hidden(name);
+    }
+
+    /** Whether the running statement does not see a schema of this name (see {@link SystemDatabaseSight}). */
+    private boolean hidden(final String schemaName) {
+        return SystemDatabase.is(getName()) && SystemDatabaseSight.hidesSchema(schemaName);
     }
 
     /**
@@ -198,13 +205,34 @@ public class Database extends SqlObject {
      */
     public Schema schemaExact(final String name) {
         final Schema schema = schemas.get(name);
-        if (schema == null) {
+        if (schema == null || hidden(name)) {
             throw new RuntimeException(SqlCompilationError.doesNotExist("Schema", getName() + "." + name));
         }
         return schema;
     }
 
+    /**
+     * Every schema the running statement sees: a schema of the SNOWFLAKE database its roles do not see is left out
+     * (see {@link SystemDatabaseSight}).
+     *
+     * @return the schemas
+     */
     public List<Schema> getAllSchemas() {
+        final List<Schema> seen = new ArrayList<>();
+        for (final Schema schema : schemas.values()) {
+            if (!hidden(schema.getName())) {
+                seen.add(schema);
+            }
+        }
+        return seen;
+    }
+
+    /**
+     * Every schema the database stores, whoever asks — what a snapshot of the catalog keeps.
+     *
+     * @return the schemas
+     */
+    public List<Schema> storedSchemas() {
         return new ArrayList<>(schemas.values());
     }
 
@@ -343,14 +371,36 @@ public class Database extends SqlObject {
         return "DATABASE";
     }
 
-    /** The database role of that name, or null. */
+    /**
+     * The database role of that name, or null — null too for one of the SNOWFLAKE database's the running statement
+     * does not see (see {@link SystemDatabaseSight}).
+     */
     public synchronized DatabaseRole getDatabaseRole(final String roleName) {
-        return databaseRoles.get(roleName);
+        return hiddenRole(roleName) ? null : databaseRoles.get(roleName);
     }
 
-    /** Every database role of this database, in the order they were created. */
+    /**
+     * Every database role of this database the running statement sees, in the order they were created (see
+     * {@link SystemDatabaseSight}).
+     */
     public synchronized List<DatabaseRole> getDatabaseRoles() {
+        final List<DatabaseRole> seen = new ArrayList<>();
+        for (final DatabaseRole role : databaseRoles.values()) {
+            if (!hiddenRole(role.getName())) {
+                seen.add(role);
+            }
+        }
+        return seen;
+    }
+
+    /** Every database role the database stores, whoever asks — what a snapshot of the catalog keeps. */
+    public synchronized List<DatabaseRole> storedDatabaseRoles() {
         return new ArrayList<>(databaseRoles.values());
+    }
+
+    /** Whether the running statement does not see a database role of this name (see {@link SystemDatabaseSight}). */
+    private boolean hiddenRole(final String roleName) {
+        return SystemDatabase.is(getName()) && SystemDatabaseSight.hidesRole(roleName);
     }
 
     /** Adds a database role, replacing one of the same name. */

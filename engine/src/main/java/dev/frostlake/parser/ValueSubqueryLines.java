@@ -39,7 +39,8 @@ import org.antlr.v4.runtime.misc.IntervalSet;
  *   SELECT COALESCE((SELECT 1 x y), 1)             'SELECT', then the call's ')' when more of the call follows
  *   SELECT 1 FROM t WHERE a = (SELECT 1 x y); …    'SELECT' alone, and the later statements are read: in a WHERE,
  *                                                  HAVING, QUALIFY, GROUP BY, ORDER BY, an UPDATE's SET, a VALUES
- *                                                  row or a CALL the fault inside is not reported
+ *                                                  row or a CALL the fault inside is not reported - unless the
+ *                                                  query's reading resumes inside it ({@link #resumedLines})
  *   … WHERE a = (SELECT 1 x y) OR a = (SELECT 2 z w)   both SELECTs
  * </pre>
  *
@@ -187,10 +188,17 @@ final class ValueSubqueryLines {
                 return lines;
             }
         }
+        if (place == CLAUSE || place == ITEM) {
+            final List<String> nested = nestedListedWordLines(sql, spoken, open);
+            if (nested != null) {
+                lines.addAll(nested);
+                return framedWordLines(spoken, open, close, lines);
+            }
+        }
         final List<String> worded = statementWordLines(sql, spoken, open, close, found, end);
         if (worded != null) {
             lines.addAll(worded);
-            return lines;
+            return place == CLAUSE ? framedWordLines(spoken, open, close, lines) : lines;
         }
         if (place == CLAUSE && open >= 1 && spoken.get(open - 1).getType() == FrostlakeLexer.IN) {
             // An IN's query whose FROM writes a table function bare is read to that call's ')' - or, for a call whose
@@ -200,6 +208,16 @@ final class ValueSubqueryLines {
             if (bareClose > bare && bareClose < close) {
                 lines.add(SyntaxErrorListener.sentence(spoken.get(textsAfterFirst(spoken, bare, bareClose)
                     ? close : bareClose)));
+                return lines;
+            }
+        }
+        if (place == CLAUSE || place == ARGUMENT) {
+            final int clause = found[4];
+            final boolean direct = place == CLAUSE && found[5] == 0 && (clause == FrostlakeLexer.WHERE
+                || clause == FrostlakeLexer.HAVING || clause == FrostlakeLexer.QUALIFY);
+            final List<String> resumed = resumedLines(sql, spoken, open, close, direct, place == CLAUSE);
+            if (resumed != null) {
+                lines.addAll(resumed);
                 return lines;
             }
         }
@@ -498,7 +516,7 @@ final class ValueSubqueryLines {
         final List<String> lines = new ArrayList<>();
         if (reads == FrostlakeLexer.COMMA) {
             return doubled ? null : listedWordLines(spoken, word, place == ARGUMENT && calls == 1 && literalFirst,
-                place == CLAUSE && calls == 0 && literalFirst, place == ARGUMENT && calls == 1 && !literalFirst,
+                place == CLAUSE && calls == 0, place == ARGUMENT && calls == 1 && !literalFirst,
                 place == ARGUMENT && literalFirst ? calls : 0);
         }
         if (inList) {
@@ -544,7 +562,8 @@ final class ValueSubqueryLines {
      *                                                         a USING there, then the token after the first ')'
      *   … WHERE 1 = (SELECT 1 FROM t, (UPDATE t SET a = 1))   'SELECT', 'UPDATE', then the token after the first ')'
      *   … WHERE 1 = (SELECT 1 FROM t, (CALL p(1)))            'SELECT', 'p', '1', then the token after the first ')'
-     *                                                         past it; an IN's query (NOT IN too) alike
+     *                                                         past it; an IN's query (NOT IN too) alike, and
+     *                                                         whatever the compared select list opens with
      *   SELECT ABS(ABS((SELECT 1 FROM t, (CALL p()))))        'SELECT', 'p', 'CALL', then 'p' again: two calls deep
      *                                                         the token after the word, the word, that token again; a
      *                                                         DESCRIBE's 'TABLE' alike
@@ -767,9 +786,18 @@ final class ValueSubqueryLines {
     }
 
     /**
-     * The lines after the SELECT of the query an IN's list holds, when its FROM list reads a statement in its
+     * The lines of the query an IN's list holds, its SELECT first, when its FROM list reads a statement in its
      * parentheses after a comma, refused at its word: as a compared query's (see listedWordLines), {@code a IN
-     * (SELECT 1 FROM t, (DESCRIBE TABLE t))} 'SELECT', then 'TABLE' (live-verified); null for any other query.
+     * (SELECT 1 FROM t, (DESCRIBE TABLE t))} 'SELECT', then 'TABLE' — or when that query holds such a query nested in
+     * it ({@link #nestedListedWordLines}). Each faulty query around the IN's, compared in a clause or standing in a
+     * select list, is refused at its SELECT before it (all live-verified):
+     *
+     * <pre>
+     *   … WHERE a = (SELECT 1 FROM t WHERE a IN (SELECT 1 FROM t, (CALL p())))    'SELECT' at both, 'p', then the
+     *                                                                            ')' after it and the IN's
+     * </pre>
+     *
+     * Null for any other query.
      *
      * @param sql    the text parsed
      * @param spoken its default-channel tokens, end of input included
@@ -777,10 +805,226 @@ final class ValueSubqueryLines {
      * @return the lines, or null
      */
     static List<String> inListStatementWord(final String sql, final List<Token> spoken, final int open) {
-        final int close = closing(spoken, open, spoken.size() - 1);
-        if (close >= spoken.size() - 1 || open + 2 >= close || spoken.get(open + 1).getType() != FrostlakeLexer.SELECT
-                || !isLiteral(spoken.get(open + 2))) {
+        int start = open;
+        while (start > 0 && spoken.get(start - 1).getType() != FrostlakeLexer.SEMI) {
+            start--;
+        }
+        int end = open;
+        while (end < spoken.size() - 1 && spoken.get(end).getType() != FrostlakeLexer.SEMI) {
+            end++;
+        }
+        final List<String> lines = new ArrayList<>();
+        int around = -1;
+        int[] outer = faultyQuery(sql, spoken, start, end, start);
+        while (outer != null && outer[0] < open) {
+            if (outer[1] < open || outer[2] != CLAUSE && outer[2] != ITEM || outer[5] != 0) {
+                break;
+            }
+            lines.add(SyntaxErrorListener.sentence(spoken.get(outer[0] + 1)));
+            around = outer[1];
+            outer = faultyQuery(sql, spoken, outer[0] + 2, outer[1], -1);
+        }
+        if (outer == null || outer[0] != open) {
+            lines.clear();
+            around = -1;
+        }
+        lines.add(SyntaxErrorListener.sentence(spoken.get(open + 1)));
+        final List<String> worded = wordedChain(sql, spoken, open, around, false);
+        if (worded == null) {
             return null;
+        }
+        lines.addAll(worded);
+        final int outermost = around >= 0 ? openingOf(spoken, around) : open;
+        return outermost < 0 ? lines : framedWordLines(spoken, outermost, closing(spoken, outermost,
+            spoken.size() - 1), lines);
+    }
+
+    /** Whether the token at {@code index} stands in a select list: SELECT is the clause last opened at its level. */
+    private static boolean inSelectList(final List<Token> spoken, final int index) {
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.SEMI) {
+                return false;
+            }
+            if (type == FrostlakeLexer.RPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.LPAREN) {
+                depth = Math.max(0, depth - 1);
+            } else if (depth == 0 && isClause(type)) {
+                return type == FrostlakeLexer.SELECT;
+            }
+        }
+        return false;
+    }
+
+    /** The position of the '(' the ')' at {@code close} closes, or -1. */
+    private static int openingOf(final List<Token> spoken, final int close) {
+        int depth = 0;
+        for (int i = close; i >= 0; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.RPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.LPAREN && --depth == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The statement-word lines of the faulty value query between {@code open} and {@code close}, as the query the
+     * value query stands in reads them (all live-verified): in an EXISTS's query the last ')' named is the next
+     * ')' after it - {@code … WHERE EXISTS (SELECT 1 FROM t WHERE a IN (SELECT 1 FROM t, (CALL p())))} is 'SELECT',
+     * 'p', the ')' after the name's '(', then the EXISTS's ')' - and in a derived table each faulty query's SELECT is
+     * followed by the statement word alone: {@code SELECT 1 FROM (SELECT 1 FROM t WHERE a IN (SELECT 1 FROM t,
+     * (CALL p())))} is 'SELECT', then 'CALL'. A query that is a call's argument in a clause other than a select list,
+     * its FROM list reading the statement after a comma, names the ')' after it as an EXISTS's query does. Elsewhere the lines as given.
+     */
+    private static List<String> framedWordLines(final List<Token> spoken, final int open, final int close,
+                                                final List<String> lines) {
+        int frame = -1;
+        int depth = 0;
+        for (int i = open - 1; i >= 0 && frame < 0; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.SEMI) {
+                return lines;
+            }
+            if (type == FrostlakeLexer.RPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.LPAREN) {
+                if (depth == 0) {
+                    frame = i;
+                }
+                depth--;
+            }
+        }
+        if (frame < 1 || lines.isEmpty()) {
+            return lines;
+        }
+        final int before = spoken.get(frame - 1).getType();
+        final boolean called = frame + 1 == open && (WORDS.contains(before)
+            || before == FrostlakeLexer.QUOTED_IDENTIFIER) && !inSelectList(spoken, frame);
+        if (!called && (frame + 1 >= spoken.size() || spoken.get(frame + 1).getType() != FrostlakeLexer.SELECT)) {
+            return lines;
+        }
+        int word = -1;
+        for (int i = open + 3; i < close && word < 0; i++) {
+            if (StatementWordInFromLines.opensStatement(spoken.get(i))
+                    && spoken.get(i - 1).getType() == FrostlakeLexer.LPAREN
+                    && spoken.get(i - 2).getType() == FrostlakeLexer.COMMA) {
+                word = i;
+            }
+        }
+        if (before == FrostlakeLexer.EXISTS || called && word >= 0) {
+            final String last = lines.get(lines.size() - 1);
+            for (int i = open; i + 1 < spoken.size(); i++) {
+                if (spoken.get(i).getType() == FrostlakeLexer.RPAREN
+                        && last.equals(SyntaxErrorListener.sentence(spoken.get(i)))) {
+                    if (spoken.get(i + 1).getType() == FrostlakeLexer.RPAREN) {
+                        lines.set(lines.size() - 1, SyntaxErrorListener.sentence(spoken.get(i + 1)));
+                    }
+                    return lines;
+                }
+            }
+            return lines;
+        }
+        if (before != FrostlakeLexer.FROM && before != FrostlakeLexer.JOIN && before != FrostlakeLexer.COMMA) {
+            return lines;
+        }
+        if (word < 0) {
+            return lines;
+        }
+        final List<String> framed = new ArrayList<>();
+        for (int i = 0; i < lines.size() && lines.get(i).endsWith("unexpected 'SELECT'."); i++) {
+            framed.add(lines.get(i));
+        }
+        framed.add(SyntaxErrorListener.sentence(spoken.get(word)));
+        return framed;
+    }
+
+    /**
+     * The lines after the SELECT of a faulty query whose fault lies in queries nested in it, each compared or listed
+     * by an IN in a clause of the query around it, when the innermost one's FROM list reads a statement in its
+     * parentheses after a comma: each nested query's SELECT, outermost first, then the innermost one's lines as a
+     * compared query's (see listedWordLines), whatever the outer queries are followed by — after a DESCRIBE, DESC
+     * or EXPLAIN its next word, then the ')' of the query around the innermost one (all live-verified):
+     *
+     * <pre>
+     *   … WHERE a IN (SELECT 1 FROM t WHERE a IN (SELECT 1 FROM t, (CALL p())))     'SELECT' at both, 'p', then the
+     *                                                                              ')' after it and the inner query's
+     *   … WHERE a = (SELECT 1 FROM t WHERE a &gt; (SELECT 1 FROM t, (DESCRIBE TABLE t)))   'SELECT' at both, 'TABLE',
+     *                                                                              then the outer query's ')'
+     *   SELECT (SELECT 1 FROM t WHERE a IN (SELECT 1 FROM t, (CALL p())))          the same in a select list
+     * </pre>
+     *
+     * Null for any other query, one nested as a call's argument among them.
+     *
+     * @param sql    the text parsed
+     * @param spoken its default-channel tokens, end of input included
+     * @param open   the outer query's '('
+     * @return the lines, or null
+     */
+    static List<String> nestedListedWordLines(final String sql, final List<Token> spoken, final int open) {
+        return wordedChain(sql, spoken, open, -1, true);
+    }
+
+    /**
+     * The lines after the SELECT of the query at {@code open}: the SELECT of each faulty query nested in it, then
+     * the innermost one's statement-word lines; null when a nested query stands elsewhere than compared or listed in
+     * a clause, when the innermost reads no statement after a comma in its FROM list, or — with {@code nestedOnly} —
+     * when no query is nested.
+     *
+     * @param around the ')' of the faulty query around the one at {@code open}, or -1
+     */
+    private static List<String> wordedChain(final String sql, final List<Token> spoken, final int open,
+                                            final int around, final boolean nestedOnly) {
+        final int close = closing(spoken, open, spoken.size() - 1);
+        if (close >= spoken.size() - 1 || spoken.get(close).getType() != FrostlakeLexer.RPAREN) {
+            return null;
+        }
+        final List<String> lines = new ArrayList<>();
+        int innerOpen = open;
+        int innerClose = close;
+        int enclosing = around;
+        int[] deeper = faultyQuery(sql, spoken, open + 2, close, -1);
+        while (deeper != null) {
+            if (deeper[2] != CLAUSE || deeper[5] != 0 || spoken.get(deeper[1]).getType() != FrostlakeLexer.RPAREN) {
+                return null;
+            }
+            enclosing = innerClose;
+            innerOpen = deeper[0];
+            innerClose = deeper[1];
+            lines.add(SyntaxErrorListener.sentence(spoken.get(innerOpen + 1)));
+            deeper = faultyQuery(sql, spoken, innerOpen + 2, innerClose, -1);
+        }
+        if (nestedOnly && lines.isEmpty()) {
+            return null;
+        }
+        final int word = listedWord(sql, spoken, innerOpen, innerClose);
+        final List<String> worded = word < 0 ? null : listedWordLines(spoken, word, false, true, false, 0);
+        if (worded == null) {
+            return null;
+        }
+        final int type = spoken.get(word).getType();
+        if (enclosing >= 0 && (type == FrostlakeLexer.DESCRIBE || type == FrostlakeLexer.DESC
+                || type == FrostlakeLexer.EXPLAIN)) {
+            // Inside another faulty query, the word's next word is followed by that query's ')' (live-verified).
+            lines.add(worded.get(0));
+            lines.add(SyntaxErrorListener.sentence(spoken.get(enclosing)));
+            return lines;
+        }
+        lines.addAll(worded);
+        return lines;
+    }
+
+    /**
+     * The position of the statement word the FROM list of the query between {@code open} and {@code close} reads in
+     * its parentheses after a comma, refused there, or -1.
+     */
+    private static int listedWord(final String sql, final List<Token> spoken, final int open, final int close) {
+        if (open + 2 >= close || spoken.get(open + 1).getType() != FrostlakeLexer.SELECT) {
+            return -1;
         }
         final List<String> inside = queryReadAlone(sql, spoken, open, close);
         for (int i = open + 4; !inside.isEmpty() && i + 1 < close; i++) {
@@ -788,10 +1032,10 @@ final class ValueSubqueryLines {
             if (StatementWordInFromLines.opensStatement(at) && inside.get(0).equals(SyntaxErrorListener.sentence(at))
                     && spoken.get(i - 1).getType() == FrostlakeLexer.LPAREN
                     && spoken.get(i - 2).getType() == FrostlakeLexer.COMMA && inFromList(spoken, open, i - 2)) {
-                return listedWordLines(spoken, i, false, true, false, 0);
+                return i;
             }
         }
-        return null;
+        return -1;
     }
 
     /**
@@ -967,6 +1211,287 @@ final class ValueSubqueryLines {
     private static boolean isArithmetic(final int type) {
         return type == FrostlakeLexer.PLUS || type == FrostlakeLexer.MINUS || type == FrostlakeLexer.STAR
             || type == FrostlakeLexer.SLASH;
+    }
+
+    /**
+     * The lines after the SELECT of a faulty query standing in a clause other than a select list when the query
+     * holds, before its own ')', a token the reading resumes at: an operator, a comma, or a clause or set operator
+     * that may follow the clause the query stands in. The tokens from the SELECT up to that token are skipped as one
+     * value, a WHERE or ON among them skipped too, and the statement read on from that token - so the query's fault
+     * after the token is reported, and a faulty query nested after it is refused at its SELECT in turn; null when
+     * no such token comes first, when it is followed by the query's ')', or for a bracket, IS, OFFSET, SAMPLE,
+     * START, CONNECT or OVER (all live-verified):
+     *
+     * <pre>
+     *   … WHERE a = (SELECT 1 FROM t WHERE a = 1 2)           'SELECT', '2'
+     *   … WHERE a = (SELECT 1 FROM t GROUP BY a 2)            'SELECT', '2': at the GROUP, which follows a WHERE
+     *   … WHERE a = (SELECT 1 FROM t WHERE a = 1 AND)         'SELECT', then the query's ')'
+     *   … WHERE a = (SELECT 1 FROM t WHERE a 2)               'SELECT' alone: no such token before the ')'
+     *   … WHERE a = (SELECT 1 FROM t WHERE a = (SELECT 1 x y))   'SELECT', 'SELECT', then the outer query's ')'
+     * </pre>
+     */
+    private static List<String> resumedLines(final String sql, final List<Token> spoken, final int open,
+                                             final int close, final boolean direct, final boolean clause) {
+        if (close >= spoken.size() || spoken.get(close).getType() != FrostlakeLexer.RPAREN) {
+            return null;
+        }
+        final int resume = resumeAt(spoken, open, close, direct, clause);
+        if (resume < 0) {
+            return null;
+        }
+        final int select = spoken.get(open + 1).getStartIndex();
+        final int[] at = SyntaxErrorListener.sentenceCoordinates(SyntaxErrorListener.sentence(spoken.get(open)));
+        if (resume + 1 == close) {
+            // The token is dropped, the ')' closes the query, and the token after it is named only when it does
+            // not follow a value.
+            return readPastClose(sql, spoken, open, close, clause, at, new ArrayList<String>());
+        }
+        final char[] resumed = sql.toCharArray();
+        blank(resumed, select, spoken.get(resume - 1).getStopIndex());
+        resumed[select] = '1';
+        final boolean tupled = spoken.get(resume).getType() == FrostlakeLexer.COMMA;
+        if (!tupled) {
+            // The bracket is closed before the token the reading resumes at, which reads on from there.
+            resumed[select + 1] = ')';
+        }
+        final List<String> lines = linesFrom(new String(resumed), at);
+        if (lines == null || lines.isEmpty()) {
+            return lines;
+        }
+        if (spoken.get(close - 1).getType() != FrostlakeLexer.RPAREN
+                && lines.get(0).equals(SyntaxErrorListener.sentence(spoken.get(close - 1)))) {
+            // A token right before the query's ')' is dropped, the ')' closes the query, and the statement reads on
+            // past it.
+            final List<String> read = new ArrayList<>();
+            read.add(lines.get(0));
+            return readPastClose(sql, spoken, open, close, clause, at, read);
+        }
+        if (tupled) {
+            // A WHERE after the list's next item is named, and the reading resumes at the next operator.
+            for (int w = resume + 1; w < close; w++) {
+                if (spoken.get(w).getType() == FrostlakeLexer.WHERE
+                        && lines.get(0).equals(SyntaxErrorListener.sentence(spoken.get(w)))) {
+                    int again = -1;
+                    for (int i = w + 1; i < close && again < 0; i++) {
+                        final int type = spoken.get(i).getType();
+                        if (type == FrostlakeLexer.LPAREN || type == FrostlakeLexer.RPAREN) {
+                            return lines;
+                        }
+                        again = resumesAt(type) && type != FrostlakeLexer.COMMA ? i : -1;
+                    }
+                    if (again < 0 || again + 1 == close) {
+                        return lines;
+                    }
+                    blank(resumed, spoken.get(w).getStartIndex(), spoken.get(again - 1).getStopIndex());
+                    final List<String> later = linesFrom(new String(resumed), at);
+                    if (later == null) {
+                        return null;
+                    }
+                    final List<String> read = new ArrayList<>();
+                    read.add(lines.get(0));
+                    read.addAll(later);
+                    return read;
+                }
+            }
+        }
+        return lines;
+    }
+
+    /**
+     * The given lines followed by those of the statement read with the query between {@code open} and its ')' at
+     * {@code close} taken as a value; null when a line stands before the given coordinates. The ')' closes a reading
+     * that has dropped a token: in a clause, a query standing in a bracket of its own or a call's has its ')' close
+     * that bracket - the bracket's own ')' then one too many - and otherwise the token after the ')' is left out when
+     * it is the first line.
+     */
+    private static List<String> readPastClose(final String sql, final List<Token> spoken, final int open,
+                                              final int close, final boolean clause, final int[] at,
+                                              final List<String> read) {
+        final int select = spoken.get(open + 1).getStartIndex();
+        final char[] valued = sql.toCharArray();
+        final boolean shifted = clause && inBracket(spoken, open);
+        blank(valued, shifted ? spoken.get(open).getStartIndex() : select, spoken.get(close - 1).getStopIndex());
+        valued[select] = '1';
+        if (shifted && spoken.get(open - 1).getType() == FrostlakeLexer.IN) {
+            // The IN's list is gone with its bracket: an equals sign takes its place.
+            valued[spoken.get(open - 1).getStartIndex()] = '=';
+            valued[spoken.get(open - 1).getStartIndex() + 1] = ' ';
+        }
+        final List<String> after = linesFrom(new String(valued), at);
+        if (after == null) {
+            return null;
+        }
+        final String next = close + 1 < spoken.size() ? SyntaxErrorListener.sentence(spoken.get(close + 1)) : null;
+        for (int i = 0; i < after.size(); i++) {
+            if (shifted || i > 0 || !after.get(i).equals(next)) {
+                read.add(after.get(i));
+            }
+        }
+        return read;
+    }
+
+    /**
+     * Whether the '(' at {@code open} stands in a bracket opened after the clause it stands in, or in the query of an
+     * EXISTS.
+     */
+    private static boolean inBracket(final List<Token> spoken, final int open) {
+        final int before = spoken.get(open - 1).getType();
+        if (before == FrostlakeLexer.ANY || before == FrostlakeLexer.ALL || before == FrostlakeLexer.SOME) {
+            return false;
+        }
+        int depth = 0;
+        boolean clause = false;
+        for (int i = open - 1; i >= 0; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.SEMI) {
+                return false;
+            }
+            if (type == FrostlakeLexer.RPAREN) {
+                depth++;
+            } else if (type == FrostlakeLexer.LPAREN) {
+                if (depth == 0) {
+                    return !clause || i > 0 && spoken.get(i - 1).getType() == FrostlakeLexer.EXISTS;
+                }
+                depth--;
+            } else if (depth == 0 && isClause(type)) {
+                clause = true;
+            }
+        }
+        return false;
+    }
+
+    /** The lines a fresh reading of {@code text} reports, or null when one stands before the given coordinates. */
+    private static List<String> linesFrom(final String text, final int[] at) {
+        final List<String> lines = new ArrayList<>();
+        for (final String line : SyntaxErrorListener.linesReportedAfresh(text)) {
+            final int[] where = SyntaxErrorListener.sentenceCoordinates(line);
+            if (where == null || where[0] < at[0] || where[0] == at[0] && where[1] < at[1]) {
+                return null;
+            }
+            lines.add(line);
+        }
+        return lines;
+    }
+
+    /**
+     * The lines after the SELECT of a faulty query an IN's list holds when its reading resumes at a token before its
+     * own ')' (see {@link #resumedLines}), or null.
+     *
+     * @param sql    the text parsed
+     * @param spoken its default-channel tokens, end of input included
+     * @param open   the position of the list's '('
+     * @return the lines, or null
+     */
+    static List<String> inListResumed(final String sql, final List<Token> spoken, final int open) {
+        int end = open;
+        while (end < spoken.size() - 1 && spoken.get(end).getType() != FrostlakeLexer.SEMI) {
+            end++;
+        }
+        final int close = closing(spoken, open, end);
+        // The clause the IN stands in directly, no bracket between.
+        int depth = 0;
+        int clause = -1;
+        for (int i = open - 1; i >= 0 && clause < 0 && depth >= 0; i--) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.SEMI) {
+                break;
+            }
+            depth += type == FrostlakeLexer.RPAREN ? 1 : type == FrostlakeLexer.LPAREN ? -1 : 0;
+            if (depth == 0 && isClause(type)) {
+                clause = type;
+            }
+        }
+        final boolean direct = clause == FrostlakeLexer.WHERE || clause == FrostlakeLexer.HAVING
+            || clause == FrostlakeLexer.QUALIFY;
+        return resumedLines(sql, spoken, open, close, direct, true);
+    }
+
+    /**
+     * The lines of a faulty query used as a value in a clause other than a select list that holds the token at
+     * {@code index}, when its reading resumes at a token before its own ')' (see {@link #resumedLines}): its SELECT,
+     * then what that reading reports; null otherwise.
+     *
+     * @param sql    the text parsed
+     * @param spoken its default-channel tokens, end of input included
+     * @param index  the position of the token among them
+     * @return the lines, or null
+     */
+    static List<String> enclosingResumed(final String sql, final List<Token> spoken, final int index) {
+        int start = index;
+        while (start > 0 && spoken.get(start - 1).getType() != FrostlakeLexer.SEMI) {
+            start--;
+        }
+        int end = index;
+        while (end < spoken.size() - 1 && spoken.get(end).getType() != FrostlakeLexer.SEMI) {
+            end++;
+        }
+        final int[] found = faultyQuery(sql, spoken, start, end, start);
+        if (found == null || found[2] != CLAUSE || found[0] >= index || found[1] <= index) {
+            return null;
+        }
+        final int clause = found[4];
+        final boolean direct = found[5] == 0 && (clause == FrostlakeLexer.WHERE || clause == FrostlakeLexer.HAVING
+            || clause == FrostlakeLexer.QUALIFY);
+        final List<String> resumed = resumedLines(sql, spoken, found[0], found[1], direct, true);
+        if (resumed == null) {
+            return null;
+        }
+        final List<String> lines = new ArrayList<>();
+        lines.add(SyntaxErrorListener.sentence(spoken.get(found[0] + 1)));
+        lines.addAll(resumed);
+        return lines;
+    }
+
+    /**
+     * The position of the token a faulty query's reading resumes at, between its '(' at {@code open} and its ')' at
+     * {@code close}, or -1 for none or a token whose reading has no rule here.
+     */
+    private static int resumeAt(final List<Token> spoken, final int open, final int close, final boolean direct,
+                                final boolean clause) {
+        for (int i = open + 2; i < close; i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.WHERE || type == FrostlakeLexer.ON) {
+                continue;
+            }
+            if (type == FrostlakeLexer.LPAREN || type == FrostlakeLexer.RPAREN || type == FrostlakeLexer.IS
+                    || type == FrostlakeLexer.OFFSET || type == FrostlakeLexer.SAMPLE
+                    || type == FrostlakeLexer.START || type == FrostlakeLexer.CONNECT
+                    || type == FrostlakeLexer.OVER || type == FrostlakeLexer.COMMA && !clause) {
+                return -1;
+            }
+            final int prior = spoken.get(i - 1).getType();
+            if (type == FrostlakeLexer.STAR && (prior == FrostlakeLexer.SELECT || prior == FrostlakeLexer.COMMA
+                    || prior == FrostlakeLexer.DOT)) {
+                // A star that stands for the columns is no operator.
+                return -1;
+            }
+            if (resumesAt(type) || direct && followsClause(type)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether the reading of a faulty query's tokens resumes at a token of this kind wherever the query stands. */
+    private static boolean resumesAt(final int type) {
+        return type == FrostlakeLexer.EQ || type == FrostlakeLexer.EQ_EQ || type == FrostlakeLexer.NEQ
+            || type == FrostlakeLexer.LT || type == FrostlakeLexer.LTE || type == FrostlakeLexer.GT
+            || type == FrostlakeLexer.GTE || type == FrostlakeLexer.PLUS || type == FrostlakeLexer.MINUS
+            || type == FrostlakeLexer.STAR || type == FrostlakeLexer.SLASH || type == FrostlakeLexer.PERCENT
+            || type == FrostlakeLexer.PIPE_PIPE || type == FrostlakeLexer.CARET || type == FrostlakeLexer.AND
+            || type == FrostlakeLexer.OR || type == FrostlakeLexer.LIKE || type == FrostlakeLexer.ILIKE
+            || type == FrostlakeLexer.RLIKE || type == FrostlakeLexer.REGEXP || type == FrostlakeLexer.IN
+            || type == FrostlakeLexer.BETWEEN || type == FrostlakeLexer.DOUBLE_COLON
+            || type == FrostlakeLexer.LBRACKET || type == FrostlakeLexer.COLON || type == FrostlakeLexer.COLLATE
+            || type == FrostlakeLexer.COMMA;
+    }
+
+    /** Whether a token opens what may follow a WHERE, HAVING or QUALIFY: a later clause or a set operator. */
+    private static boolean followsClause(final int type) {
+        return type == FrostlakeLexer.GROUP || type == FrostlakeLexer.HAVING || type == FrostlakeLexer.QUALIFY
+            || type == FrostlakeLexer.ORDER || type == FrostlakeLexer.LIMIT || type == FrostlakeLexer.FETCH
+            || type == FrostlakeLexer.UNION || type == FrostlakeLexer.EXCEPT || type == FrostlakeLexer.INTERSECT
+            || type == FrostlakeLexer.MINUS_KW || type == FrostlakeLexer.SEMI;
     }
 
     /** Whether a token is a number or a text written as a literal. */

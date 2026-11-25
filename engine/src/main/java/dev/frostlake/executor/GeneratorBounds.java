@@ -34,12 +34,14 @@ import java.util.Set;
  * GENERATOR's ROWCOUNT and TIMELIMIT are constants (live-verified): an argument that reads a column of a
  * relation to the call's left, or calls a function that answers anew for every row - RANDOM and the SEQ
  * family - is refused while the statement compiles, {@code argument 1 to function GENERATOR needs to be
- * constant, found 'GN.N'}, ROWCOUNT being argument 1 and TIMELIMIT argument 2 however the call names them.
+ * constant, found 'GN.N'}, numbered by its place among the arguments the call writes.
  * Arithmetic over constants, a session variable and a scalar subquery the planner folds are constants; any other
  * subquery is refused as the plan holds it,
  * {@code found '(SELECT SUM(CAST(GN.N AS NUMBER(38,0))) AS "SUM(N)" FROM GN AS GN)'}. A bound reading the row
- * around its query is a correlation, {@code found 'CORRELATION(GN.N)'}, numbered by its place among the arguments
- * written. UUID_STRING is held to be a per-row function with the others.
+ * around its query is a correlation, {@code found 'CORRELATION(GN.N)'}. UUID_STRING is held to be a per-row function
+ * with the others. The arguments are judged in the order written, each for its constancy before its type, so a
+ * subquery that does not fold is refused as no constant whatever it answers, and a type refusal of an argument
+ * written earlier comes first.
  *
  * <p>An expression that reads a row is a constant all the same when no row can change it (live-verified):
  * <pre>
@@ -87,25 +89,6 @@ final class GeneratorBounds {
         this.scope = scope;
         this.scopeTables = scopeTables;
         this.values = values;
-    }
-
-    /**
-     * Refuses a GENERATOR bound that is no constant; any other function's arguments are not judged here.
-     *
-     * @param functionName the called table function
-     * @param named        the call's named arguments
-     * @param scope        the relations to the call's left by the names they answer to, or null
-     * @param scopeTables  those relations in combined-row order, or null
-     * @param correlated   the qualifiers of the relations in scope that are the row around the call's query
-     * @param values       evaluates the parts of a bound that read no row
-     */
-    static void requireConstants(final String functionName, final List<FrostlakeParser.NamedArgumentContext> named,
-                                 final Map<String, Table> scope, final List<Table> scopeTables,
-                                 final Set<String> correlated, final RowFreeValues values) {
-        final RuntimeException refused = refusal(functionName, named, scope, scopeTables, correlated, values);
-        if (refused != null) {
-            throw refused;
-        }
     }
 
     /**
@@ -173,7 +156,7 @@ final class GeneratorBounds {
             executor.rowFreeValues(relations, correlated)) : null;
     }
 
-    /** The refusal of a GENERATOR bound that is no constant, or null; see {@link #requireConstants}. */
+    /** The refusal of a GENERATOR bound that is no constant, or null; see {@link #requireConstant}. */
     private static RuntimeException refusal(final String functionName,
                                             final List<FrostlakeParser.NamedArgumentContext> named,
                                             final Map<String, Table> scope, final List<Table> scopeTables,
@@ -183,36 +166,69 @@ final class GeneratorBounds {
         }
         final GeneratorBounds bounds = new GeneratorBounds(scope, scopeTables, values);
         for (int index = 0; index < named.size(); index++) {
-            final FrostlakeParser.NamedArgumentContext argument = named.get(index);
-            final String name = argument.variableName().getText().toUpperCase(Locale.ROOT);
-            final int place = "ROWCOUNT".equals(name) ? 1 : "TIMELIMIT".equals(name) ? 2 : 0;
-            if (place == 0 || argument.expression() == null) {
-                continue;
+            final RuntimeException refused = bounds.argumentRefusal(named.get(index), index, correlated);
+            if (refused != null) {
+                return refused;
             }
-            UnsupportedSetOperatorAll.requireNone(argument.expression());
-            final int position = readsQualifier(argument.expression(), correlated) ? index + 1 : place;
-            final ParserRuleContext bound = unwrapped(argument.expression());
-            if (bound instanceof FrostlakeParser.ScalarSubqueryExprContext
-                    && !values.folds((FrostlakeParser.ScalarSubqueryExprContext) bound)) {
-                return new RuntimeException(SqlCompilationError.of("argument " + position
-                    + " to function GENERATOR needs to be constant, found '" + values.planText(bound) + "'"));
-            }
-            if (callsUnfolded(argument.expression()) || bounds.foldsLate(argument.expression())
-                    || bounds.subtractsDates(argument.expression())) {
-                return new RuntimeException(SqlCompilationError.of("argument " + position
-                    + " to function GENERATOR needs to be constant, found '"
-                    + bounds.lateResidual(argument.expression()) + "'"));
-            }
-            if (bounds.readsNoRow(argument.expression())) {
-                continue;
-            }
-            final BoundFold fold = bounds.fold(argument.expression());
-            if (!fold.isConstant()) {
-                // What is left of it is echoed as the plan holds it: NORMAL(2.0, 0.0, RANDOM()) (live-verified).
-                return new RuntimeException(SqlCompilationError.of("argument " + position
-                    + " to function GENERATOR needs to be constant, found '" + values.planText(fold.residual())
-                    + "'"));
-            }
+        }
+        return null;
+    }
+
+    /**
+     * Refuses one GENERATOR bound that is no constant; the account judges each argument whole, its constancy before
+     * its type, in the order the call writes them, and numbers it by that place (live-verified):
+     * {@code GENERATOR(TIMELIMIT => RANDOM(), ROWCOUNT => 1)} is refused for argument 1.
+     *
+     * @param functionName the called table function; any other than GENERATOR is not judged here
+     * @param named        the call's named arguments
+     * @param index        the argument's place among them, 0-based
+     * @param scope        the relations to the call's left by the names they answer to, or null
+     * @param scopeTables  those relations in combined-row order, or null
+     * @param correlated   the qualifiers of the relations in scope that are the row around the call's query
+     * @param values       evaluates the parts of a bound that read no row
+     */
+    static void requireConstant(final String functionName, final List<FrostlakeParser.NamedArgumentContext> named,
+                                final int index, final Map<String, Table> scope, final List<Table> scopeTables,
+                                final Set<String> correlated, final RowFreeValues values) {
+        if (!GENERATOR.equals(functionName)) {
+            return;
+        }
+        final RuntimeException refused =
+            new GeneratorBounds(scope, scopeTables, values).argumentRefusal(named.get(index), index, correlated);
+        if (refused != null) {
+            throw refused;
+        }
+    }
+
+    /** The refusal of one ROWCOUNT or TIMELIMIT bound that is no constant, or null for any other argument. */
+    private RuntimeException argumentRefusal(final FrostlakeParser.NamedArgumentContext argument, final int index,
+                                             final Set<String> correlated) {
+        final String name = argument.variableName().getText().toUpperCase(Locale.ROOT);
+        if (!"ROWCOUNT".equals(name) && !"TIMELIMIT".equals(name) || argument.expression() == null) {
+            return null;
+        }
+        UnsupportedSetOperatorAll.requireNone(argument.expression());
+        final int position = index + 1;
+        final ParserRuleContext written = inlined(argument.expression());
+        final ParserRuleContext bound = unwrapped(written);
+        if (bound instanceof FrostlakeParser.ScalarSubqueryExprContext
+                && !values.folds((FrostlakeParser.ScalarSubqueryExprContext) bound)) {
+            return new RuntimeException(SqlCompilationError.of("argument " + position
+                + " to function GENERATOR needs to be constant, found '" + values.planText(bound) + "'"));
+        }
+        if (callsUnfolded(written) || foldsLate(written) || subtractsDates(written)) {
+            return new RuntimeException(SqlCompilationError.of("argument " + position
+                + " to function GENERATOR needs to be constant, found '" + lateResidual(written) + "'"));
+        }
+        if (readsNoRow(written)) {
+            return null;
+        }
+        final BoundFold fold = fold(written);
+        if (!fold.isConstant()) {
+            // What is left of it is echoed as the plan holds it: NORMAL(2.0, 0.0, RANDOM()) (live-verified).
+            return new RuntimeException(SqlCompilationError.of("argument " + position
+                + " to function GENERATOR needs to be constant, found '" + values.planText(fold.residual())
+                + "'"));
         }
         return null;
     }
@@ -353,7 +369,14 @@ final class GeneratorBounds {
         return !callsUnfolded(node) && !callsPerRow(node);
     }
 
-    private static boolean callsPerRow(final ParseTree node) {
+    /**
+     * Whether an expression calls a function that answers anew on every row - RANDOM, a SEQ function, UUID_STRING -
+     * outside the queries nested in it.
+     *
+     * @param node the expression
+     * @return true where it calls one
+     */
+    static boolean callsPerRow(final ParseTree node) {
         if (node instanceof FrostlakeParser.SelectStatementContext) {
             return false;
         }
@@ -695,6 +718,43 @@ final class GeneratorBounds {
     }
 
     /** The expression inside the parentheses and wrappers around it. */
+    /**
+     * A bound as the account judges it: a subquery selecting one item and nothing else - no FROM, no filter - is that
+     * item, so {@code (SELECT RANDOM()::VARCHAR)} is refused for {@code 'CAST(RANDOM() AS VARCHAR(134217728))'} and
+     * {@code (SELECT UPPER('a'))} is a constant (live-verified).
+     */
+    private static ParserRuleContext inlined(final ParserRuleContext written) {
+        ParserRuleContext node = written;
+        while (true) {
+            final ParserRuleContext bare = unwrapped(node);
+            if (!(bare instanceof FrostlakeParser.ScalarSubqueryExprContext)) {
+                return node;
+            }
+            final FrostlakeParser.SelectStatementContext query =
+                ((FrostlakeParser.ScalarSubqueryExprContext) bare).selectStatement();
+            if (query.withClause() != null || query.orderByClause() != null || query.limitClause() != null
+                    || query.fetchClause() != null || query.selectOperand().size() != 1
+                    || query.selectOperand(0).selectClause() == null) {
+                return node;
+            }
+            final FrostlakeParser.SelectClauseContext select = query.selectOperand(0).selectClause();
+            if (select.tableExpression() != null || select.whereClause() != null || select.DISTINCT() != null
+                    || select.topClause() != null || select.groupByClause() != null || select.havingClause() != null
+                    || select.qualifyClause() != null || select.connectByClause() != null
+                    || select.selectList().selectItem().size() != 1
+                    || !SelectItemAccessors.isExprItem(select.selectList().selectItem(0))) {
+                return node;
+            }
+            final FrostlakeParser.SelectItemContext item = select.selectList().selectItem(0);
+            final ParserRuleContext value = SelectItemAccessors.getItemValueExpr(item);
+            final ParserRuleContext expression = value != null ? value : SelectItemAccessors.getItemExpression(item);
+            if (expression == null) {
+                return node;
+            }
+            node = expression;
+        }
+    }
+
     private static ParserRuleContext unwrapped(final ParserRuleContext written) {
         ParserRuleContext node = written;
         while (true) {

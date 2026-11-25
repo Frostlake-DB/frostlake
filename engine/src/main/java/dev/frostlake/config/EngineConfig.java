@@ -114,6 +114,12 @@ public class EngineConfig {
      */
     public static final String PROP_STAGE_FILE_URL_ENABLED = "stage.file.urlEnabled";
     public static final String PROP_STAGE_S3_LOCAL_MAPPINGS = "stage.s3.localMappings";
+    /** Opt-in: download an {@code s3://} file missing below the local root through an {@link S3ObjectSource}. */
+    public static final String PROP_STAGE_S3_FETCH = "stage.s3.fetch";
+    /** The AWS region the {@link S3ObjectSource} reads from; empty leaves it to the SDK's default chain. */
+    public static final String PROP_STAGE_S3_REGION = "stage.s3.region";
+    /** An S3-compatible endpoint the {@link S3ObjectSource} reads from instead of AWS; empty for AWS itself. */
+    public static final String PROP_STAGE_S3_ENDPOINT = "stage.s3.endpoint";
     public static final String PROP_STAGE_INTERNAL_LOCAL_ROOT = "stage.internal.localRoot";
     public static final String PROP_PYTHON_VENV = "python.venv";
 
@@ -244,6 +250,9 @@ public class EngineConfig {
         properties.setProperty(PROP_QUERY_RESULT_CACHE_CELLS, String.valueOf(DEFAULT_QUERY_RESULT_CACHE_CELLS));
         properties.setProperty(PROP_STAGE_S3_LOCAL_ROOT, DEFAULT_STAGE_S3_LOCAL_ROOT);
         properties.setProperty(PROP_STAGE_S3_LOCAL_MAPPINGS, "");
+        properties.setProperty(PROP_STAGE_S3_FETCH, "false");
+        properties.setProperty(PROP_STAGE_S3_REGION, "");
+        properties.setProperty(PROP_STAGE_S3_ENDPOINT, "");
         properties.setProperty(PROP_STAGE_INTERNAL_LOCAL_ROOT, DEFAULT_STAGE_INTERNAL_LOCAL_ROOT);
     }
 
@@ -598,6 +607,28 @@ public class EngineConfig {
      */
     public String getStageS3LocalMappings() {
         return getProperty(PROP_STAGE_S3_LOCAL_MAPPINGS, "");
+    }
+
+    /**
+     * Whether an {@code s3://} file missing below the local root is downloaded before the engine reads it, through the
+     * {@link S3ObjectSource} on the classpath (the {@code frostlake-cloud-aws} module's AWS SDK one). Off by default: the
+     * local root then stands in for S3 on its own, as before. See {@link S3PathResolver}.
+     */
+    public boolean isStageS3Fetch() {
+        return getBooleanProperty(PROP_STAGE_S3_FETCH, false);
+    }
+
+    /** The AWS region an {@link S3ObjectSource} reads from; empty (the default) leaves it to the SDK's default chain. */
+    public String getStageS3Region() {
+        return getProperty(PROP_STAGE_S3_REGION, "");
+    }
+
+    /**
+     * An S3-compatible endpoint (a URI) an {@link S3ObjectSource} reads from instead of AWS, for a local object store
+     * or a test double; empty (the default) for AWS.
+     */
+    public String getStageS3Endpoint() {
+        return getProperty(PROP_STAGE_S3_ENDPOINT, "");
     }
 
     /**

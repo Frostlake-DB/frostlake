@@ -113,6 +113,33 @@ public enum SystemSchema {
     }
 
     /**
+     * Whether a role that neither reaches ACCOUNTADMIN nor holds IMPORTED PRIVILEGES on the database sees the schema
+     * (live-verified: the others are, to such a role, schemas that do not exist; see {@link SystemDatabaseSight}).
+     *
+     * @return whether every role sees it
+     */
+    public boolean isSeenByEveryRole() {
+        switch (this) {
+            case ALERT:
+            case CORE:
+            case CORTEX:
+            case DATA_PRIVACY:
+            case IMAGES:
+            case LOCAL:
+            case ML:
+            case MODELS:
+            case NOTIFICATION:
+            case SNOWPARK:
+            case SNOWPARK_CONNECT:
+            case SPCS:
+            case TAGS:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
      * The system schema of a name, or null.
      *
      * @param databaseName the stored name of the schema's database

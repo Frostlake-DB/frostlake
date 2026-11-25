@@ -202,12 +202,17 @@ final class SchemaDdl {
         }
         appendAll(out, views);
 
+        // The session's temporary formats come first, then every permanent one, one a temporary format hides
+        // included (live-verified).
+        final Map<String, List<String>> temporaryFormats = new TreeMap<String, List<String>>();
         final Map<String, List<String>> formats = new TreeMap<String, List<String>>();
-        for (final FileFormat format : schema.getFileFormats()) {
+        for (final FileFormat format : schema.getFileFormatsWithHidden()) {
             if (relations.seesMember("FILE_FORMAT", schema, format.getName(), format.getOwner())) {
-                add(formats, format.getName(), ObjectDdl.fileFormat(format, names.object(schema, format.getName())));
+                add(format.isTemporary() ? temporaryFormats : formats, format.getName(),
+                    ObjectDdl.fileFormat(format, names.object(schema, format.getName())));
             }
         }
+        appendAll(out, temporaryFormats);
         appendAll(out, formats);
 
         final Map<String, List<String>> routines = new TreeMap<String, List<String>>();

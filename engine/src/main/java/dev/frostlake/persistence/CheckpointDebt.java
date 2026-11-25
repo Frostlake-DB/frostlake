@@ -27,6 +27,8 @@ public final class CheckpointDebt {
 
     private static final ThreadLocal<Boolean> OWED = new ThreadLocal<Boolean>();
 
+    private static final ThreadLocal<Boolean> OWED_UNLOGGED = new ThreadLocal<Boolean>();
+
     private CheckpointDebt() {
     }
 
@@ -43,6 +45,28 @@ public final class CheckpointDebt {
     public static boolean settle() {
         final boolean owed = Boolean.TRUE.equals(OWED.get());
         OWED.remove();
+        return owed;
+    }
+
+    /**
+     * Notes that the statement running on this thread changed what no log record carries, whether the log keeps the
+     * statement or not: a read of a view stream, or SYSTEM$STREAM_HAS_DATA, that re-bound it to the tables its view's
+     * names read now. A replay would leave the stream bound as it was, so the statement owes a checkpoint, which keeps
+     * the stream as the re-bind left it.
+     */
+    public static void oweUnlogged() {
+        OWED_UNLOGGED.set(Boolean.TRUE);
+    }
+
+    /**
+     * Whether the statement running on this thread owes a checkpoint for what it changed that no log record carries,
+     * the debt cleared (see {@link #oweUnlogged}).
+     *
+     * @return whether it changed such state
+     */
+    public static boolean settleUnlogged() {
+        final boolean owed = Boolean.TRUE.equals(OWED_UNLOGGED.get());
+        OWED_UNLOGGED.remove();
         return owed;
     }
 }

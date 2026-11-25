@@ -40,7 +40,7 @@ final class TypelessDeclarations {
         if (node instanceof FrostlakeParser.UntypedDeclarationItemContext) {
             final FrostlakeParser.UntypedDeclarationItemContext item =
                 (FrostlakeParser.UntypedDeclarationItemContext) node;
-            if (item.booleanExpr() == null) {
+            if (item.booleanExpr() == null && item.anonymousCallValue() == null) {
                 throw refusal(item.identifier(), item.identifier().getStart());
             }
         }

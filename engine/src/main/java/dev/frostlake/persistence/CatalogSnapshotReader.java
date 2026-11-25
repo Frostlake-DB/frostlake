@@ -53,6 +53,7 @@ import dev.frostlake.metastore.model.ScalingPolicy;
 import dev.frostlake.metastore.model.ScheduleType;
 import dev.frostlake.metastore.model.Schema;
 import dev.frostlake.metastore.model.SearchOptimizationExpression;
+import dev.frostlake.metastore.model.SemanticView;
 import dev.frostlake.metastore.model.Sequence;
 import dev.frostlake.metastore.model.SequenceDefault;
 import dev.frostlake.metastore.model.Stage;
@@ -346,6 +347,7 @@ final class CatalogSnapshotReader {
                 }
             }
             RestCatalogSnapshots.restoreRoleGrants(roleSnapshot, role);
+            RestCatalogSnapshots.restoreRevokedFromStart(roleSnapshot, role);
         }
 
         // Grant roles to users
@@ -370,6 +372,8 @@ final class CatalogSnapshotReader {
 
         // The dropped versions UNDROP can still restore, which a snapshot written before they were kept has none of.
         DroppedObjectSnapshots.restore(snapshot.droppedObjects, catalog, s3Resolver, storageEngine);
+        // Each stream is bound to the tables it was bound to, a dropped one among the versions just restored too.
+        restoreStreamBindings(snapshot, catalog);
         // Restore current context
         if (snapshot.currentDatabase != null) {
             catalog.useDatabase(snapshot.currentDatabase);
@@ -415,6 +419,37 @@ final class CatalogSnapshotReader {
      * snapshotted as — to the sequence it names, once every database is back (see {@link SequenceDefault}). A
      * default naming no sequence stays the expression it was.
      */
+    /**
+     * Binds each restored stream to the tables its snapshot saved it as bound to (see StreamSources#restoreBinding).
+     */
+    private static void restoreStreamBindings(final CatalogSnapshot snapshot, final Catalog catalog) {
+        for (final DatabaseSnapshot dbSnapshot : snapshot.databases) {
+            final Database db = catalog.findDatabase(dbSnapshot.name);
+            if (db == null || dbSnapshot.schemas == null) {
+                continue;
+            }
+            for (final SchemaSnapshot schemaSnapshot : dbSnapshot.schemas) {
+                if (schemaSnapshot.streams == null) {
+                    continue;
+                }
+                for (final StreamSnapshot streamSnapshot : schemaSnapshot.streams) {
+                    if (streamSnapshot.boundTableIds == null) {
+                        continue;
+                    }
+                    final Stream stream;
+                    try {
+                        stream = db.schemaExact(schemaSnapshot.name).getStream(streamSnapshot.name);
+                    } catch (final RuntimeException gone) {
+                        continue;
+                    }
+                    if (stream != null) {
+                        StreamSources.restoreBinding(catalog, stream, streamSnapshot.boundTableIds);
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Lists each restored view stream on the tables its snapshot saved it as reading (see
      * StreamSources#restoreShownOn).
@@ -748,6 +783,18 @@ final class CatalogSnapshotReader {
                         }
                     }
                     schema.addCortexSearchService(service);
+                }
+            }
+
+            // Load semantic views. Null on older snapshots.
+            if (schemaSnapshot.semanticViews != null) {
+                for (final SemanticViewSnapshot viewSnapshot : schemaSnapshot.semanticViews) {
+                    final SemanticView view = new SemanticView(viewSnapshot.name, viewSnapshot.tables,
+                        viewSnapshot.relationships, viewSnapshot.expressions, viewSnapshot.comment);
+                    view.setOwner(viewSnapshot.owner);
+                    view.restoreCreatedTime(viewSnapshot.createdAt);
+                    view.restoreLastDdlTime(viewSnapshot.lastDdlAt);
+                    schema.addSemanticView(view);
                 }
             }
 
@@ -1209,7 +1256,12 @@ final class CatalogSnapshotReader {
                         dt.keepDefinitionHome(dtSnapshot.definitionDatabase, dtSnapshot.definitionSchema);
                     }
                     if (dtSnapshot.createText != null) {
-                        dt.setCreateText(dtSnapshot.createText);
+                        if (dtSnapshot.createNameFrom != null && dtSnapshot.createNameTo != null) {
+                            dt.setCreateText(dtSnapshot.createText, dtSnapshot.createNameFrom.intValue(),
+                                dtSnapshot.createNameTo.intValue());
+                        } else {
+                            dt.setCreateText(dtSnapshot.createText);
+                        }
                         dt.setBodyText(dtSnapshot.bodyText);
                     }
                     if (dtSnapshot.schedulingState != null) {
@@ -1344,6 +1396,7 @@ final class CatalogSnapshotReader {
         col.setFormatType(colSnapshot.formatType);
         if (colSnapshot.virtualExpression != null) {
             col.setVirtualExpression(colSnapshot.virtualExpression, colSnapshot.virtualText);
+            col.restoreVirtualRead(colSnapshot.virtualRead, colSnapshot.virtualDefinedType);
         }
         col.setOrdinalPosition(colSnapshot.ordinalPosition);
         SnapshotTags.restore(col, colSnapshot.tags);

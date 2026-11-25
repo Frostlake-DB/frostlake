@@ -80,13 +80,14 @@ public enum TableFunctionParameterKind {
 
     /**
      * A number. {@code GENERATOR(ROWCOUNT =&gt; '3')} is {@code invalid type [VARCHAR(1)] for parameter 'ROWCOUNT'}
-     * and a BOOLEAN {@code invalid type [BOOLEAN] …}: a text that spells a number is not converted, while a FLOAT
-     * and a NULL of a numeric type are taken.
+     * and a BOOLEAN {@code invalid type [BOOLEAN] …}, a DATE, a TIME, a TIMESTAMP and a BINARY likewise: a text that
+     * spells a number is not converted, while a FLOAT and a NULL of a numeric type are taken.
      */
     NUMBER {
         @Override
         boolean accepts(final DataType declared) {
-            return !(declared instanceof StringType || declared instanceof BooleanType);
+            return !(declared instanceof StringType || declared instanceof BooleanType
+                || declared instanceof DateTimeType || declared instanceof BinaryType);
         }
     },
 

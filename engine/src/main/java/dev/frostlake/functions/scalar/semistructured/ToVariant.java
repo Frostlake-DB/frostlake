@@ -18,6 +18,7 @@ package dev.frostlake.functions.scalar.semistructured;
 
 import dev.frostlake.functions.BuiltInFunction;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.FractionScale;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.VariantType;
 import dev.frostlake.values.VariantValue;
@@ -50,6 +51,9 @@ public class ToVariant extends BuiltInFunction {
                 || value instanceof java.time.OffsetDateTime
                 || value instanceof java.time.ZonedDateTime
                 || value instanceof dev.frostlake.values.BinaryValue) {
+            // A time or timestamp keeps the scale of its type, which a bare FF prints once the VARIANT is rendered
+            // as text (see FractionScale).
+            FractionScale.carry(value, FractionScale.of(value));
             return value;
         }
         if (value instanceof CharSequence) {

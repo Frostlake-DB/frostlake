@@ -72,13 +72,13 @@ public final class Getnextval extends TableFunction {
     }
 
     /**
-     * The one column every GETNEXTVAL answers: NEXTVAL, declared and tagged as a sequence read is.
+     * The one column every GETNEXTVAL answers: NEXTVAL, declared, tagged and NOT NULL as a sequence read is.
      *
      * @return the columns
      */
     public static List<ResultSetColumn> columns() {
         final List<ResultSetColumn> columns = new ArrayList<>();
-        columns.add(new ResultSetColumn(COLUMN, NumericType.BIGINT, null, SequenceRead.TYPE, true, false,
+        columns.add(new ResultSetColumn(COLUMN, NumericType.BIGINT, null, SequenceRead.TYPE, false, true,
             SequenceRead.range()));
         return columns;
     }

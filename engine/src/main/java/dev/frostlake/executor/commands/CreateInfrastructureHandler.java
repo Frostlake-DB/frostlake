@@ -55,6 +55,7 @@ import dev.frostlake.storage.ResultSetColumn;
 import dev.frostlake.task.TaskGraphs;
 
 import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.misc.Interval;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
@@ -616,6 +617,9 @@ public class CreateInfrastructureHandler implements CommandHandler {
                 for (final FrostlakeParser.SequenceOptionContext optionCtx : ctx.sequenceOptions().sequenceOption()) {
                     if (optionCtx.commentClause() != null) {
                         comment = ddl.extractComment(optionCtx.commentClause());
+                    } else if (CreatedObjectProperties.commentList(optionCtx)) {
+                        // A list of properties is taken, the comment holding the parser's word for it.
+                        comment = ListValues.PROPERTY_LIST;
                     }
                 }
             }
@@ -882,21 +886,47 @@ public class CreateInfrastructureHandler implements CommandHandler {
             + " cannot be created: its ORIGIN is not reached from this engine."));
     }
 
-    /** A key of the CREDENTIALS is judged by its shape before the stage's name is (see StageCredentials). */
-    private static void requireWellFormedCredentials(final FrostlakeParser.StagePropertiesContext properties) {
+    /**
+     * The CREDENTIALS are judged before the stage's name is, once the statement's FILE_FORMAT, DIRECTORY and
+     * ENCRYPTION lists are judged by their own shape (see StageCredentials).
+     */
+    private void requireWellFormedCredentials(final FrostlakeParser.StagePropertiesContext properties) {
         if (properties == null) {
             return;
         }
-        final List<FrostlakeParser.ParenOptionListContext> credentials = new ArrayList<>();
-        final List<FrostlakeParser.ParenOptionListContext> formats = new ArrayList<>();
+        String url = properties.URL() != null && properties.STRING_LITERAL() != null
+            ? ddl.extractStringLiteral(properties.STRING_LITERAL()) : null;
+        final List<ParserRuleContext> credentials = new ArrayList<>();
         for (final FrostlakeParser.StageOptionContext option : properties.stageOption()) {
-            if (option.parenOptionList() != null && StageCredentials.names(option.identifier())) {
-                credentials.add(option.parenOptionList());
-            } else if (option.parenOptionList() != null && option.FILE_FORMAT() != null) {
-                formats.add(option.parenOptionList());
+            if (option.identifier() == null || option.identifier().getText().startsWith("\"")) {
+                continue;
+            }
+            if (StageCredentials.names(option.identifier())) {
+                credentials.add(option.parenOptionList() != null ? option.parenOptionList()
+                    : option.copyOptionValue());
+            } else if ("URL".equalsIgnoreCase(option.identifier().getText()) && option.copyOptionValue() != null
+                    && option.copyOptionValue().STRING_LITERAL() != null) {
+                url = ddl.extractStringLiteral(option.copyOptionValue().STRING_LITERAL());
             }
         }
-        StageCredentials.requireWellFormed(credentials, formats);
+        final RuntimeException refusal = StageCredentials.refusal(credentials, url);
+        if (refusal == null) {
+            return;
+        }
+        for (final FrostlakeParser.StageOptionContext option : properties.stageOption()) {
+            if (option.parenOptionList() != null && option.FILE_FORMAT() != null) {
+                FileFormatClause.read(option.parenOptionList(), new FileFormat("WRITTEN", "CSV"), true);
+            } else if (option.ENCRYPTION() != null) {
+                StageEncryption.judge(option.constantList() != null ? ListValues.CONSTANT_LIST
+                    : option.booleanValue() == null ? null
+                    : option.booleanValue().getText().toUpperCase(Locale.ROOT), option.parenOptionList(), null,
+                    false, true);
+            } else if (option.parenOptionList() != null && option.identifier() != null
+                    && "DIRECTORY".equalsIgnoreCase(option.identifier().getText())) {
+                StageDirectoryOptions.read(option.parenOptionList(), true);
+            }
+        }
+        throw refusal;
     }
 
     public Object handleCreateStage(final FrostlakeParser.CreateStatementContext ctx, final boolean ifNotExists) {
@@ -934,7 +964,6 @@ public class CreateInfrastructureHandler implements CommandHandler {
             Integration storageIntegration = null;
             String endpoint = null;
             boolean credentials = false;
-            FrostlakeParser.ParenOptionListContext credentialsGroup = null;
             StageDirectoryOptions directory = null;
             final Map<String, String> formatOptions = new LinkedHashMap<>();
             final Map<String, String> copyOptions = new LinkedHashMap<>();
@@ -950,6 +979,11 @@ public class CreateInfrastructureHandler implements CommandHandler {
                         }
                         sawFileFormat = true;
                         // FILE_FORMAT = 'name' | db.schema.name | (TYPE=X ... | FORMAT_NAME=...)
+                        if (option.constantList() != null) {
+                            // A list of constants names a format by the parser's word for it (live-verified).
+                            throw new RuntimeException(SqlCompilationError.doesNotExist("File format",
+                                ListValues.CONSTANT_LIST));
+                        }
                         if (option.STRING_LITERAL() != null) {
                             fileFormat = ddl.extractStringLiteral(option.STRING_LITERAL());
                             FileFormatReference.require(catalog, SqlIdentifiers.canonicalText(fileFormat));
@@ -983,8 +1017,21 @@ public class CreateInfrastructureHandler implements CommandHandler {
                         // Judged once the location, which may be written after it, is known (see StageEncryption).
                         encryptionGiven = true;
                         encryptionGroup = option.parenOptionList();
-                        encryptionWritten = option.booleanValue() == null ? null
+                        // A list of constants is no property list, named by the parser's word for it.
+                        encryptionWritten = option.constantList() != null ? ListValues.CONSTANT_LIST
+                            : option.booleanValue() == null ? null
                             : option.booleanValue().getText().toUpperCase(Locale.ROOT);
+                    } else if (option.COMMENT() != null && option.parenOptionList() != null
+                            && option.parenOptionList().parenOption().isEmpty()) {
+                        throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                            ListValues.CONSTANT_LIST, "COMMENT"));
+                    } else if (option.COMMENT() != null && option.parenOptionList() != null) {
+                        // A list of properties is taken, the comment holding the parser's word for it
+                        // (live-verified).
+                        comment = ListValues.PROPERTY_LIST;
+                    } else if (option.COMMENT() != null && option.constantList() != null) {
+                        throw CreatedObjectProperties.listedTextValue("COMMENT",
+                            option.constantList().propertyListConstant());
                     } else if (option.COMMENT() != null) {
                         comment = ddl.extractStringLiteral(option.STRING_LITERAL());
                     } else if (option.COPY_OPTIONS() != null) {
@@ -1029,9 +1076,6 @@ public class CreateInfrastructureHandler implements CommandHandler {
                         if ("CREDENTIALS".equals(key) || "STORAGE_INTEGRATION".equals(key)) {
                             sawCloudAccessOption = true;
                             credentials = credentials || "CREDENTIALS".equals(key);
-                            if ("CREDENTIALS".equals(key)) {
-                                credentialsGroup = option.parenOptionList();
-                            }
                         } else if ("DIRECTORY".equals(key)) {
                             directory = StageDirectoryOptions.read(option.parenOptionList(), true);
                         } else if ("COPY_OPTIONS".equals(key) && option.parenOptionList() != null) {
@@ -1053,8 +1097,8 @@ public class CreateInfrastructureHandler implements CommandHandler {
 
             CloudStageUrls.require(url);
             StorageIntegrationReference.requireLocation(storageIntegration, url);
-            StageCredentials.requireFilled(credentialsGroup, url);
-            // A GCS stage reaches its bucket through a storage integration alone (live-verified).
+            // A GCS stage reaches its bucket through a storage integration alone (live-verified); its CREDENTIALS
+            // were refused already (see StageCredentials).
             if (storageIntegration == null && url != null && url.regionMatches(true, 0, "gcs://", 0, 6)) {
                 throw new RuntimeException(SqlCompilationError.of("Creation of stages with direct credentials,"
                     + " including accessing public stages, has been forbidden for GCS stages. See your account"
@@ -1240,7 +1284,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
         final Privilege create = "TASK".equals(kind) ? Privilege.CREATE_TASK
             : "STAGE".equals(kind) ? Privilege.CREATE_STAGE : Privilege.CREATE_FILE_FORMAT;
         final boolean taken = "TASK".equals(kind) ? hasTaskNamed(schema, name)
-            : "STAGE".equals(kind) ? schema.holdsStageFor(name, temporary) : schema.hasFileFormatExact(name);
+            : "STAGE".equals(kind) ? schema.holdsStageFor(name, temporary) : schema.holdsFileFormatFor(name, temporary);
         try {
             // The source is found, and the session's right to clone it asked, before the name is judged.
             final Task sourceTask = "TASK".equals(kind) ? sourceSchema.getTaskExact(sourceName) : null;
@@ -1317,7 +1361,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
                     copy.markTemporary(StatementSession.current());
                 }
                 if (taken) {
-                    schema.dropFileFormatExact(name);
+                    schema.dropFileFormatFor(name, temporary);
                 }
                 schema.addFileFormat(copy);
             }
@@ -1343,13 +1387,16 @@ public class CreateInfrastructureHandler implements CommandHandler {
             // Asked before the file format a replacement drops is gone.
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_FILE_FORMAT, name);
         }
+        final boolean temporary = TemporaryObjectStatements.isTemporary(ctx);
         try {
-            // A file format whose name differs only in case is another one (live-verified).
-            DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists
-                    && !TemporaryObjectStatements.isTemporary(ctx), catalog.hasFileFormatExact(name), nameParts);
+            // A file format whose name differs only in case is another one; a temporary format takes only its own
+            // session's temporary one of the name, a permanent format only the shared one (live-verified).
+            final Schema home = catalog.requireOwningSchema(QualifiedName.of(nameParts));
+            DDLCommandHandler.refuseTakenName(ctx.or_replace() == null && !ifNotExists,
+                home.holdsFileFormatFor(simpleName, temporary), nameParts);
             requireCreateUnlessTemporary(ctx, Privilege.CREATE_FILE_FORMAT, name);
             final FileFormat fileFormat = new FileFormat(simpleName, "CSV");
-            if (TemporaryObjectStatements.isTemporary(ctx)) {
+            if (temporary) {
                 // Its session's alone, and gone when that session ends (live-verified).
                 fileFormat.markTemporary(StatementSession.current());
             }
@@ -1367,20 +1414,16 @@ public class CreateInfrastructureHandler implements CommandHandler {
             if (comment != null) {
                 fileFormat.setComment(comment);
             }
-            if (ctx.or_replace() != null) {
+            if (ctx.or_replace() != null && home.holdsFileFormatFor(simpleName, temporary)) {
                 // The options are judged before the format a replacement drops is gone: a refused CREATE OR REPLACE
                 // leaves the old one as it was (live-verified).
-                try {
-                    catalog.dropFileFormatExact(name);
-                } catch (final RuntimeException ignored) {
-                    // OR REPLACE: nothing to drop
-                }
+                home.dropFileFormatFor(simpleName, temporary);
             }
             // The options are judged BEFORE existence: an invalid option refuses even over an existing
             // format, IF NOT EXISTS or not (live-verified).
-            if (catalog.hasFileFormatExact(name)) {
+            if (home.holdsFileFormatFor(simpleName, temporary)) {
                 throw new NameTakenException(SqlCompilationError.of("Object '"
-                    + SqlIdentifiers.spellCanonical(catalog.getFileFormat(name).getName()) + "' already exists."));
+                    + SqlIdentifiers.spellCanonical(simpleName) + "' already exists."));
             }
             catalog.addFileFormat(name, fileFormat);
             if (grantsOfNew != null) {
@@ -1436,8 +1479,13 @@ public class CreateInfrastructureHandler implements CommandHandler {
             final String[] newParts = qualifiedNameParts(action.qualifiedName());
             final String newSimple = newParts[newParts.length - 1];
             catalog.resolveOwningSchema(newName).requireCreatable(Privilege.CREATE_FILE_FORMAT);
-            // The new name is taken: refused before the old one is given up.
-            if (catalog.hasFileFormat(newName)) {
+            // The new name is taken: refused before the old one is given up. A temporary format's new name is taken
+            // by its session's own temporary format or a shared one, a permanent format's by a shared one alone
+            // (live-verified).
+            final Schema target = catalog.resolveOwningSchema(newName);
+            final boolean ownTemporary = fileFormat.isTemporary() && fileFormat.getCreatedInSession() != null;
+            if (target.holdsFileFormatFor(newSimple, false)
+                    || ownTemporary && target.holdsFileFormatFor(newSimple, true)) {
                 throw DDLCommandHandler.namedAsWritten(new NameTakenException(SqlCompilationError.of("Object '"
                     + SqlIdentifiers.spellCanonical(newSimple) + "' already exists.")), newParts);
             }
@@ -1445,7 +1493,7 @@ public class CreateInfrastructureHandler implements CommandHandler {
             // create one, once the name is found free (live-verified).
             queryExecutor.requireCreatePrivilege(Privilege.CREATE_FILE_FORMAT, catalog.resolveOwningSchema(newName));
             final String grantedBefore = catalog.resolveOwningSchema(name).qualifiedName(fileFormat.getName());
-            catalog.dropFileFormat(name);
+            catalog.resolveOwningSchema(name).removeFileFormat(fileFormat);
             fileFormat.setName(newSimple);
             catalog.addFileFormat(newName, fileFormat);
             GrantNames.renamed(catalog, "FILE_FORMAT", grantedBefore,

@@ -20,6 +20,7 @@ import dev.frostlake.executor.LeadingCommentOffset;
 import dev.frostlake.executor.SqlCompilationError;
 import java.util.ArrayList;
 import java.util.List;
+import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -35,6 +36,12 @@ import org.antlr.v4.runtime.tree.TerminalNode;
  * reports instead.
  */
 public final class SignatureTailLine {
+
+    /** The statement that stands in for one the account reads whole, while the rest of a request is read again. */
+    private static final String STAND_IN = "SELECT 1";
+
+    /** How many more statements read whole a request's text is read again for, past the ones its parse read. */
+    private static final int MAX_LATER_READINGS = 8;
 
     private SignatureTailLine() {
     }
@@ -138,12 +145,15 @@ public final class SignatureTailLine {
         boolean leftOut = false;
         // The first statement the account reads whole, which a request of several fails at.
         SignatureRecovery readWhole = null;
+        // Where each statement the account reads whole stands: its first character and its last before its ';'.
+        final List<int[]> readWholeAt = new ArrayList<>();
         for (final SignatureRecovery reading : SignatureRecovery.ofStatements(script, sql)) {
             final List<String> faults = reading.lines();
             if (faults != null && faults.isEmpty() && refusedWithin(listener, reading)) {
                 if (readWhole == null) {
                     readWhole = reading;
                 }
+                readWholeAt.add(standingOf(reading));
                 if (text == null) {
                     text = sql.toCharArray();
                 }
@@ -202,6 +212,7 @@ public final class SignatureTailLine {
         if (lines.isEmpty() && !leftOut) {
             return;
         }
+        final boolean readingFaults = !lines.isEmpty();
         if (SignatureRecovery.holdsAStatement(new String(text))) {
             for (final String line : SyntaxErrorListener.linesReportedFor(new String(text), true)) {
                 lines.add(line);
@@ -223,7 +234,7 @@ public final class SignatureTailLine {
             ordered.add(place, lines.get(i));
             orderedAt.add(place, at);
         }
-        if (ordered.isEmpty()) {
+        if (ordered.isEmpty() || readWhole != null && !readingFaults && restReadsWhole(sql, readWholeAt)) {
             noteWholeStatement(readWhole, text, sql, listener);
             return;
         }
@@ -278,6 +289,69 @@ public final class SignatureTailLine {
         final Token start = readWhole.ownStatement().getStart();
         listener.noteWholeStatement(new WholeStatementReading(start.getStartIndex(), readWhole.last().getStopIndex(),
             start.getLine(), start.getCharPositionInLine(), sql, SqlCompilationError.of(refused)));
+    }
+
+    /** The first character of a statement a reading reads whole and its last one before the ';' ending it. */
+    private static int[] standingOf(final SignatureRecovery reading) {
+        final Token last = reading.last();
+        final int stop = last.getType() == FrostlakeLexer.SEMI ? last.getStartIndex() - 1 : last.getStopIndex();
+        return new int[] {reading.ownStatement().getStart().getStartIndex(), stop};
+    }
+
+    /**
+     * Whether every fault left in a request of several, once the statements the account reads whole stand aside, lies
+     * in a later statement the account reads whole too, one this parse did not read as a statement after the first
+     * one's fault: the account fails at the first of them, the later ones never compiled (live-verified: {@code
+     * DESCRIBE TABLE t1 (a) x = @s!=x; DESCRIBE TABLE t1 (a) y = @s!=y} names the first DESCRIBE, with {@code invalid
+     * parameter 'x'}). Each statement read whole is replaced by a statement that compiles, where it stands, and the
+     * text read again.
+     */
+    private static boolean restReadsWhole(final String sql, final List<int[]> readWholeAt) {
+        final char[] rest = sql.toCharArray();
+        for (final int[] at : readWholeAt) {
+            standIn(rest, at[0], at[1]);
+        }
+        for (int round = 0; round < readWholeAt.size() + MAX_LATER_READINGS; round++) {
+            final String restText = new String(rest);
+            if (SyntaxErrorListener.linesReportedFor(restText, true).isEmpty()) {
+                return round > 0;
+            }
+            final SyntaxErrorListener restListener = new SyntaxErrorListener(restText, true);
+            final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(restText));
+            lexer.removeErrorListeners();
+            lexer.addErrorListener(restListener);
+            final FrostlakeParser parser = new FrostlakeParser(new CommonTokenStream(lexer));
+            ColdPrediction.arm(parser);
+            parser.removeErrorListeners();
+            parser.addErrorListener(restListener);
+            final FrostlakeParser.SqlScriptContext restScript = parser.sqlScript();
+            boolean found = false;
+            for (final SignatureRecovery reading : SignatureRecovery.ofStatements(restScript, restText)) {
+                final List<String> faults = reading.lines();
+                if (faults != null && faults.isEmpty() && refusedWithin(restListener, reading)
+                        && reading.propertyRefusal() != null) {
+                    final int[] at = standingOf(reading);
+                    standIn(rest, at[0], at[1]);
+                    found = true;
+                }
+            }
+            if (!found) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** Writes a statement that compiles over a statement's characters, keeping every place after it. */
+    private static void standIn(final char[] text, final int start, final int stop) {
+        for (int i = start; i <= stop && i < text.length; i++) {
+            final int offset = i - start;
+            if (offset < STAND_IN.length()) {
+                text[i] = STAND_IN.charAt(offset);
+            } else if (text[i] != '\n') {
+                text[i] = ' ';
+            }
+        }
     }
 
     /** Whether this parse refused a token of the statement a reading reads. */

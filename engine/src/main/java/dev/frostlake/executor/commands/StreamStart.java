@@ -31,6 +31,7 @@ import dev.frostlake.metastore.model.StreamSourceType;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.Row;
+import dev.frostlake.storage.SnapshotSequence;
 import dev.frostlake.storage.TableSnapshot;
 import dev.frostlake.storage.TableStorage;
 import dev.frostlake.stream.StreamManager;
@@ -141,6 +142,9 @@ final class StreamStart {
             }
         }
         if (point == null) {
+            // The stream reads from the moment it is created, by when its creation has turned change tracking on for
+            // the tables its view reads: the range it reads holds no time one of them tracked nothing.
+            stream.restoreOffsetSequence(SnapshotSequence.mark());
             if (showInitialRows) {
                 final List<StreamRecord> initial = new ArrayList<>();
                 for (int i = 0; i < tables.size(); i++) {

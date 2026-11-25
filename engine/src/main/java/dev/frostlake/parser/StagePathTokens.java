@@ -16,6 +16,8 @@
 
 package dev.frostlake.parser;
 
+import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.IntStream;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.TokenStream;
 
@@ -42,5 +44,36 @@ public final class StagePathTokens {
         final Token ahead = input.LT(1);
         return last != null && ahead != null && ahead.getType() != Token.EOF
             && last.getStopIndex() + 1 == ahead.getStartIndex();
+    }
+
+    /**
+     * Whether the '#' or '&amp;' the lexer has just read stands inside a stage path: written straight after a run of
+     * characters that holds an '@' and, after it, a '/' ({@code @st/a#b/}, {@code @~/x&y}), with nothing in it that
+     * ends a stage reference's word for the account - a blank, a bracket, a comma, a semicolon, a quote, a backtick,
+     * an angle bracket, a bar, a character outside ASCII, or a '~' anywhere but straight after the '@'.
+     *
+     * @param input the lexer's characters, positioned just after the character read (or at it)
+     * @return whether the character belongs to a stage path
+     */
+    public static boolean markInPath(final CharStream input) {
+        boolean slash = false;
+        final int read = input.LA(-1);
+        for (int back = read == '#' || read == '&' ? 2 : 1; ; back++) {
+            final int c = input.LA(-back);
+            if (c == IntStream.EOF || endsStageWord(c) || (c == '~' && input.LA(-back - 1) != '@')) {
+                return false;
+            }
+            if (c == '/') {
+                slash = true;
+            } else if (c == '@' && slash) {
+                return true;
+            }
+        }
+    }
+
+    private static boolean endsStageWord(final int c) {
+        return Character.isWhitespace(c) || c > 0x7F || c == '(' || c == ')' || c == '[' || c == ']' || c == '{'
+            || c == '}' || c == ',' || c == ';' || c == '\'' || c == '"' || c == '`' || c == '<' || c == '>'
+            || c == '|';
     }
 }

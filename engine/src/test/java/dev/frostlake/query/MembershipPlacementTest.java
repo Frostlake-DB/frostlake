@@ -101,6 +101,9 @@ public class MembershipPlacementTest extends MeasuredCellsTestSupport {
             {"SELECT id, id NOT IN (SELECT id FROM gn) FROM fo WHERE id IS NOT NULL ORDER BY id",
                 "REFUSED SQL compilation error: | Unsupported subquery type cannot be evaluated at line 1, "
                 + "position 22"},
+            // A NULL probe is FALSE over a set that holds no NULL and cannot answer one, as under <> ALL.
+            {"SELECT id, id NOT IN (SELECT id FROM gnn) FROM fo ORDER BY k, id",
+                "5|false ;; null|false ;; 7|true ;; null|false ;; 9|true"},
         });
     }
 
@@ -167,8 +170,6 @@ public class MembershipPlacementTest extends MeasuredCellsTestSupport {
     public void aMembershipKeepsItsThreeValues() {
         Assumptions.assumeFalse(isLiveSnowflake(), THREE_VALUES);
         assertCells(new String[][] {
-            {"SELECT id, id NOT IN (SELECT id FROM gnn) FROM fo ORDER BY k, id",
-                "5|false ;; null|null ;; 7|true ;; null|null ;; 9|true"},
             {"SELECT id, 0 IN (SELECT COUNT(*) FROM g WHERE g.id = fn.id) FROM fn ORDER BY id",
                 "0|true ;; 2|true ;; 5|false"},
             {"SELECT id, k FROM fo WHERE NOT (id IN (SELECT gn.id FROM gn WHERE gn.k = 'a')) ORDER BY k, id", ""},

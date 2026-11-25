@@ -31,7 +31,10 @@ import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.types.DataType;
+import dev.frostlake.types.DateTimeType;
+import dev.frostlake.types.NumericType;
 import dev.frostlake.types.SqlTypeNames;
+import dev.frostlake.types.StringType;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.tree.ParseTree;
 
@@ -64,6 +67,10 @@ import java.util.Set;
  * {@code A + 1}.
  */
 final class VirtualColumnDefinitions {
+
+    /** How the refusal of a virtual column whose expression's type its declared type does not take starts. */
+    static final String MISMATCH =
+        "Data type of virtual column does not match the data type of its expression for column '";
 
     private VirtualColumnDefinitions() {
     }
@@ -144,9 +151,7 @@ final class VirtualColumnDefinitions {
         final List<TableColumn> scope = new ArrayList<>();
         final List<TableColumn> echoed = new ArrayList<>();
         for (final TableColumn readableColumn : readable) {
-            final TableColumn copy = readableColumn.copy();
-            copy.setStaticallyTyped(true);
-            scope.add(copy);
+            scope.add(definedCopy(readableColumn));
             echoed.add(readableColumn.copy());
         }
         final RuntimeException window = OutsideWindowCalls.refusalOf(body,
@@ -189,11 +194,155 @@ final class VirtualColumnDefinitions {
             final Token name = definition.columnDefName().getStart();
             final SourcePosition named = ExpressionSource.place(name.getLine(), name.getCharPositionInLine());
             throw new RuntimeException(SqlCompilationError.at(named.getLine(), named.getCharPositionInLine(),
-                "Data type of virtual column does not match the data type of its expression for column '"
-                + column.getName() + "'. Expected data type '" + SqlTypeNames.canonical(column.getDataType())
-                + "', found '" + SqlTypeNames.canonical(found) + "'"));
+                mismatch(column.getName(), column.getDataType(), found)));
         }
-        column.setVirtualExpression(written, told(parsed, written, relation, executor));
+        final String told = told(parsed, written, relation, executor);
+        column.setVirtualExpression(written, told);
+        readAs(column, written, found, told, relation, executor);
+    }
+
+    /**
+     * Records what a query reading a virtual column computes and the type it reads at: its told text compiled
+     * again over the columns it reads at their defined types - {@code (CAST(CAST(1 AS NUMBER(7,6)) AS NUMBER(7,6)))
+     * / A} of a {@code NUMBER(7,6) AS (1 / a)} reads as a NUMBER(13,12), {@code S} over a VARCHAR(3) as a VARCHAR(3)
+     * (live-verified). A told text the engine cannot compile is read as written, at the written expression's type.
+     */
+    private static void readAs(final TableColumn column, final String written, final DataType writtenType,
+                               final String told, final Table relation, final QueryExecutor executor) {
+        String read = written;
+        DataType readType = writtenType;
+        if (!told.equals(written)) {
+            try {
+                final Expression reparsed = ExpressionEvaluator.parse(told);
+                final ExpressionEvaluator evaluator = new ExpressionEvaluator(relation,
+                    executor.getFunctionRegistry(), executor.getCatalog(), executor);
+                final Map<String, Table> aliases = new HashMap<>();
+                aliases.put(relation.getName(), relation);
+                final List<Table> relations = new ArrayList<>();
+                relations.add(relation);
+                evaluator.setDeclaredTypeBase(relation, aliases, relations);
+                evaluator.validateColumnScope(reparsed);
+                evaluator.validateFunctionNames(reparsed);
+                final DataType toldType = evaluator.inferStaticType(reparsed);
+                if (toldType != null) {
+                    read = told;
+                    readType = toldType;
+                }
+            } catch (final RuntimeException uncompiled) {
+                // Read as written.
+            }
+        }
+        column.readVirtualAs(read, readType);
+    }
+
+    /**
+     * Refuses an external table's virtual column whose expression's type is not of its declared type's kind, at the
+     * column's name (live-verified): {@code a INT AS (value:c1::varchar)} is "Data type of virtual column does not
+     * match the data type of its expression for column 'A'. Expected data type 'NUMBER(38,0)', found
+     * 'VARCHAR(134217728)'". Unlike a table's, the widths do not count (see {@link VirtualColumnTypes#sameKind}).
+     * The expression reads VALUE, the staged file's metadata columns and the table's other virtual columns, each of
+     * these at its expression's type; a name it does not find is an invalid identifier where it stands.
+     *
+     * @param columns  the table's columns, VALUE first, in their order
+     * @param written  each virtual column's definition, in the columns' order after VALUE
+     * @param executor the executor whose functions the expressions call
+     */
+    static void judgeExternal(final List<TableColumn> columns,
+                              final List<FrostlakeParser.ExternalTableColumnContext> written,
+                              final QueryExecutor executor) {
+        final List<TableColumn> scope = new ArrayList<>();
+        for (final TableColumn column : columns) {
+            final TableColumn read = new TableColumn(column.getName(), column.getDataType(), true, null, false, false,
+                false);
+            read.setStaticallyTyped(true);
+            scope.add(read);
+        }
+        metadataColumn(scope, "METADATA$FILENAME", StringType.VARCHAR);
+        metadataColumn(scope, "METADATA$FILE_ROW_NUMBER", new NumericType("NUMBER", 18, 0));
+        metadataColumn(scope, "METADATA$FILE_CONTENT_KEY", StringType.VARCHAR);
+        metadataColumn(scope, "METADATA$FILE_LAST_MODIFIED", new DateTimeType("TIMESTAMP_NTZ", 3, false));
+        metadataColumn(scope, "METADATA$START_SCAN_TIME", DateTimeType.TIMESTAMP_LTZ);
+        for (int i = 0; i < written.size() && i + 1 < columns.size(); i++) {
+            final FrostlakeParser.ExternalTableColumnContext definition = written.get(i);
+            if (definition.expression() == null) {
+                continue;
+            }
+            final TableColumn column = columns.get(i + 1);
+            final Token start = definition.expression().getStart();
+            final Table relation = new Table("DUMMY", scope, false);
+            final Expression parsed = ExpressionEvaluator.parse(ParseTreeText.getOriginalText(
+                definition.expression()));
+            final ExpressionEvaluator evaluator = new ExpressionEvaluator(relation, executor.getFunctionRegistry(),
+                executor.getCatalog(), executor);
+            final Map<String, Table> aliases = new HashMap<>();
+            aliases.put(relation.getName(), relation);
+            final List<Table> relations = new ArrayList<>();
+            relations.add(relation);
+            evaluator.setDeclaredTypeBase(relation, aliases, relations);
+            final SourcePosition displaced = ExpressionSource.beginNested(new SourcePosition(start.getLine(),
+                start.getCharPositionInLine()));
+            final DataType found;
+            try {
+                evaluator.validateColumnScope(parsed);
+                evaluator.validateFunctionNames(parsed);
+                found = evaluator.inferStaticType(parsed);
+            } finally {
+                ExpressionSource.end(displaced);
+            }
+            if (found == null) {
+                continue;
+            }
+            if (!VirtualColumnTypes.sameKind(column.getDataType(), found)) {
+                final Token name = definition.columnDefName().getStart();
+                final SourcePosition named = ExpressionSource.place(name.getLine(), name.getCharPositionInLine());
+                throw new RuntimeException(SqlCompilationError.at(named.getLine(), named.getCharPositionInLine(),
+                    mismatch(column.getName(), column.getDataType(), found)));
+            }
+            // Another virtual column reads this one at its expression's type.
+            final TableColumn read = new TableColumn(column.getName(), found, true, null, false, false, false);
+            read.setStaticallyTyped(true);
+            scope.set(i + 1, read);
+        }
+    }
+
+    /** Adds a staged file's metadata column an external table's virtual column reads, at the type it reads at. */
+    private static void metadataColumn(final List<TableColumn> scope, final String name, final DataType type) {
+        final TableColumn column = new TableColumn(name, type, true, null, false, false, false);
+        column.setStaticallyTyped(true);
+        scope.add(column);
+    }
+
+    /** A copy of a column a virtual column's expression reads, typed as its definition wrote it. */
+    private static TableColumn definedCopy(final TableColumn column) {
+        final TableColumn copy = column.rebuiltCopy(column.getDefinedType(), column.isNullable(),
+            column.isPrimaryKey(), column.isUnique());
+        copy.setStaticallyTyped(true);
+        return copy;
+    }
+
+    /**
+     * Refuses a CREATE TABLE … LIKE whose source has a virtual column read at a type its declared type does not
+     * take: the copy judges each virtual column's told text again, at no place in the statement (live-verified) -
+     * a {@code NUMBER(7,6) AS (1 / a)} reads as a NUMBER(13,12), "error line 0 at position -1" and "Data type of
+     * virtual column does not match the data type of its expression for column 'B'. Expected data type
+     * 'NUMBER(7,6)', found 'NUMBER(13,12)'".
+     *
+     * @param copy the table the statement makes, its columns copied
+     */
+    static void refuseCopiedMismatch(final Table copy) {
+        for (final TableColumn column : copy.columnsView()) {
+            if (column.isVirtual() && !VirtualColumnTypes.matches(column.getDefinedType(), column.getDataType(),
+                    true)) {
+                throw new RuntimeException(SqlCompilationError.at(0, -1, mismatch(column.getName(),
+                    column.getDefinedType(), column.getDataType())));
+            }
+        }
+    }
+
+    /** The sentence of a virtual column whose expression's type its declared type does not take. */
+    static String mismatch(final String name, final DataType declared, final DataType found) {
+        return MISMATCH + name + "'. Expected data type '" + SqlTypeNames.canonical(declared) + "', found '"
+            + SqlTypeNames.canonical(found) + "'";
     }
 
     /**
@@ -264,12 +413,12 @@ final class VirtualColumnDefinitions {
             }
             final List<TableColumn> scope = new ArrayList<>();
             for (final TableColumn readable : table.columnsView()) {
-                final TableColumn copy = readable.copy();
-                copy.setStaticallyTyped(true);
-                scope.add(copy);
+                scope.add(definedCopy(readable));
             }
-            column.setVirtualExpression(renamed, told(ExpressionEvaluator.parse(renamed), renamed,
-                new Table("DUMMY", scope, false), executor));
+            final Table relation = new Table("DUMMY", scope, false);
+            final String told = told(ExpressionEvaluator.parse(renamed), renamed, relation, executor);
+            column.setVirtualExpression(renamed, told);
+            readAs(column, renamed, column.getDataType(), told, relation, executor);
         }
     }
 
@@ -363,8 +512,18 @@ final class VirtualColumnDefinitions {
         return false;
     }
 
-    private static String told(final Expression parsed, final String written, final Table relation,
-                               final QueryExecutor executor) {
+    /**
+     * The expression as the account tells it back, read over a relation's columns, or the text as written where it
+     * cannot be printed.
+     *
+     * @param parsed   the expression
+     * @param written  the expression as written
+     * @param relation the columns it reads
+     * @param executor the executor its functions resolve through
+     * @return the text
+     */
+    static String told(final Expression parsed, final String written, final Table relation,
+                       final QueryExecutor executor) {
         try {
             final ExpressionEvaluatorVisitor printer = new ExpressionEvaluatorVisitor(relation, null,
                 executor.getFunctionRegistry(), executor.getCatalog());

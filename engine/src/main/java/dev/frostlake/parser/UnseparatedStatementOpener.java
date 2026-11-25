@@ -33,6 +33,8 @@ import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * The first token of a statement this parser opened straight after a complete one, with no semicolon between
@@ -59,7 +61,56 @@ import java.util.List;
  */
 public final class UnseparatedStatementOpener {
 
+    /** The tokens that can be a name. */
+    private static final IntervalSet NAMES =
+        FrostlakeParser._ATN.nextTokens(FrostlakeParser._ATN.ruleToStartState[FrostlakeParser.RULE_identifier]);
+
+    /** The reserved words a property's name may be, which the statement takes only as that name. */
+    private static final IntervalSet RESERVED_PROPERTY_WORDS = FrostlakeParser._ATN.nextTokens(
+        FrostlakeParser._ATN.ruleToStartState[FrostlakeParser.RULE_reservedPropertyWord]);
+
+    /**
+     * The words live does not read as a property's name after a CREATE or an ALTER that takes one, and refuses
+     * themselves: the reserved words but those it reads there only to refuse them as no property of the kind, and ON,
+     * WITH, AS and ROW, which open clauses of their own there (live-verified, each word alone and before {@code = 1}).
+     */
+    private static final Set<String> NO_PROPERTY_NAMES = Set.of("ALL", "ALTER", "AND", "ANY", "AS", "BETWEEN", "BY",
+        "CHECK", "COLUMN", "CONNECT", "CREATE", "CURRENT", "DELETE", "DISTINCT", "DROP", "ELSE", "EXISTS", "FOLLOWING",
+        "FOR", "FROM", "GRANT", "GROUP", "HAVING", "ILIKE", "IN", "INCREMENT", "INSERT", "INTERSECT", "INTO", "IS",
+        "LIKE", "MINUS", "NOT", "NULL", "OF", "ON", "OR", "ORDER", "QUALIFY", "REGEXP", "REVOKE", "RLIKE", "ROW",
+        "ROWS", "SAMPLE", "SELECT", "SET", "SOME", "START", "TABLE", "TABLESAMPLE", "THEN", "TO", "TRIGGER", "UNION",
+        "UNIQUE", "UPDATE", "VALUES", "WHENEVER", "WHERE", "WITH");
+
     private UnseparatedStatementOpener() {
+    }
+
+    /**
+     * Whether live refuses a word where a property's name is read: one {@link #NO_PROPERTY_NAMES} lists. Any other
+     * token there is left to the reading of what follows it.
+     *
+     * @param word the token
+     * @return whether it is refused itself
+     */
+    static boolean refusedAsPropertyName(final Token word) {
+        final String text = word.getText();
+        return text != null && NO_PROPERTY_NAMES.contains(text.toUpperCase(Locale.ROOT))
+            && text.equalsIgnoreCase(FrostlakeLexer.VOCABULARY.getSymbolicName(word.getType()));
+    }
+
+    /**
+     * Whether live reads a word as the name of a property where one is read: a name, or any keyword but the ones
+     * {@link #NO_PROPERTY_NAMES} lists - COMMIT, SHOW, BEGIN, CASE and JOIN are names there.
+     *
+     * @param word the word
+     * @return whether it is a property's name there
+     */
+    static boolean namesProperty(final Token word) {
+        final String text = word.getText();
+        if (text == null || NO_PROPERTY_NAMES.contains(text.toUpperCase(Locale.ROOT))) {
+            return false;
+        }
+        return NAMES.contains(word.getType())
+            || text.equalsIgnoreCase(FrostlakeLexer.VOCABULARY.getSymbolicName(word.getType()));
     }
 
     /**
@@ -90,7 +141,8 @@ public final class UnseparatedStatementOpener {
             return takesParenthesis(last) ? null : opener;
         }
         // A word is judged only at the script's first fault, never in the wreckage of an earlier one, not after a
-        // table's alias, which this parser may have read out of a word live reads as a clause of its own, and not
+        // table's alias that is a keyword, which this parser may have read out of a word live reads as a clause of its
+        // own, and not
         // where live reads the word as the name of a property.
         // A number or a string is no property's name and nothing a statement goes on with: it is refused where it
         // stands (see LiteralRunIn).
@@ -102,8 +154,8 @@ public final class UnseparatedStatementOpener {
         if (firstFault && LiteralRunIn.isLiteral(opener)) {
             return endsInTableAlias(last) ? null : opener;
         }
-        return !firstFault || endsInTableAlias(last) || readsWordAsProperty(last) || takesWord(last, opener)
-            ? null : opener;
+        return !firstFault || endsInKeywordTableAlias(last)
+            || readsWordAsProperty(last) && !refusedAsPropertyName(opener) || takesWord(last, opener) ? null : opener;
     }
 
     /**
@@ -174,8 +226,7 @@ public final class UnseparatedStatementOpener {
      * @return whether live reads the word as a property's name
      */
     static boolean namesNextProperty(final Recognizer<?, ?> recognizer, final Token word) {
-        if (!(recognizer instanceof Parser) || word.getType() != FrostlakeLexer.IDENTIFIER
-                && word.getType() != FrostlakeLexer.QUOTED_IDENTIFIER) {
+        if (!(recognizer instanceof Parser) || !namesProperty(word)) {
             return false;
         }
         final FrostlakeParser.StatementContext last = runOnStatement((Parser) recognizer, word);
@@ -184,6 +235,32 @@ public final class UnseparatedStatementOpener {
         }
         final int leading = last.getStart().getType();
         return (leading == FrostlakeLexer.CREATE || leading == FrostlakeLexer.ALTER) && readsWordAsProperty(last);
+    }
+
+    /**
+     * The keyword a statement opens with straight after a CREATE or an ALTER that reads a property's name there, when
+     * the parse's first fault lies in that statement: live reads the keyword as the name and refuses what follows it,
+     * as it does after any name - CREATE TABLE t (a INT) CASE x is refused at the x, CREATE TABLE t (a INT) SHOW runs
+     * out of input (live-verified). Null otherwise: for a plain name, which the parse reads as one already, and for a
+     * word the statement goes on with, as a clone's IGNORE or a sequence's next option.
+     *
+     * @param recognizer the parser that met the fault
+     * @param reported the token the fault is reported at
+     * @return the keyword, or null
+     */
+    static Token propertyNameOpener(final Recognizer<?, ?> recognizer, final Token reported) {
+        if (!(recognizer instanceof Parser)) {
+            return null;
+        }
+        final Parser parser = (Parser) recognizer;
+        final Token opener = openerOf(parser, reported);
+        if (opener == null || opener.getType() == FrostlakeLexer.IDENTIFIER
+                || opener.getType() == FrostlakeLexer.QUOTED_IDENTIFIER || !namesProperty(opener)) {
+            return null;
+        }
+        final FrostlakeParser.StatementContext last = runOnStatement(parser, reported);
+        return last == null || endsInQuotedRoutineBody(last) || !readsWordAsProperty(last)
+            || !RESERVED_PROPERTY_WORDS.contains(opener.getType()) && takesWord(last, opener) ? null : opener;
     }
 
     /**
@@ -243,6 +320,17 @@ public final class UnseparatedStatementOpener {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a statement ends in a table reference's alias that is a keyword, which this parser may have read out of
+     * a word live reads as a clause of its own. After an alias that is a plain name the word run on is refused itself:
+     * SELECT * FROM t p COMMENT = 'c' is refused at the COMMENT (live-verified).
+     */
+    private static boolean endsInKeywordTableAlias(final FrostlakeParser.StatementContext statement) {
+        final int last = statement.getStop().getType();
+        return endsInTableAlias(statement) && last != FrostlakeLexer.IDENTIFIER
+            && last != FrostlakeLexer.QUOTED_IDENTIFIER;
     }
 
     /** Whether a statement ends in the alias of one of its table references. */

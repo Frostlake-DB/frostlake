@@ -96,7 +96,8 @@ public class ImplicitStageFileTest extends BaseDatabaseTest {
         assertEquals("@\"~\"", scalarOnOwnEngine("SELECT FL_GET_STAGE(TO_FILE('@~/p135/hello.txt'))"));
         assertEquals("p135/hello.txt",
             scalarOnOwnEngine("SELECT FL_GET_RELATIVE_PATH(TO_FILE('@~/p135/hello.txt'))"));
-        assertEquals("24", scalarOnOwnEngine("SELECT FL_GET_SIZE(TO_FILE('@~/p135/hello.txt'))"));
+        // The user stage encrypts its files on the client, so its 24 bytes read at their padded stored size.
+        assertEquals("32", scalarOnOwnEngine("SELECT FL_GET_SIZE(TO_FILE('@~/p135/hello.txt'))"));
         assertEquals("text/plain",
             scalarOnOwnEngine("SELECT FL_GET_CONTENT_TYPE(TO_FILE('@~/p135/hello.txt'))"));
     }

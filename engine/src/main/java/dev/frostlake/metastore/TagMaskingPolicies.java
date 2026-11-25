@@ -68,14 +68,35 @@ public final class TagMaskingPolicies {
      *         table, the schema and the database give them
      */
     public static List<String[]> sources(final Catalog catalog, final Table table, final TableColumn column) {
-        final Map<String, String[]> found = new LinkedHashMap<>();
-        if (table == null || column == null || table.getQualifiedName() == null) {
-            return new ArrayList<>(found.values());
+        if (table == null || table.getQualifiedName() == null) {
+            return new ArrayList<>();
         }
         final String[] where = QualifiedName.parse(table.getQualifiedName()).parts();
         if (where.length < 3) {
+            return new ArrayList<>();
+        }
+        return sources(catalog, where[0], where[1], table, column);
+    }
+
+    /**
+     * The policies the tags reaching a column give it for its type, for a table whose database and schema are known
+     * from where it is held rather than from the name a query last read it under.
+     *
+     * @param catalog      the catalog
+     * @param databaseName the database holding the table
+     * @param schemaName   the schema holding the table
+     * @param table        the table holding the column
+     * @param column       the column
+     * @return per policy, its name in full and the tag's database, schema and name, in the order the column, the
+     *         table, the schema and the database give them
+     */
+    public static List<String[]> sources(final Catalog catalog, final String databaseName, final String schemaName,
+                                         final Table table, final TableColumn column) {
+        final Map<String, String[]> found = new LinkedHashMap<>();
+        if (table == null || column == null || databaseName == null || schemaName == null) {
             return new ArrayList<>(found.values());
         }
+        final String[] where = {databaseName, schemaName};
         final Database database = catalog.findDatabase(where[0]);
         final Schema schema = database != null && database.hasSchema(where[1]) ? database.getSchema(where[1]) : null;
         collect(catalog, TagAssignments.on(catalog, column, where[0], where[1]), column, found);

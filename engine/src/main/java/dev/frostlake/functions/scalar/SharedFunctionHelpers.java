@@ -226,16 +226,16 @@ public final class SharedFunctionHelpers {
      * TO_VARCHAR, ||, a value embedded in a VARIANT) differed from Snowflake's.
      */
     public static String timestampText(final LocalDateTime dt) {
-        return yearText(dt.getYear()) + String.format(Locale.ROOT, "-%02d-%02d %02d:%02d:%02d.%03d",
+        return signedYearText(dt.getYear()) + String.format(Locale.ROOT, "-%02d-%02d %02d:%02d:%02d.%03d",
             dt.getMonthValue(), dt.getDayOfMonth(),
             dt.getHour(), dt.getMinute(), dt.getSecond(), dt.getNano() / 1_000_000);
     }
 
     /**
-     * A YEAR as the account prints it in every text of a date or a timestamp: the year of the era, four
-     * digits at least and never a sign — {@code 20201} for a year past 9999, where java.time's own
-     * rendering is {@code +20201}, and {@code 0002} for the second year before the first, where it is
-     * {@code -0001} (live-verified over ::VARCHAR, TO_VARCHAR, {@code ||} and the driver's text).
+     * A YEAR as a client driver prints it in the display text of a date or a timestamp cell: the year of
+     * the era, four digits at least and never a sign — {@code 20201} for a year past 9999, where java.time's
+     * own rendering is {@code +20201}, and {@code 0002} for the second year before the first, where it is
+     * {@code -0001}.
      *
      * @param prolepticYear the ISO year, 0 being the first year before the first
      * @return the year's text
@@ -245,48 +245,40 @@ public final class SharedFunctionHelpers {
     }
 
     /**
-     * A DATE's text inside a VARIANT: {@link #textOf}'s, except that a year before the first keeps its
-     * proleptic number — live's VARIANT of the second year BC reads {@code "-1-01-01"} where its
-     * ::VARCHAR reads {@code 0002-01-01}, the year 0 reads {@code "0000-01-01"}, and one past 9999 reads
-     * {@code "20201-01-15"} (live-verified).
+     * A YEAR as SQL text spells it in a date or a timestamp — ::VARCHAR, TO_VARCHAR, {@code ||}, a VARIANT's
+     * string: four digits at least from the year 0 on ({@code 0000}, {@code 0045}, {@code 20201}) and the
+     * signed proleptic number, unpadded, before it ({@code -1}, {@code -44}, {@code -12345}) (live-verified).
+     *
+     * @param prolepticYear the ISO year, 0 being the first year before the first
+     * @return the year's text
+     */
+    public static String signedYearText(final int prolepticYear) {
+        return prolepticYear < 0 ? Integer.toString(prolepticYear)
+            : String.format(Locale.ROOT, "%04d", prolepticYear);
+    }
+
+    /**
+     * A DATE's text inside a VARIANT: {@link #textOf}'s, its year spelled by {@link #signedYearText}.
      *
      * @param date the date
      * @return its text as a VARIANT string holds it
      */
     public static String variantDateText(final LocalDate date) {
-        if (date.getYear() > 0) {
-            return textOf(date);
-        }
-        return signedYearText(date.getYear()) + String.format(Locale.ROOT, "-%02d-%02d", date.getMonthValue(),
-            date.getDayOfMonth());
-    }
-
-    /** A year before the first as a VARIANT's text spells it: its proleptic number, {@code 0000} for the year 0. */
-    private static String signedYearText(final int prolepticYear) {
-        return prolepticYear == 0 ? "0000" : Integer.toString(prolepticYear);
+        return textOf(date);
     }
 
     /**
      * A temporal's text inside a VARIANT, the text TO_JSON and a client read in quotes: a DATE as
      * {@link #variantDateText} spells it, a TIME to the second and a timestamp to the millisecond with its
-     * offset where it has one — {@code "10:00:00"}, {@code "2024-01-15 10:00:00.000 +0200"} — and, as for a
-     * DATE, a timestamp before the first year keeps its proleptic year: {@code "-1-01-15 10:00:00.000"}
-     * where the ::VARCHAR of a timestamp stepped there by whole days or years reads {@code 0002-01-15 …}
-     * (live-verified).
+     * offset where it has one — {@code "10:00:00"}, {@code "2024-01-15 10:00:00.000 +0200"}, and a year before
+     * the first by its signed proleptic number, {@code "-1-01-15 10:00:00.000"} — the same text as
+     * {@link #textOf}'s.
      *
      * @param value a DATE, a TIME or a timestamp
      * @return its text as a VARIANT holds it
      */
     public static String variantTemporalText(final Object value) {
-        if (value instanceof LocalDate) {
-            return variantDateText((LocalDate) value);
-        }
-        final String text = textOf(value);
-        final int year = value instanceof LocalDateTime ? ((LocalDateTime) value).getYear()
-            : value instanceof ZonedDateTime ? ((ZonedDateTime) value).getYear()
-            : value instanceof OffsetDateTime
-                ? ((OffsetDateTime) value).toInstant().atZone(SessionZone.current()).getYear() : 1;
-        return year > 0 ? text : signedYearText(year) + text.substring(yearText(year).length());
+        return textOf(value);
     }
 
     /**
@@ -354,12 +346,21 @@ public final class SharedFunctionHelpers {
      * @return the rendering, a zero offset spelled {@code Z}
      */
     public static String writtenOffsetTimestampText(final ZonedDateTime dt) {
-        return timestampText(dt.toLocalDateTime()) + " " + offsetText(dt.getOffset());
+        return timestampText(WideOffsetZone.wallClock(dt)) + " " + offsetText(WideOffsetZone.offsetSeconds(dt));
     }
 
     /** {@code Z} at zero, else {@code ±HHMM} — Snowflake's offset spelling. */
     public static String offsetText(final ZoneOffset offset) {
-        final int seconds = offset.getTotalSeconds();
+        return offsetText(offset.getTotalSeconds());
+    }
+
+    /**
+     * {@code Z} at zero, else {@code ±HHMM}, for an offset of seconds that may be wider than a zone offset holds.
+     *
+     * @param seconds the offset, in seconds
+     * @return the spelling
+     */
+    public static String offsetText(final int seconds) {
         if (seconds == 0) {
             return "Z";
         }
@@ -376,7 +377,7 @@ public final class SharedFunctionHelpers {
     /**
      * A value rendered for a STRING context (::VARCHAR, TO_VARCHAR/TO_CHAR without a format, {@code ||},
      * embedding into a VARIANT): temporals use Snowflake's default output forms above, everything else its
-     * ordinary text. A DATE is {@code YYYY-MM-DD} with its era year — see {@link #yearText}.
+     * ordinary text. A DATE is {@code YYYY-MM-DD} with its year as {@link #signedYearText} spells it.
      */
     public static String textOf(final Object value) {
         final String sessionFormatted = sessionFormatted(value);
@@ -385,7 +386,7 @@ public final class SharedFunctionHelpers {
         }
         if (value instanceof LocalDate) {
             final LocalDate date = (LocalDate) value;
-            return yearText(date.getYear()) + String.format(Locale.ROOT, "-%02d-%02d", date.getMonthValue(),
+            return signedYearText(date.getYear()) + String.format(Locale.ROOT, "-%02d-%02d", date.getMonthValue(),
                 date.getDayOfMonth());
         }
         if (value instanceof ZonedDateTime) {
@@ -553,12 +554,17 @@ public final class SharedFunctionHelpers {
         if (v instanceof LocalDate) return (LocalDate) v;
         refuseStructuredVariant(v, "DATE");
         // A TIMESTAMP_TZ truncates to the date its OWN wall clock names, never to the UTC one.
-        if (v instanceof ZonedDateTime) return ((ZonedDateTime) v).toLocalDate();
+        if (v instanceof ZonedDateTime) return WideOffsetZone.wallClock((ZonedDateTime) v).toLocalDate();
         if (v instanceof LocalDateTime) return ((LocalDateTime) v).toLocalDate();
         final String s = v.toString().trim();
         final String sessionFormat = SessionInputFormats.date();
         if (sessionFormat != null) return LocalDate.from(sessionFormatted(s, sessionFormat, "Date"));
-        try { return LocalDate.parse(s); } catch (final Exception ignored) {}
+        if (AutoTemporalParser.startsSigned(s)) {
+            final LocalDate signed = AutoTemporalParser.parseSignedDate(s);
+            if (signed != null) return signed;
+        } else {
+            try { return LocalDate.parse(s); } catch (final Exception ignored) {}
+        }
         final LocalDateTime epoch = digitEpochAtUtc(s);
         if (epoch != null) return epoch.toLocalDate();
         final LocalDate scanned = AutoTemporalParser.parseDate(s);
@@ -633,7 +639,7 @@ public final class SharedFunctionHelpers {
         // 10:00:00 for '2020-01-01 10:00:00 +0300'::TIMESTAMP_TZ::TIMESTAMP_NTZ, keeping the digits.
         // The cast to a TIMESTAMP_LTZ beside it CONVERTS (23:00 -0800), so the two must not share a
         // helper — that one goes through toSessionOffsetDateTime.
-        if (v instanceof ZonedDateTime) return ((ZonedDateTime) v).toLocalDateTime();
+        if (v instanceof ZonedDateTime) return WideOffsetZone.wallClock((ZonedDateTime) v);
         if (v instanceof LocalDate) return ((LocalDate) v).atStartOfDay();
         final String s = v.toString().trim();
         final String sessionFormat = SessionInputFormats.timestamp();
@@ -644,9 +650,18 @@ public final class SharedFunctionHelpers {
                 return targetCarriesZone ? written.withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime()
                     : written.toLocalDateTime();
             }
+            if (read instanceof ZonedDateTime) {
+                final ZonedDateTime written = (ZonedDateTime) read;
+                return targetCarriesZone ? written.withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime()
+                    : WideOffsetZone.wallClock(written);
+            }
             return LocalDateTime.from(read);
         }
-        try { return LocalDateTime.parse(s); } catch (final Exception ignored) {}
+        // A signed year is a DATE's alone: '-0044-03-15' is no timestamp (live-verified), only an epoch may be signed.
+        final boolean signed = AutoTemporalParser.startsSigned(s);
+        if (!signed) {
+            try { return LocalDateTime.parse(s); } catch (final Exception ignored) {}
+        }
         final LocalDateTime epoch = digitEpochAtUtc(s);
         if (epoch != null) return epoch;
         // Snowflake's AUTO input detection covers far more than ISO-8601: a zone designator, MM/DD/YYYY,
@@ -657,7 +672,9 @@ public final class SharedFunctionHelpers {
             return targetCarriesZone && offset[0] != AutoTemporalParser.NO_OFFSET
                 ? scanned.minusMinutes(offset[0]) : scanned;
         }
-        try { return LocalDate.parse(s).atStartOfDay(); } catch (final Exception ignored) {}
+        if (!signed) {
+            try { return LocalDate.parse(s).atStartOfDay(); } catch (final Exception ignored) {}
+        }
         throw new RuntimeException("Timestamp '" + s + "' is not recognized");
     }
 
@@ -694,6 +711,9 @@ public final class SharedFunctionHelpers {
         final String sessionFormat = SessionInputFormats.timestamp();
         if (sessionFormat != null) {
             final TemporalAccessor read = sessionFormatted(s, sessionFormat, "Timestamp");
+            if (read instanceof ZonedDateTime) {
+                return ((ZonedDateTime) read).toInstant().atZone(zone).toOffsetDateTime();
+            }
             return read instanceof OffsetDateTime
                 ? ((OffsetDateTime) read).toInstant().atZone(zone).toOffsetDateTime()
                 : LocalDateTime.from(read).atZone(zone).toOffsetDateTime();
@@ -719,24 +739,17 @@ public final class SharedFunctionHelpers {
         return writtenOffsetTimestamp(scanned, offset[0]).toInstant().atZone(zone).toOffsetDateTime();
     }
 
-    /** The widest offset a zone offset holds, in minutes: 18 hours. */
-    private static final int WIDEST_HELD_OFFSET_MINUTES = 18 * 60;
-
     /**
      * A wall clock written with an offset of minutes, as the instant it names at that offset. Live reads any
-     * offset of two-digit hours, '... +25:00' naming the instant 25 hours before the wall clock (live-verified). A
-     * zone offset spans 18 hours at most, so a wider one is held at Z with its instant kept: it compares, converts
-     * and counts as live does, while the offset it was written with is not kept.
+     * offset of two-digit hours, '... +25:00' naming the instant 25 hours before the wall clock, and keeps it as
+     * written (live-verified); see {@link WideOffsetZone} for an offset wider than a zone offset holds.
      *
      * @param wall    the wall clock written
      * @param minutes the offset written, in minutes
      * @return the timestamp
      */
     private static ZonedDateTime writtenOffsetTimestamp(final LocalDateTime wall, final int minutes) {
-        if (Math.abs(minutes) <= WIDEST_HELD_OFFSET_MINUTES) {
-            return wall.atOffset(ZoneOffset.ofTotalSeconds(minutes * 60)).toZonedDateTime();
-        }
-        return wall.minusMinutes(minutes).atZone(ZoneOffset.UTC);
+        return WideOffsetZone.at(wall, minutes);
     }
 
     /**
@@ -776,6 +789,9 @@ public final class SharedFunctionHelpers {
         final String sessionFormat = SessionInputFormats.timestamp();
         if (sessionFormat != null) {
             final TemporalAccessor read = sessionFormatted(s, sessionFormat, "Timestamp");
+            if (read instanceof ZonedDateTime) {
+                return (ZonedDateTime) read;
+            }
             return read instanceof OffsetDateTime ? ((OffsetDateTime) read).toZonedDateTime()
                 : LocalDateTime.from(read).atZone(zone).withFixedOffsetZone();
         }
@@ -813,7 +829,7 @@ public final class SharedFunctionHelpers {
             return computed;
         }
         if (source instanceof ZonedDateTime) {
-            return computed.atZone(((ZonedDateTime) source).getOffset());
+            return WideOffsetZone.atOffsetOf(computed, (ZonedDateTime) source);
         }
         if (!(source instanceof OffsetDateTime)) {
             return computed;
@@ -848,7 +864,7 @@ public final class SharedFunctionHelpers {
         if (v == null) return null;
         if (v instanceof LocalTime) return (LocalTime) v;
         // As for a DATE: the TZ's own wall clock, so 10:00 +0300 casts to 10:00 and not to 07:00.
-        if (v instanceof ZonedDateTime) return ((ZonedDateTime) v).toLocalTime();
+        if (v instanceof ZonedDateTime) return WideOffsetZone.wallClock((ZonedDateTime) v).toLocalTime();
         // An LTZ reads its wall clock in the session's zone: live, one written under UTC is 16:04:56 under Kolkata.
         if (v instanceof OffsetDateTime) return ((OffsetDateTime) inSessionZone(v)).toLocalTime();
         if (v instanceof LocalDateTime) return ((LocalDateTime) v).toLocalTime();
@@ -1175,7 +1191,7 @@ public final class SharedFunctionHelpers {
             return epochDecimalToLocalDateTime(exactNumber((Number) value));
         }
         if (isExplicitFormat(format)) {
-            return LocalDateTime.from(SnowflakeDateParser.parse(value.toString(), format, "timestamp"));
+            return WideOffsetZone.wallClock(SnowflakeDateParser.parse(value.toString(), format, "timestamp"));
         }
         if (format != null && SessionInputFormats.timestamp() != null) {
             // An explicit AUTO reads by the session's format first and by AUTO when the text does not fit it:
@@ -1249,7 +1265,7 @@ public final class SharedFunctionHelpers {
         // An explicit model reads a string of digits as the model says — TO_DATE('20200115',
         // 'YYYYMMDD') is 2020-01-15 — so it is asked before the epoch reading.
         if (isExplicitFormat(format)) {
-            return LocalDate.from(SnowflakeDateParser.parse(value.toString(), format, "date"));
+            return WideOffsetZone.wallClock(SnowflakeDateParser.parse(value.toString(), format, "date")).toLocalDate();
         }
         if (format != null && SessionInputFormats.date() != null) {
             // An explicit AUTO reads by the session's format first and by AUTO when the text does not fit it, as
@@ -1359,7 +1375,7 @@ public final class SharedFunctionHelpers {
      */
     private static Integer zoneComponentSeconds(final Object source) {
         if (source instanceof ZonedDateTime) {
-            return ((ZonedDateTime) source).getOffset().getTotalSeconds();
+            return WideOffsetZone.offsetSeconds((ZonedDateTime) source);
         }
         if (source instanceof OffsetDateTime) {
             return ((OffsetDateTime) source).getOffset().getTotalSeconds();

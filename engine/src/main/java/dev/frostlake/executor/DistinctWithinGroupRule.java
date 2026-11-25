@@ -46,8 +46,8 @@ import org.antlr.v4.runtime.tree.ParseTree;
  * </pre>
  *
  * A key is valid when every column it reads is read through the distinct value itself, and it calls no aggregate,
- * no window and no function that answers anew for each row. The first invalid key is named whole, its columns
- * qualified as the plan holds them; an unknown name in it is refused as the invalid identifier it is first, and a
+ * no window and no function that answers anew for each row. The first invalid key is named whole as the plan holds
+ * it - its columns qualified, a CASE as {@code CASE_FLATTENED(LA.Y = 1, 2, 1)}, a predicate cast to BOOLEAN; an unknown name in it is refused as the invalid identifier it is first, and a
  * LISTAGG delimiter that is no constant is refused by its own rule ahead of this one. The windowed call is judged the
  * same way.
  */
@@ -116,7 +116,7 @@ final class DistinctWithinGroupRule {
                 executor.validateClauseScope(ParseTreeText.getOriginalText(key), table, aliasToTable, allTables,
                     Collections.<String>emptySet(), key);
                 throw new RuntimeException(SqlCompilationError.of(
-                    "[" + echo.print(key) + "] is not a valid order by expression"));
+                    "[" + echo.printPlannedSortKey(key) + "] is not a valid order by expression"));
             }
         }
     }

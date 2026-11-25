@@ -18,6 +18,7 @@ package dev.frostlake.security;
 
 import dev.frostlake.query.MeasuredCellsTestSupport;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -25,6 +26,12 @@ import org.junit.jupiter.api.Test;
  * OF DATABASE ROLE with the PUBLIC grant some of them carry (all live-verified).
  */
 public class SnowflakeDatabaseRoleGranteesTest extends MeasuredCellsTestSupport {
+
+    /** Acts as ACCOUNTADMIN, the role these answers were measured under (see {@link #actAsAccountAdministrator}). */
+    @BeforeEach
+    public void actAsTheMeasuringRole() {
+        actAsAccountAdministrator();
+    }
 
     @Test
     public void applicationGrantees() {

@@ -35,11 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * privileges granted on the account, the regions, a key's columns in the order the engine keeps them, and the
  * delegated authorizations of a user and of an integration that exist.
  *
- * <p>SHOW GRANTS ON ACCOUNT needs a grant on the account to list, and SHOW REGIONS answers a list that grows on an
+ * <p>SHOW GRANTS ON ACCOUNT lists an account's grants beside the ones the tests make, and SHOW REGIONS answers a list that grows on an
  * account, so the class runs on an engine of its own and is never sent to an account: the shapes and the refusals
  * of these listings are measured in their two-sided tests.
  */
 public class ShowAccountGrantsAndRegionsTest {
+
+    /** The grants SYSADMIN, USERADMIN and SECURITYADMIN hold on the account from the start. */
+    private static final int SYSTEM_ROLE_GRANTS = 22;
 
     private DatabaseEngine engine;
 
@@ -55,6 +58,18 @@ public class ShowAccountGrantsAndRegionsTest {
     @AfterEach
     public void stopEngine() {
         engine.shutdown();
+    }
+
+    /** The rows a listing gives the role the tests grant to, beside the system roles' own grants. */
+    private ResultSet readers(final ResultSet rs) {
+        final int grantee = rs.getColumnIndex("grantee_name");
+        final List<Row> rows = new ArrayList<>();
+        for (final Row row : rs.getRows()) {
+            if ("ACCT_READER".equals(row.getValue(grantee))) {
+                rows.add(row);
+            }
+        }
+        return new ResultSet(rs.getColumns(), rows);
     }
 
     private List<String> column(final ResultSet rs, final String name) {
@@ -75,7 +90,7 @@ public class ShowAccountGrantsAndRegionsTest {
         engine.execute("CREATE ROLE acct_reader");
         engine.execute("GRANT CREATE DATABASE ON ACCOUNT TO ROLE acct_reader");
         engine.execute("GRANT MONITOR USAGE ON ACCOUNT TO ROLE acct_reader WITH GRANT OPTION");
-        final ResultSet grants = engine.executeQuery("SHOW GRANTS ON ACCOUNT");
+        final ResultSet grants = readers(engine.executeQuery("SHOW GRANTS ON ACCOUNT"));
         assertEquals(9, grants.getColumns().size());
         assertEquals(List.of("CREATE DATABASE", "MONITOR USAGE"), column(grants, "privilege"));
         assertEquals(List.of("ACCOUNT", "ACCOUNT"), column(grants, "granted_on"));
@@ -92,10 +107,12 @@ public class ShowAccountGrantsAndRegionsTest {
         engine.execute("GRANT MONITOR USAGE ON ACCOUNT TO ROLE acct_reader");
         assertEquals(1, engine.executeQuery("SHOW GRANTS ON ACCOUNT LIMIT 1").getRows().size());
         final ResultSet terse = engine.executeQuery("SHOW TERSE GRANTS ON ACCOUNT");
-        assertEquals(2, terse.getRows().size());
+        assertEquals(2, readers(terse).getRows().size());
+        assertEquals(SYSTEM_ROLE_GRANTS + 2, terse.getRows().size());
         assertEquals(9, terse.getColumns().size());
         engine.execute("REVOKE CREATE DATABASE ON ACCOUNT FROM ROLE acct_reader");
-        assertEquals(List.of("MONITOR USAGE"), column(engine.executeQuery("SHOW GRANTS ON ACCOUNT"), "privilege"));
+        assertEquals(List.of("MONITOR USAGE"),
+            column(readers(engine.executeQuery("SHOW GRANTS ON ACCOUNT")), "privilege"));
     }
 
     @Test
@@ -103,7 +120,7 @@ public class ShowAccountGrantsAndRegionsTest {
         engine.execute("CREATE ROLE acct_reader");
         engine.execute("GRANT CREATE DATABASE ON ACCOUNT TO ROLE acct_reader");
         engine.execute("CREATE TABLE account (a INT)");
-        assertEquals(List.of("ACCOUNT"), column(engine.executeQuery("SHOW GRANTS ON account"), "granted_on"));
+        assertEquals(List.of("ACCOUNT"), column(readers(engine.executeQuery("SHOW GRANTS ON account")), "granted_on"));
         assertEquals(List.of("TABLE"), column(engine.executeQuery("SHOW GRANTS ON TABLE account"), "granted_on"));
     }
 

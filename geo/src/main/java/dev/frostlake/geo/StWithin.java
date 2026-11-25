@@ -32,6 +32,7 @@ public class StWithin extends BuiltInFunction {
         final GeoValue b = GeoShapes.asGeo(args.get(1));
         if (a == null || b == null) return null;
         GeoShapes.requireSameKind("ST_WITHIN", a, b);
+        GeoShapes.requireSameSrid(b, a);
         GeoRelation.requireNoCollection(a, b);
         return Boolean.valueOf(GeoRelation.contains(b, a));
     }

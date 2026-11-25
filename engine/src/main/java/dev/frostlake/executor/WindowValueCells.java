@@ -16,12 +16,16 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.functions.window.WindowFunctionHelper;
+import java.math.BigDecimal;
+import java.util.Arrays;
+
 /**
  * One window value function's argument over one sorted partition, evaluated once per row, as FIRST_VALUE, LAST_VALUE,
- * NTH_VALUE, LAG and LEAD read it. Every frame and every step is then a read by position: under IGNORE NULLS the
+ * NTH_VALUE, LAG, LEAD and RATIO_TO_REPORT read it. Every frame and every step is then a read by position: under IGNORE NULLS the
  * non-NULL cells are indexed once (a running count before each position and the positions in order), so the n-th
  * non-NULL value of a frame, or the n-th met walking away from a row, is found without a walk. Only a SQL NULL is
- * skipped; a VARIANT holding a JSON null is a value.
+ * skipped; a VARIANT holding a JSON null is a value. RATIO_TO_REPORT's partition total is added up once, on first use.
  */
 final class WindowValueCells {
 
@@ -30,6 +34,14 @@ final class WindowValueCells {
     private int[] nonNullBefore;
     /** The positions of the non-NULL cells, in order; built with {@link #nonNullBefore}. */
     private int[] nonNullPositions;
+    /** Whether {@link #ratioTotal} has been added up. */
+    private boolean ratioTotalKnown;
+    /** The cells' sum as a RATIO_TO_REPORT over doubles divides by. */
+    private double ratioTotal;
+    /** Whether {@link #decfloatRatioTotal} has been added up. */
+    private boolean decfloatRatioTotalKnown;
+    /** The cells' sum as a RATIO_TO_REPORT over DECFLOAT divides by, null when no cell is a number. */
+    private BigDecimal decfloatRatioTotal;
 
     /**
      * @param cells the argument's value on each row of the partition, in its sorted order
@@ -105,6 +117,32 @@ final class WindowValueCells {
         index();
         final int k = direction < 0 ? nonNullBefore[from] - count : nonNullBefore[from + 1] + count - 1;
         return k >= 0 && k < nonNullPositions.length ? cells[nonNullPositions[k]] : null;
+    }
+
+    /**
+     * The partition total a RATIO_TO_REPORT over doubles divides by, added up on first use.
+     *
+     * @return the sum of the non-NULL cells
+     */
+    double ratioTotal() {
+        if (!ratioTotalKnown) {
+            ratioTotal = WindowFunctionHelper.ratioTotal(Arrays.asList(cells));
+            ratioTotalKnown = true;
+        }
+        return ratioTotal;
+    }
+
+    /**
+     * The partition total a RATIO_TO_REPORT over DECFLOAT divides by, added up on first use.
+     *
+     * @return the DECFLOAT sum of the number cells, or null when there is none
+     */
+    BigDecimal decfloatRatioTotal() {
+        if (!decfloatRatioTotalKnown) {
+            decfloatRatioTotal = WindowFunctionHelper.decfloatRatioTotal(Arrays.asList(cells));
+            decfloatRatioTotalKnown = true;
+        }
+        return decfloatRatioTotal;
     }
 
     private void index() {

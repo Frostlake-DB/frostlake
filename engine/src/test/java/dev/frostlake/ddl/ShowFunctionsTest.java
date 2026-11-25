@@ -17,6 +17,7 @@
 package dev.frostlake.ddl;
 
 import dev.frostlake.BaseDatabaseTest;
+import dev.frostlake.functions.BuiltinFunctionRows;
 import dev.frostlake.functions.HigherOrderFunctionNames;
 import dev.frostlake.functions.OperatorFunctionNames;
 import dev.frostlake.functions.SystemFunctionNames;
@@ -178,11 +179,8 @@ public class ShowFunctionsTest extends BaseDatabaseTest {
             "IS NULL", "IS NOT NULL", "COUNT(*)", "BETWEEN", "CASE", "REGEXP"}) {
             assertTrue(names.contains(op), "SHOW FUNCTIONS should list the operator-implemented " + op);
         }
-        // DIV is the counter-example: Snowflake DOES list it, but it cannot invoke it either
-        // ("Unsupported feature 'DIV'"), and Frostlake has no DIV in any form — `10 DIV 3` is a syntax
-        // error — so a listing that mirrors what THIS engine dispatches must leave it out.
-        Assumptions.assumeFalse(isLiveSnowflake(), "a real account lists DIV even though it cannot run it");
-        assertTrue(!names.contains("DIV"), "DIV is not dispatchable here, so it must not be listed");
+        // DIV is listed as the account lists it: a function whose call is refused as an unsupported feature.
+        assertTrue(names.contains("DIV"), "SHOW FUNCTIONS should list DIV");
     }
 
     /**
@@ -223,19 +221,25 @@ public class ShowFunctionsTest extends BaseDatabaseTest {
      * The listing IS the dispatch table: it is built from
      * {@code FunctionRegistry.allDispatchableNames()}, the same maps and name sets
      * {@code getFunction} / {@code getAggregateFunction} / {@code getTableFunction} /
-     * {@code WindowFunctionEvaluator} / {@code SystemFunctionEvaluator} resolve against.
+     * {@code WindowFunctionEvaluator} / {@code SystemFunctionEvaluator} resolve against — each name the account
+     * lists too, the account's names being those of {@link BuiltinFunctionRows}.
      */
     @Test
     public void listedBuiltinsAreExactlyTheEngineSDispatchableNames() {
         Assumptions.assumeFalse(isLiveSnowflake(), "compares against this engine's own registry");
         final SortedSet<String> dispatchable = engine.getFunctionRegistry().allDispatchableNames();
-        final Set<String> listed = listedNames();
-        assertEquals(dispatchable.size() - UnlistedFunctionNames.names().size(), listed.size(),
-            "SHOW FUNCTIONS should list one row per dispatchable name the account lists");
-        for (final String name : dispatchable) {
-            assertEquals(!UnlistedFunctionNames.contains(name), listed.contains(name),
-                "dispatchable, listed as the account lists it: " + name);
+        final Set<String> accountNames = new HashSet<String>();
+        for (final String[] cells : BuiltinFunctionRows.rows()) {
+            accountNames.add(cells[0]);
         }
+        final Set<String> listed = listedNames();
+        int expected = 0;
+        for (final String name : dispatchable) {
+            final boolean listable = !UnlistedFunctionNames.contains(name) && accountNames.contains(name);
+            expected += listable ? 1 : 0;
+            assertEquals(listable, listed.contains(name), "dispatchable, listed as the account lists it: " + name);
+        }
+        assertEquals(expected, listed.size(), "SHOW FUNCTIONS should list the dispatchable names the account lists");
     }
 
     /** The functions whose first argument names a stage are called by name, and neither side lists them. */

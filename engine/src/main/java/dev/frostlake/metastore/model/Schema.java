@@ -70,6 +70,8 @@ public class Schema extends SqlObject {
     private final Map<Long, Map<String, View>> sessionViews = new ConcurrentHashMap<>();
     /** Each session's own temporary stages, by session and then by name, as {@link #sessionTables} holds tables. */
     private final Map<Long, Map<String, Stage>> sessionStages = new ConcurrentHashMap<>();
+    /** Each session's own temporary file formats, by session and then by name, as {@link #sessionStages} holds. */
+    private final Map<Long, Map<String, FileFormat>> sessionFileFormats = new ConcurrentHashMap<>();
     private final Map<String, View> views;
     private final NamedObjects<MaterializedView> materializedViews = new NamedObjects<>(this, "Materialized view");
     private final NamedObjects<DynamicTable> dynamicTables = new NamedObjects<>(this, "Dynamic table");
@@ -94,9 +96,11 @@ public class Schema extends SqlObject {
     private final NamedObjects<Stage> stages = new NamedObjects<>(this, "Stage");
     private final NamedObjects<CortexSearchService> cortexSearchServices =
         new NamedObjects<>(this, "Cortex Search Service");
+    private final NamedObjects<SemanticView> semanticViews = new NamedObjects<>(this, "Semantic View");
     private final AppObjectStore appObjects = new AppObjectStore();
     private final NamedObjects<FileFormat> fileFormats = new NamedObjects<>(this, "File format");
     private final ContainerObjects containerObjects = new ContainerObjects();
+    private final BackupAndBundleObjects backupAndBundleObjects = new BackupAndBundleObjects();
 
     /**
      * The database this schema belongs to, stamped when {@link Database} registers it. Snowflake spells a
@@ -1362,25 +1366,35 @@ public class Schema extends SqlObject {
         }
     }
 
-    // File formats
+    // File formats. A session's own temporary file format is its own, held apart from the formats every session
+    // shares, as its temporary stages are: two sessions may each hold one of a name, and one above a permanent format
+    // of its name hides that format from its session alone (live-verified). The current session's own formats answer
+    // to a name before the shared ones, and a drop takes the session's own first.
     /**
-     * Adds a file format, replacing the one of its name; another session's temporary format keeps its name, as one
-     * session's format never replaces another's.
+     * Adds a file format, replacing the one of its name and lifetime: a session's own temporary format replaces only
+     * that session's own one of the name, any other only the shared one.
      */
     public void addFileFormat(final FileFormat fileFormat) {
+        if (isSessionFormat(fileFormat)) {
+            sessionMap(sessionFileFormats, fileFormat.getCreatedInSession()).put(fileFormat.getName(), fileFormat);
+            return;
+        }
         fileFormats.put(fileFormat);
     }
 
     public void dropFileFormat(final String name) {
-        fileFormats.drop(name);
+        if (removeOwnFileFormat(name, false) == null) {
+            fileFormats.drop(name);
+        }
     }
 
     public FileFormat getFileFormat(final String name) {
-        return fileFormats.find(name);
+        final FileFormat own = ownFileFormat(name, false);
+        return own != null ? own : fileFormats.find(name);
     }
 
     public boolean hasFileFormat(final String name) {
-        return fileFormats.has(name);
+        return getFileFormat(name) != null;
     }
 
     /**
@@ -1390,31 +1404,170 @@ public class Schema extends SqlObject {
      * @return the format, or null
      */
     public FileFormat getFileFormatExact(final String name) {
-        return fileFormats.findExact(name);
+        final FileFormat own = ownFileFormat(name, true);
+        return own != null ? own : fileFormats.findExact(name);
     }
 
     /** Whether a file format carries exactly this canonical name; one differing only in case is another. */
     public boolean hasFileFormatExact(final String name) {
-        return fileFormats.hasExact(name);
+        return getFileFormatExact(name) != null;
     }
 
     /**
-     * Drops the file format of exactly this canonical name, refused as missing when only another case of it exists.
+     * Drops the file format of exactly this canonical name, refused as missing when only another case of it exists:
+     * the current session's own temporary format first, the shared one once there is none (live-verified).
      *
      * @param name the canonical name
      */
     public void dropFileFormatExact(final String name) {
-        fileFormats.dropExact(name);
+        if (removeOwnFileFormat(name, true) == null) {
+            fileFormats.dropExact(name);
+        }
     }
 
-    /** The file formats a statement here lists: every one but another session's temporary ones. */
+    /**
+     * Whether a file format of exactly this name takes it from a new format of that lifetime: the current session's
+     * own temporary format from a temporary one, a shared format from a permanent one. A temporary format takes the
+     * name of a permanent one and hides it, and a permanent format takes the name of the session's own temporary one,
+     * which goes on hiding it (live-verified).
+     *
+     * @param name      the canonical name
+     * @param temporary whether the new format is temporary
+     * @return whether the name is taken
+     */
+    public boolean holdsFileFormatFor(final String name, final boolean temporary) {
+        // The engine's own session keeps its temporary formats among the shared ones, as it keeps its stages.
+        if (!temporary || StatementSession.current() == null) {
+            return fileFormats.hasExact(name);
+        }
+        return ownFileFormat(name, true) != null;
+    }
+
+    /**
+     * Drops the file format of exactly this canonical name that a new format of that lifetime replaces (see
+     * {@link #holdsFileFormatFor}), refused as missing when there is none.
+     *
+     * @param name      the canonical name
+     * @param temporary whether the new format is temporary
+     */
+    public void dropFileFormatFor(final String name, final boolean temporary) {
+        if (!temporary || StatementSession.current() == null) {
+            fileFormats.dropExact(name);
+        } else if (removeOwnFileFormat(name, true) == null) {
+            throw new RuntimeException(SqlCompilationError.doesNotExist("File format", qualifiedName(name)));
+        }
+    }
+
+    /**
+     * The file formats a statement here lists: the current session's own temporary formats and every shared one they
+     * do not hide, but no other session's. The engine's own session lists every session's.
+     */
     public List<FileFormat> getFileFormats() {
-        return fileFormats.values();
+        final Long session = StatementSession.current();
+        if (session == null) {
+            return allFileFormats();
+        }
+        final Map<String, FileFormat> own = sessionFileFormats.get(session);
+        final List<FileFormat> listed = new ArrayList<>();
+        if (own != null) {
+            listed.addAll(own.values());
+        }
+        for (final FileFormat shared : fileFormats.values()) {
+            if (own == null || !own.containsKey(shared.getName())) {
+                listed.add(shared);
+            }
+        }
+        return listed;
+    }
+
+    /**
+     * The file formats a schema's DDL spells: the current session's own temporary formats and every shared one, those
+     * they hide included (live-verified). The engine's own session spells every session's.
+     */
+    public List<FileFormat> getFileFormatsWithHidden() {
+        final Long session = StatementSession.current();
+        if (session == null) {
+            return allFileFormats();
+        }
+        final Map<String, FileFormat> own = sessionFileFormats.get(session);
+        final List<FileFormat> listed = new ArrayList<>();
+        if (own != null) {
+            listed.addAll(own.values());
+        }
+        listed.addAll(fileFormats.values());
+        return listed;
     }
 
     /** Every file format held here, every session's temporary ones included: the engine's bookkeeping reads these. */
     public List<FileFormat> allFileFormats() {
-        return fileFormats.all();
+        final List<FileFormat> all = fileFormats.all();
+        for (final Map<String, FileFormat> own : sessionFileFormats.values()) {
+            all.addAll(own.values());
+        }
+        return all;
+    }
+
+    /**
+     * Remove this very file format, whichever session runs the statement: a session's own temporary format when its
+     * session ended or it is renamed, any other by its name.
+     *
+     * @param fileFormat the format
+     */
+    public void removeFileFormat(final FileFormat fileFormat) {
+        final Map<String, FileFormat> own = isSessionFormat(fileFormat)
+            ? sessionFileFormats.get(fileFormat.getCreatedInSession()) : null;
+        if (own != null && own.get(fileFormat.getName()) == fileFormat) {
+            own.remove(fileFormat.getName());
+            if (own.isEmpty()) {
+                sessionFileFormats.remove(fileFormat.getCreatedInSession());
+            }
+            return;
+        }
+        if (fileFormats.findExact(fileFormat.getName()) == fileFormat) {
+            fileFormats.remove(fileFormat.getName());
+        }
+    }
+
+    /** Whether a file format is a session's own temporary one, held apart from the shared formats. */
+    private static boolean isSessionFormat(final FileFormat fileFormat) {
+        return fileFormat.isTemporary() && fileFormat.getCreatedInSession() != null;
+    }
+
+    /**
+     * The current session's own temporary file format a name reaches, exactly or folding case; the engine's own
+     * session reaches any session's where no shared format holds the name. Null when there is none.
+     */
+    private FileFormat ownFileFormat(final String name, final boolean exact) {
+        if (name == null) {
+            return null;
+        }
+        final Long session = StatementSession.current();
+        if (session == null) {
+            if (exact ? fileFormats.hasExact(name) : fileFormats.has(name)) {
+                return null;
+            }
+            for (final Map<String, FileFormat> held : sessionFileFormats.values()) {
+                final FileFormat format = exact ? held.get(name) : held.get(NameKeys.keyFor(held, name));
+                if (format != null) {
+                    return format;
+                }
+            }
+            return null;
+        }
+        final Map<String, FileFormat> own = sessionFileFormats.get(session);
+        if (own == null) {
+            return null;
+        }
+        return exact ? own.get(name) : own.get(NameKeys.keyFor(own, name));
+    }
+
+    /** Remove the current session's own temporary file format a name reaches (see ownFileFormat), returning it. */
+    private FileFormat removeOwnFileFormat(final String name, final boolean exact) {
+        final FileFormat own = ownFileFormat(name, exact);
+        if (own != null) {
+            removeFileFormat(own);
+        }
+        return own;
     }
 
     /**
@@ -1967,6 +2120,33 @@ public class Schema extends SqlObject {
         return own;
     }
 
+    // Semantic views
+    /**
+     * Adds a semantic view, refused with the holder's kind when a table, a view or another relation holds the name.
+     *
+     * @param view the view
+     */
+    public void addSemanticView(final SemanticView view) {
+        rejectNameHeldByOtherKind(view.getName(), RelationKind.SEMANTIC_VIEW, false);
+        semanticViews.put(view);
+    }
+
+    public SemanticView getSemanticViewExact(final String name) {
+        return semanticViews.findExact(name);
+    }
+
+    public void dropSemanticViewExact(final String name) {
+        semanticViews.dropExact(name);
+    }
+
+    public void renameSemanticView(final String oldName, final String newName) {
+        NamedObjects.rename(semanticViews, oldName, newName);
+    }
+
+    public List<SemanticView> getSemanticViews() {
+        return semanticViews.values();
+    }
+
     // Cortex search services
     public void addCortexSearchService(final CortexSearchService service) {
         service.setDatabaseName(databaseName);
@@ -2194,6 +2374,8 @@ public class Schema extends SqlObject {
                 return materializedViews.hasExact(name);
             case DYNAMIC_TABLE:
                 return dynamicTables.hasExact(name);
+            case SEMANTIC_VIEW:
+                return semanticViews.hasExact(name);
             default:
                 return streams.hasExact(name);
         }
@@ -2238,5 +2420,10 @@ public class Schema extends SqlObject {
     /** The Snowpark Container Services objects and artifact repositories this schema holds. */
     public ContainerObjects getContainerObjects() {
         return containerObjects;
+    }
+
+    /** The backup policies and code bundles this schema holds. */
+    public BackupAndBundleObjects getBackupAndBundleObjects() {
+        return backupAndBundleObjects;
     }
 }

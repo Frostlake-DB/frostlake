@@ -217,6 +217,10 @@ final class ShowTailSyntax {
         if (tail == null || tail.PRIVILEGES() == null || listing.featureName() == null) {
             return;
         }
+        if (ctx.showAccountsScope() != null) {
+            // The account listing refuses any scope whole, before its modifiers (live-verified).
+            return;
+        }
         if (listing.filtersByPrivileges() && ctx.HISTORY() == null) {
             return;
         }

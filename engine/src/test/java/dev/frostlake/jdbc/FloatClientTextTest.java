@@ -86,6 +86,23 @@ public class FloatClientTextTest extends BaseJdbcTest {
         assertEquals("-Infinity", text("'-inf'::FLOAT"));
     }
 
+    /**
+     * ★ An overflow reads as Java's infinity and a zero keeps its point, where the SQL text (and the JSON results)
+     * write {@code inf} and {@code 0}.
+     */
+    @Test
+    public void overflowAndZeroAreJavasWords() throws SQLException {
+        assertEquals("Infinity", text("'1e400'::FLOAT"), "a text past the largest double casts to infinity");
+        assertEquals("-Infinity", text("'-1e400'::FLOAT"));
+        assertEquals("Infinity", text("1e300::FLOAT * 1e300::FLOAT"), "a product past the largest double");
+        assertEquals("0.0", text("0::FLOAT"));
+        assertEquals("0.0", text("'1e-400'::FLOAT"), "a text below the smallest double casts to zero");
+        assertEquals("4.9E-324", text("4.9e-324::FLOAT"), "the smallest subnormal in Java's shortest text");
+        assertEquals("3.0", text("3::FLOAT"));
+        assertEquals("inf, 0", text("TO_VARCHAR('1e400'::FLOAT) || ', ' || TO_VARCHAR(0::FLOAT)"),
+            "★ while the SQL text writes inf and 0");
+    }
+
     /** ★ A stored FLOAT COLUMN reads the same way. */
     @Test
     public void aStoredColumnReadsTheSameWay() throws SQLException {

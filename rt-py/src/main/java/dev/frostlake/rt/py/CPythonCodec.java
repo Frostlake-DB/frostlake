@@ -282,12 +282,17 @@ final class CPythonCodec {
             return resultSet((PythonResultSet) value);
         }
         if (value instanceof SnowparkOutcome) {
-            // The worker's $outcome: the engine's refusal as text with the refused statement's query ID, or what
-            // the statement answered.
+            // The worker's $outcome: the engine's refusal as text with the refused statement's query ID, the
+            // refusal's vendor code and its wordings, or what the statement answered.
             final SnowparkOutcome outcome = (SnowparkOutcome) value;
             final ObjectNode payload = NODES.objectNode();
             payload.set("refusal", outcome.refused() ? NODES.textNode(outcome.refusal()) : NODES.nullNode());
             payload.set("queryId", outcome.queryId() != null ? NODES.textNode(outcome.queryId()) : NODES.nullNode());
+            payload.set("sqlErrorCode", outcome.sqlErrorCode() != null
+                ? NODES.numberNode(outcome.sqlErrorCode().intValue()) : NODES.nullNode());
+            payload.set("message", outcome.message() != null ? NODES.textNode(outcome.message()) : NODES.nullNode());
+            payload.set("rawMessage",
+                outcome.rawMessage() != null ? NODES.textNode(outcome.rawMessage()) : NODES.nullNode());
             payload.set("result", outcome.refused() ? NODES.nullNode() : encode(outcome.result()));
             final ObjectNode object = NODES.objectNode();
             object.set("$outcome", payload);

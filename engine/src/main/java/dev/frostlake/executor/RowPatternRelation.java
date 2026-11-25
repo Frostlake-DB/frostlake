@@ -123,7 +123,13 @@ final class RowPatternRelation {
             }
             definitions.put(symbol, definition.booleanExpr());
         }
-        final List<String> defined = new ArrayList<>(definitions.keySet());
+        // A definition of a symbol the pattern does not name is not read (live-verified).
+        final List<String> defined = new ArrayList<>();
+        for (final String symbol : definitions.keySet()) {
+            if (symbols.contains(symbol)) {
+                defined.add(symbol);
+            }
+        }
 
         // The window a definition reads: the clause's partition, in its order.
         final List<String> partitionTexts = new ArrayList<>();
@@ -148,7 +154,7 @@ final class RowPatternRelation {
             : "DENSE_RANK() OVER (ORDER BY " + String.join(", ", partitionTexts) + ")").append(" AS MATCH$PART");
         prepare.append(", ROW_NUMBER() OVER (").append(window).append(") AS MATCH$PLACE");
         for (int i = 0; i < defined.size(); i++) {
-            prepare.append(", (").append(expressions.definition(definitions.get(defined.get(i)))).append(") AS MATCH$D")
+            prepare.append(", (").append(expressions.definition(defined.get(i), definitions.get(defined.get(i)))).append(") AS MATCH$D")
                 .append(i);
         }
         prepare.append(" FROM ").append(ParseTreeText.getOriginalText(reference.tableSource()));

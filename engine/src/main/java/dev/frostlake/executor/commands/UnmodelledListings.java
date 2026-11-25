@@ -62,16 +62,17 @@ import org.antlr.v4.runtime.Token;
  *   DELEGATED AUTHORIZATIONS                    BY USER u or TO SECURITY INTEGRATION i, each looked up and
  *                                               refused when missing, and none of the modifiers
  *   USER WORKLOAD IDENTITY AUTHENTICATION       FOR USER u, looked up and refused when missing; TERSE is read and
- *   METHODS                                     none of the modifiers
+ *   METHODS, USER PROGRAMMATIC ACCESS TOKENS,   none of the modifiers
+ *   USER KEY PAIRS
  *   REGIONS                                     the public regions ({@link RegionsListing}), and no scope
  * </pre>
  *
  * <p>HISTORY is read by every one of the first four families but CHANNELS and the SESSION and AUTHENTICATION
  * POLICIES, which refuse it where it stands.
  *
- * <p>RESOURCE MONITORS, SHARES, FAILOVER GROUPS, REPLICATION GROUPS and REPLICATION DATABASES list the objects
- * declared of them, kept as metadata ({@link ResourceMonitorCommandHandler}, {@link ShareCommandHandler},
- * {@link FailoverGroupCommandHandler}, and the secondary databases).
+ * <p>RESOURCE MONITORS, SHARES, CONNECTIONS, FAILOVER GROUPS, REPLICATION GROUPS and REPLICATION DATABASES list the
+ * objects declared of them, kept as metadata ({@link ResourceMonitorCommandHandler}, {@link ShareCommandHandler},
+ * {@link ConnectionCommandHandler}, {@link FailoverGroupCommandHandler}, and the secondary databases).
  *
  * <p>SESSION POLICIES is read here with the others and is modelled too: once its scope is judged, the session
  * policies of the scope's schemas are its rows ({@link SecurityObjectCommandHandler#showRows}).
@@ -208,7 +209,8 @@ final class UnmodelledListings {
         List<Schema> schemas = null;
         if (listing == ShowListing.DELEGATED_AUTHORIZATIONS) {
             requireGrantee(ctx.delegatedAuthorizationScope());
-        } else if (listing == ShowListing.USER_WORKLOAD_IDENTITY_METHODS) {
+        } else if (listing == ShowListing.USER_WORKLOAD_IDENTITY_METHODS
+            || listing == ShowListing.USER_PROGRAMMATIC_ACCESS_TOKENS || listing == ShowListing.USER_KEY_PAIRS) {
             requireUser(ctx.userMethodsScope());
         } else if (!listing.isAccountLevel()) {
             schemas = requireScope(ctx, listing, scope);
@@ -224,6 +226,10 @@ final class UnmodelledListings {
         if (kept != null) {
             return new ResultSet(columns.getColumns(), kept);
         }
+        if (listing == ShowListing.SEMANTIC_VIEWS && schemas != null) {
+            return new ResultSet(columns.getColumns(), SemanticViewCommandHandler.showRows(schemas,
+                ctx.TERSE() != null));
+        }
         if (listing == ShowListing.EXTERNAL_FUNCTIONS && schemas != null) {
             // The external functions of the scope's schemas, as SHOW USER FUNCTIONS lists them.
             return queryExecutor.getShowExecutor().showExternalFunctions(schemas);
@@ -238,8 +244,8 @@ final class UnmodelledListings {
     }
 
     /**
-     * The rows of the account's kinds that are kept as metadata: the resource monitors, the outbound shares, and
-     * the failover groups, which the replication group listing shows too.
+     * The rows of the account's kinds that are kept as metadata: the resource monitors, the outbound shares, the
+     * connections, and the failover and replication groups - the replication group listing shows both kinds.
      *
      * @return the rows, or null for a listing of another kind
      */
@@ -252,7 +258,10 @@ final class UnmodelledListings {
             return new ShareCommandHandler(catalog, identity).rows();
         }
         if (listing == ShowListing.FAILOVER_GROUPS || listing == ShowListing.REPLICATION_GROUPS) {
-            return new FailoverGroupCommandHandler(catalog, identity).rows();
+            return new FailoverGroupCommandHandler(catalog, identity).rows(listing == ShowListing.FAILOVER_GROUPS);
+        }
+        if (listing == ShowListing.CONNECTIONS) {
+            return new ConnectionCommandHandler(catalog, identity).rows();
         }
         return null;
     }
@@ -306,8 +315,8 @@ final class UnmodelledListings {
     }
 
     /**
-     * Look up the user a USER WORKLOAD IDENTITY AUTHENTICATION METHODS listing names; with none named it lists the
-     * session's own. A name of two or three parts names no object, and a longer one is a user identifier with too
+     * Look up the user a USER WORKLOAD IDENTITY AUTHENTICATION METHODS, USER PROGRAMMATIC ACCESS TOKENS or USER KEY
+     * PAIRS listing names; with none named it lists the session's own. A name of two or three parts names no object, and a longer one is a user identifier with too
      * many qualifiers (live-verified).
      */
     private void requireUser(final FrostlakeParser.UserMethodsScopeContext scope) {

@@ -17,21 +17,28 @@
 package dev.frostlake.functions.scalar.string;
 
 import dev.frostlake.functions.TextArgumentFunction;
+import dev.frostlake.functions.scalar.ArrayFunctionHelper;
+import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.types.ObjectType;
+
 import java.util.List;
 
-/** TRY_PARSE_IP — PARSE_IP that returns NULL instead of erroring on invalid input. */
+/**
+ * TRY_PARSE_IP(ip_address, type) — {@link ParseIp} that answers NULL instead of refusing a malformed address.
+ * It takes no permissive flag, and a wrong ip type is still refused (live-verified).
+ */
 public class TryParseIp extends TextArgumentFunction {
-
-    private static final ParseIp BASE = new ParseIp();
 
     public TryParseIp() { super("TRY_PARSE_IP", ObjectType.OBJECT); }
 
     @Override
     public Object evaluate(final List<Object> args) {
+        if (args.get(0) == null || args.get(1) == null) return null;
+        final String type = ParseIp.ipType(args.get(1));
         try {
-            return BASE.evaluate(args);
-        } catch (final RuntimeException failed) {
+            return ArrayFunctionHelper.toCanonicalVariant(
+                ParseIp.parse(SharedFunctionHelpers.textOf(args.get(0)), type));
+        } catch (final IllegalArgumentException malformed) {
             return null;
         }
     }
@@ -39,5 +46,5 @@ public class TryParseIp extends TextArgumentFunction {
     @Override
     public int getMinArgCount() { return 2; }
     @Override
-    public int getMaxArgCount() { return 3; }
+    public int getMaxArgCount() { return 2; }
 }

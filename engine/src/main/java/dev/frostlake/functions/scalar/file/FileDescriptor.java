@@ -17,7 +17,6 @@
 package dev.frostlake.functions.scalar.file;
 
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
-import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.values.VariantValue;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -48,12 +47,13 @@ import java.util.Locale;
  * — keys in alphabetical order, {@code SIZE} a JSON number, {@code LAST_MODIFIED} an RFC-1123 HTTP
  * date in GMT with a ZERO-PADDED two-digit day (note {@code LIST @stage} formats the same instant with
  * an unpadded day, so the two are not interchangeable), and {@code ETAG} the file's MD5 hex — verified
- * equal to the {@code md5} column of {@code LIST @stage} for every staged file on a server-side
- * encrypted stage.
+ * equal to the {@code md5} column of {@code LIST @stage} for every staged file. On a stage that encrypts
+ * its files on the client, {@code SIZE} and {@code ETAG} are the stored object's (see
+ * {@link StoredStageObject}).
  *
  * <p>Frostlake's stages are real local directories, so every one of those fields is read from the
  * actual file: {@code SIZE} from its length, {@code LAST_MODIFIED} from its mtime, {@code ETAG} from
- * its MD5, {@code CONTENT_TYPE} from its extension (see {@link FileContentTypes}). Nothing here is
+ * its digest, {@code CONTENT_TYPE} from its extension (see {@link FileContentTypes}). Nothing here is
  * synthesised from the path text.
  *
  * <p>The two URL fields are the exception. {@code SCOPED_FILE_URL} and {@code STAGE_FILE_URL} are
@@ -68,7 +68,7 @@ public final class FileDescriptor {
 
     /** The descriptor's {@code CONTENT_TYPE} field. */
     public static final String CONTENT_TYPE = "CONTENT_TYPE";
-    /** The descriptor's {@code ETAG} field — the file's MD5 hex. */
+    /** The descriptor's {@code ETAG} field — the file's MD5 hex, or its stored object's. */
     public static final String ETAG = "ETAG";
     /** The descriptor's {@code LAST_MODIFIED} field — an RFC-1123 date string. */
     public static final String LAST_MODIFIED = "LAST_MODIFIED";
@@ -138,18 +138,18 @@ public final class FileDescriptor {
         final Path path = staged.getPath();
         final long size;
         final Instant modified;
-        final byte[] bytes;
+        final String etag;
         try {
-            size = Files.size(path);
+            size = StoredStageObject.size(Files.size(path), staged.isClientEncrypted());
             modified = Files.getLastModifiedTime(path).toInstant();
-            bytes = Files.readAllBytes(path);
+            etag = StoredStageObject.digest(path, staged.isClientEncrypted());
         } catch (final IOException e) {
             throw new RuntimeException("Cannot read staged file '" + location + "': " + e.getMessage(), e);
         }
         final ObjectNode node = ArrayFunctionHelper.MAPPER.createObjectNode();
         // Alphabetical, matching Snowflake's own rendering of the descriptor.
         node.put(CONTENT_TYPE, FileContentTypes.forPath(staged.getRelativePath()));
-        node.put(ETAG, SharedFunctionHelpers.toHex(SharedFunctionHelpers.digest("MD5", bytes)));
+        node.put(ETAG, etag);
         node.put(LAST_MODIFIED, formatLastModified(modified));
         node.put(RELATIVE_PATH, staged.getRelativePath());
         node.put(SIZE, size);

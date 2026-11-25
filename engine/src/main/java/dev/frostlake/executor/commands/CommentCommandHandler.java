@@ -17,6 +17,7 @@
 package dev.frostlake.executor.commands;
 
 import dev.frostlake.executor.InformationSchemaGuard;
+import dev.frostlake.executor.MissingColumnObject;
 import dev.frostlake.executor.ParseTreeText;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.SQLCommandVisitor;
@@ -104,6 +105,18 @@ public class CommentCommandHandler implements CommandHandler {
         return schema.hasDynamicTable(name) ? schema.getDynamicTable(name) : null;
     }
 
+    /**
+     * The name of a warehouse, a user or a role a COMMENT ON names, written or held by an IDENTIFIER() reference: an
+     * account object's name is one part, and a name of more is no object (live-verified).
+     */
+    private static String accountObjectName(final String[] named) {
+        if (named.length != 1) {
+            throw new RuntimeException(SqlCompilationError.of(
+                "Object does not exist, or operation cannot be performed."));
+        }
+        return named[0];
+    }
+
     public Object handle(final FrostlakeParser.CommentStatementContext ctx) {
         RoutineSignatureForm.requireTypesOnly(ctx.dataTypeList());
         try {
@@ -115,8 +128,8 @@ public class CommentCommandHandler implements CommandHandler {
                 : queryExecutor.resolveObjectNameParts(ctx.containerName().objectName());
 
             if (ctx.commentedKind() != null) {
-                new KindComments(catalog, queryExecutor, visitor).comment(ctx.commentedKind(), ctx.qualifiedName(),
-                    comment, ifExists);
+                new KindComments(catalog, queryExecutor, visitor).comment(ctx.commentedKind(), named, comment,
+                    ifExists);
             } else if (ctx.SECRET() != null) {
                 // Refused whatever the name, before it is looked up (live-verified).
                 throw new RuntimeException("Unsupported feature 'SECRET'.");
@@ -252,6 +265,9 @@ public class CommentCommandHandler implements CommandHandler {
                 InformationSchemaGuard.refuseWrite(catalog, Arrays.copyOf(parts, parts.length - 1));
                 queryExecutor.requireOnRelation(Privilege.MODIFY, tableName);
 
+                // A view's column is no table's, IF EXISTS or not: Object found is of type 'VIEW', not specified type
+                // 'TABLE' (live-verified).
+                catalog.refuseOtherRelationKind(tableName);
                 final Table table;
                 try {
                     table = catalog.resolveTable(QualifiedName.of(Arrays.copyOf(parts, parts.length - 1)));
@@ -287,7 +303,7 @@ public class CommentCommandHandler implements CommandHandler {
                         logger.debug("Column does not exist (IF EXISTS): {}", columnName);
                         return null;
                     }
-                    throw new RuntimeException(SqlCompilationError.of(
+                    throw new MissingColumnObject(SqlCompilationError.of(
                         "Object '" + columnName + "' does not exist or not authorized."));
                 }
                 final TableColumn column = table.getColumn(columnName);
@@ -465,7 +481,7 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.WAREHOUSE() != null) {
                 // COMMENT ON WAREHOUSE
-                final String warehouseName = visitor.getText(ctx.identifier());
+                final String warehouseName = accountObjectName(named);
                 final Warehouse warehouse;
                 try {
                     warehouse = catalog.getWarehouseExact(warehouseName);
@@ -514,7 +530,7 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.USER() != null) {
                 // COMMENT ON USER
-                final String userName = visitor.getText(ctx.identifier());
+                final String userName = accountObjectName(named);
                 final User user;
                 try {
                     user = catalog.getUser(userName);
@@ -537,7 +553,7 @@ public class CommentCommandHandler implements CommandHandler {
 
             } else if (ctx.ROLE() != null) {
                 // COMMENT ON ROLE
-                final String roleName = visitor.getText(ctx.identifier());
+                final String roleName = accountObjectName(named);
                 final Role role;
                 try {
                     role = catalog.getRole(roleName);

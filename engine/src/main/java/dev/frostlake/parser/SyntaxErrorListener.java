@@ -75,6 +75,8 @@ public class SyntaxErrorListener extends BaseErrorListener {
     private final List<Integer> openerTypes;
     /** Per message line: whether the parser named its token itself (an IDENTIFIER() reference that is not whole). */
     private final List<Boolean> parserOwnFaults;
+    /** Per message line: whether it names a source written after a VALUES list's comma (ValuesListRowFault). */
+    private final List<Boolean> valuesRowFaults;
 
     /** For each line, whether it repeats the line before it on purpose (see {@link TypeParameterFault}). */
     private final List<Boolean> repeatedFaults = new ArrayList<>();
@@ -127,6 +129,8 @@ public class SyntaxErrorListener extends BaseErrorListener {
     private List<String> fromGroupLines;
     /** Whether the first line names a word that opened a fresh statement the parse could not finish. */
     private boolean firstLineOpenedStatement;
+    /** The keyword the first fault's statement opens with where live reads a property's name, or null. */
+    private Token propertyNameOpener;
     /** The token the parse's first fault was raised at, before any rule moved the line elsewhere; or null. */
     private Token firstRaisedAt;
     /** The lines of the reading of a TRY_CAST around the first fault as a CAST — see TryCastReading; or null. */
@@ -134,6 +138,8 @@ public class SyntaxErrorListener extends BaseErrorListener {
     private boolean castReadingDone;
     /** The lines of a first fault refusing a word after a keyword SHOW scope in a block; or null. */
     private KeywordScopeLines keywordScopeLines;
+    /** The lines of a first fault inside a SHOW listing's scope that live names a token back for; or null. */
+    private List<String> showScopeReadBack;
     /**
      * The semicolon of the block statement the first fault gave up with its block (see BlockReadOn), or the refused
      * word of a listing's open modifier; null when the fault is read any other way.
@@ -154,6 +160,8 @@ public class SyntaxErrorListener extends BaseErrorListener {
     // Whether a block's statement refused where its select list or its table is missing reads on, as a whole
     // statement's does — see MissingOperandLines.
     private boolean blockReadsOn;
+    /** The lines of a START or a FOR read as a query's own clause at the first fault (QueryTailWordLines); or null. */
+    private List<String> queryTailLines;
     /** The lines {@link #reportedLines} worked out from the faults collected so far; null until asked. */
     private List<String> reportedCache;
     /** The line {@link #firstReportedLine} worked out from the faults collected so far, once firstLineKnown. */
@@ -174,6 +182,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
         this.offendingIndexes = new ArrayList<>();
         this.openerTypes = new ArrayList<>();
         this.parserOwnFaults = new ArrayList<>();
+        this.valuesRowFaults = new ArrayList<>();
         this.groupTails = new ArrayList<>();
         this.openedStatements = new ArrayList<>();
         this.givenUpRunIns = new ArrayList<>();
@@ -244,6 +253,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
         }
         if (errors.isEmpty() && offendingSymbol instanceof Token) {
             firstRaisedAt = (Token) offendingSymbol;
+            propertyNameOpener = UnseparatedStatementOpener.propertyNameOpener(recognizer, firstRaisedAt);
             firstErrorOpensReturnTable = recognizer instanceof Parser
                 && ReturnTableArgument.place(((Parser) recognizer).getInputStream(), firstRaisedAt) > 0;
         }
@@ -478,6 +488,32 @@ public class SyntaxErrorListener extends BaseErrorListener {
                 stackDecided = stacked != null;
                 openerRefused = true;
             }
+            boolean queryTailRead = false;
+            // ★ A START OR A FOR RUN ON AFTER A QUERY, or written as a select item's alias after AS, opens the query's
+            // own clause — see QueryTailWordLines.
+            if (errors.size() == 1 && recognizer instanceof Parser && alterRefusal == null) {
+                List<Token> queryTail = QueryTailWordLines.runOn((Parser) recognizer, reported);
+                if (queryTail == null) {
+                    queryTail = QueryTailWordLines.asAlias((Parser) recognizer, reported);
+                }
+                if (queryTail != null) {
+                    queryTailRead = true;
+                    // Only a statement that ends the text: a later statement's faults are read as the parse reads them.
+                    final Token end = nextSpoken(((Parser) recognizer).getInputStream(),
+                        statementEndIndex(recognizer, queryTail.get(queryTail.size() - 1)));
+                    if (end == null || end.getType() == Token.EOF) {
+                        queryTailLines = new ArrayList<>();
+                        for (final Token each : queryTail) {
+                            queryTailLines.add(sentence(each));
+                        }
+                    }
+                    reported = queryTail.get(0);
+                    stacked = queryTail.size() > 1 ? queryTail.get(1) : null;
+                    stackedAgain = queryTail.size() > 2 ? queryTail.get(2) : null;
+                    stackDecided = true;
+                    openerRefused = true;
+                }
+            }
             // ★ A HEXADECIMAL NUMBER OPENING A CALL'S ARGUMENTS names the call's '(' after it — see HexArgumentLines.
             if (recognizer instanceof Parser && !stackDecided && !openerRefused && errors.size() == 1) {
                 final Token hexStacked = HexArgumentLines.stackedAfter((Parser) recognizer, reported);
@@ -509,7 +545,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
                     stackEndsReport = literalGivesUp;
                 }
             }
-            if (isMissingTerminator(e)) {
+            if (isMissingTerminator(e) && !queryTailRead) {
                 final Token labelled = ConstructEndSyntax.labelFollower(recognizer, reported);
                 final Token follower = labelled != null ? labelled : aliasSwallowedFollower(recognizer, reported);
                 // ★ A SWALLOWED WORD FOLLOWED BY INTO opens the block SELECT's own INTO clause — see AliasedIntoClause.
@@ -605,6 +641,20 @@ public class SyntaxErrorListener extends BaseErrorListener {
             // ★ A WORD AFTER A KEYWORD WRITTEN ALONE AS A SHOW SCOPE, in a block, is two lines — see KeywordScopeLines.
             if (errors.size() == 1) {
                 keywordScopeLines = KeywordScopeLines.of(recognizer, e, reported);
+                // ★ A SHOW'S SCOPE LEFT UNFINISHED names a token back in the scope — see ShowScopeReadBackLines.
+                showScopeReadBack = keywordScopeLines != null || !statementParse && !blockReadsOn ? null
+                    : ShowScopeReadBackLines.lines(recognizer, e, reported);
+            }
+            // ★ A FAULT AMONG A CREATE TABLE'S OPTIONS after its column list is read on as further options — see
+            // TableTailLines.
+            if (stacked == null && !stackDecided && errors.size() == 1 && recognizer instanceof Parser) {
+                final List<Token> tail = TableTailLines.stackedAfter((Parser) recognizer, reported);
+                if (tail != null) {
+                    stacked = tail.get(0);
+                    stackedAgain = tail.size() > 1 ? tail.get(1) : null;
+                    stackedThird = tail.size() > 2 ? tail.get(2) : null;
+                    stackDecided = true;
+                }
             }
             if (stacked == null && !stackDecided && !endOpened && !deadEndSwallowed && recognizer instanceof Parser) {
                 stacked = stackedAfterFirstFault((Parser) recognizer, reported, parenAfterAlias, e);
@@ -841,6 +891,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
                 ? named.getTokenIndex() : -1));
             openerTypes.add(Integer.valueOf(statementOpenerType(recognizer)));
             parserOwnFaults.add(Boolean.valueOf(e instanceof IdentifierReferenceFault));
+            valuesRowFaults.add(Boolean.valueOf(e instanceof ValuesListRowFault));
             repeatedFaults.add(Boolean.valueOf(e instanceof TypeParameterFault
                 && ((TypeParameterFault) e).repeatsTheLineBefore()));
             final boolean groupTail = named != null && insideGroupAfterRefusal(recognizer, named);
@@ -864,7 +915,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
                     firstOffendingStartIndex = named.getStartIndex();
                 }
             }
-            if ((describeOpened || openerRefused)
+            if ((describeOpened || openerRefused || errors.size() == 1 && refusesClauseWordAlone(recognizer, named))
                     && !(firstFaultRunIn && UnmatchedCloseParen.endsTheReport(recognizer, named))) {
                 // Nothing after the DESC, or after a refused opening token, is reported: the statement never started.
                 suppressUntilTokenIndex = statementEndIndex(recognizer, named);
@@ -2245,6 +2296,27 @@ public class SyntaxErrorListener extends BaseErrorListener {
     }
 
     private List<String> workOutReportedLines(final boolean firstOnly) {
+        // ★ A SOURCE AFTER A VALUES LIST'S COMMA is a row the list could not read — see ValuesRowLines.
+        if (statementParse && sql != null && !valuesRowFaults.isEmpty() && Boolean.TRUE.equals(valuesRowFaults.get(0))) {
+            final List<String> valuesRow = ValuesRowLines.lines(sql, defaultChannelTokens(),
+                offendingIndexes.get(0).intValue());
+            if (valuesRow != null) {
+                return firstOnly ? valuesRow.subList(0, 1) : valuesRow;
+            }
+        }
+        // ★ A START OR A FOR AFTER A QUERY, OR AS A SELECT ITEM'S ALIAS, in a statement that ends the text — see
+        // QueryTailWordLines.
+        if (queryTailLines != null) {
+            return firstOnly ? queryTailLines.subList(0, 1) : queryTailLines;
+        }
+        // ★ A KEYWORD RUN ON WHERE A PROPERTY'S NAME IS READ is that name — see
+        // UnseparatedStatementOpener.propertyNameOpener.
+        final List<String> asPropertyName = propertyNameOpener == null || !statementParse || sql == null ? null
+            : StatementSeparation.propertyNameLines(sql, propertyNameOpener);
+        // A name refused where it stands leaves the keyword to the parse's own reading.
+        if (asPropertyName != null && !asPropertyName.get(0).equals(sentence(propertyNameOpener))) {
+            return firstOnly ? asPropertyName.subList(0, 1) : asPropertyName;
+        }
         final List<String> lines = reportedLinesOfTheParse(firstOnly);
         if (blockReadsOn && !statementParse && !firstOnly && sql != null && !offendingIndexes.isEmpty()
                 && lines != null && !lines.isEmpty()) {
@@ -2273,15 +2345,18 @@ public class SyntaxErrorListener extends BaseErrorListener {
         // ★ A PACKAGES POLICY OUT OF ITS ORDER, AND DESCRIBE DATASET'S WORDS, are read on — see PackagesPolicyLines.
         // ★ A PIVOT AGGREGATE THAT IS NO CALL OF ONE NAME is read on — see PivotCallShapeLines.
         // ★ A DYNAMIC TABLE'S COLUMN IT CANNOT READ is refused at the column's name — see DynamicTableColumnLines.
-        // ★ A ROW ACCESS POLICY ADDED TO A MATERIALIZED VIEW is refused at its ADD — see MaterializedViewAddLines.
+        // ★ A ROW ACCESS POLICY ADDED TO A MATERIALIZED VIEW OR AN EXTERNAL TABLE is refused at its ADD or its ROW
+        // — see MaterializedViewAddLines.
         // ★ A CREATE OR ALTER OF A PRIVACY POLICY is refused at the OR alone — see CreateOrAlterKindLines.
         // ★ A SEQUENCE'S OPTION AFTER THE FIRST THAT DOES NOT READ WHOLE is refused where it starts, or at the comma
         // before it — see SequenceOptionLines.
         // ★ BRACKETS THAT OPEN NO QUERY AFTER A MULTI-TABLE INSERT'S INTO name their first token and the token after
         // them — see MultiTableInsertLines.
+        // ★ A FAULT IN AN EXTERNAL TABLE'S COLUMN LIST reports nothing inside a property's value after it — see
+        // ExternalTableListLines.withoutValueLines.
         final int fault = offendingIndexes.get(0).intValue();
-        return MultiTableInsertLines.lines(spoken, fault,
-            SequenceOptionLines.lines(spoken, fault, linesBeforeSequenceOptions(spoken, lines)));
+        return ExternalTableListLines.withoutValueLines(spoken, fault, MultiTableInsertLines.lines(spoken, fault,
+            SequenceOptionLines.lines(spoken, fault, linesBeforeSequenceOptions(spoken, lines))));
     }
 
     /** The lines of the models read before a sequence's options are (workOutReportedLines). */
@@ -2415,6 +2490,13 @@ public class SyntaxErrorListener extends BaseErrorListener {
             if (stageTags != null) {
                 return stageTags;
             }
+            // ★ A TABLE'S, A VIEW'S, A SCHEMA'S OR A DATABASE'S TAG ACTION THAT DOES NOT READ WHOLE — see
+            // TagActionLines.
+            final List<String> tagAction = offendingIndexes.isEmpty() ? null
+                : TagActionLines.lines(opening, offendingIndexes.get(0).intValue(), firstOnly);
+            if (tagAction != null) {
+                return tagAction;
+            }
         }
         final String leading = leadingIdentifierRefusal();
         if (leading != null) {
@@ -2450,7 +2532,7 @@ public class SyntaxErrorListener extends BaseErrorListener {
         if (routineBody != null) {
             return routineBody;
         }
-        final List<String> blockQuery = sql == null || !statementParse || firstOnly ? null
+        final List<String> blockQuery = sql == null || !statementParse && !blockReadsOn || firstOnly ? null
             : BlockQueryLines.lines(sql, defaultChannelTokens(),
                 offendingIndexes.isEmpty() ? -1 : offendingIndexes.get(0).intValue());
         if (blockQuery != null) {
@@ -2463,12 +2545,27 @@ public class SyntaxErrorListener extends BaseErrorListener {
         if (asyncJob != null) {
             return asyncJob;
         }
+        // ★ A NAME WHERE A BLOCK'S FLOW ARROW WANTS A STATEMENT is refused at once — see FlowArrowStatementLines.
+        final List<String> flowArrow = sql == null || firstOnly || offendingIndexes.isEmpty() ? null
+            : FlowArrowStatementLines.lines(defaultChannelTokens(), offendingIndexes.get(0).intValue());
+        if (flowArrow != null) {
+            return flowArrow;
+        }
+        final List<String> wordAfterWith = sql == null || !statementParse && !blockReadsOn || firstOnly
+                || offendingIndexes.isEmpty() ? null
+            : ShowWithSyntax.wordAfterWithInBlock(defaultChannelTokens(), offendingIndexes.get(0).intValue());
+        if (wordAfterWith != null) {
+            return wordAfterWith;
+        }
         final List<String> readAsCast = tryCastReading();
         if (readAsCast != null) {
             return readAsCast;
         }
         if (keywordScopeLines != null) {
             return keywordScopeLines.lines();
+        }
+        if (showScopeReadBack != null) {
+            return showScopeReadBack;
         }
         final List<Token> spokenTokens = sql == null ? null : defaultChannelTokens();
         // ★ A BRACKET RIGHT AFTER A TABLE'S NAME IN A FROM LIST is refused, and the recovery reads on from the first
@@ -3830,6 +3927,23 @@ public class SyntaxErrorListener extends BaseErrorListener {
      * or one past the input when there is none. Errors up to it are the wreckage of a statement live
      * has already given up on.
      */
+    /**
+     * Whether live refuses an ON or a START where a view's header or an ALTER TABLE's action reads a property, and
+     * reports nothing more of the statement: CREATE VIEW v START = 1 AS … and ALTER TABLE t SET ON COMMIT PRESERVE ROWS
+     * are the word alone, where this parser opened a statement at it, or after it, and refused that one's tokens too
+     * (live-verified).
+     */
+    private static boolean refusesClauseWordAlone(final Recognizer<?, ?> recognizer, final Token word) {
+        if (!(recognizer instanceof Parser) || word == null
+                || word.getType() != FrostlakeLexer.ON && word.getType() != FrostlakeLexer.START) {
+            return false;
+        }
+        final ParserRuleContext context = ((Parser) recognizer).getContext();
+        return context instanceof FrostlakeParser.CreateStatementContext
+                && ((FrostlakeParser.CreateStatementContext) context).VIEW() != null
+            || context instanceof FrostlakeParser.TableActionContext && word.getType() == FrostlakeLexer.ON;
+    }
+
     private static int statementEndIndex(final Recognizer<?, ?> recognizer, final Token from) {
         if (!(recognizer instanceof Parser)) {
             return from.getTokenIndex();
@@ -3902,6 +4016,15 @@ public class SyntaxErrorListener extends BaseErrorListener {
 
     public boolean hasErrors() {
         return !errors.isEmpty();
+    }
+
+    /**
+     * The token the parse's first fault was raised at.
+     *
+     * @return the token, or null where no fault named one
+     */
+    Token firstRaisedAt() {
+        return firstRaisedAt;
     }
 
     /**
@@ -4616,6 +4739,31 @@ public class SyntaxErrorListener extends BaseErrorListener {
      */
     static List<String> linesReportedAfresh(final String text) {
         return reportedFor(text, true, false, true);
+    }
+
+    /**
+     * The lines a parse of {@code text} as a block reports, its statements read on as a block's are (see
+     * {@link #blockReadsOn()}), or none when it parses cleanly: how a refusal that reads part of a block its own way
+     * reads the block's other statements.
+     */
+    static List<String> linesReportedForBlock(final String text) {
+        final SyntaxErrorListener listener = new SyntaxErrorListener(text, true);
+        listener.blockReadsOn = true;
+        final FrostlakeLexer lexer = new FrostlakeLexer(SqlCharStream.of(text));
+        lexer.removeErrorListeners();
+        lexer.addErrorListener(listener);
+        final CommonTokenStream tokens = new CommonTokenStream(lexer);
+        final FrostlakeParser parser = new FrostlakeParser(tokens);
+        ColdPrediction.arm(parser);
+        parser.removeErrorListeners();
+        parser.addErrorListener(listener);
+        parser.sqlScript();
+        try {
+            PostParseRefusals.requireBefore(tokens, text, listener);
+        } catch (final SqlSyntaxException refused) {
+            return refused.getSyntaxErrors();
+        }
+        return listener.hasErrors() ? listener.reportedLines() : Collections.<String>emptyList();
     }
 
     /**

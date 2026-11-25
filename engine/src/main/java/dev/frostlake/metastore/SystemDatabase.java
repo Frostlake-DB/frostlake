@@ -78,6 +78,22 @@ public final class SystemDatabase {
     }
 
     /**
+     * Whether an object is the SNOWFLAKE database or one of its schemas, which no role owns: SHOW DATABASES names no
+     * owner for it, and no listing of grants names an OWNERSHIP of it (live-verified). Its other schemas record no owner;
+     * the engine's own PUBLIC schema there records the role that made the database and is answered here.
+     *
+     * @param kind the kind a grant names the object by
+     * @param name the object's stored full name
+     * @return whether no role owns it
+     */
+    public static boolean ownedByNoRole(final String kind, final String name) {
+        if ("DATABASE".equals(kind)) {
+            return is(name);
+        }
+        return "SCHEMA".equals(kind) && name != null && name.equals(QualifiedName.join(NAME, "PUBLIC"));
+    }
+
+    /**
      * Refuses a statement that would change the SNOWFLAKE database itself or the set of its schemas.
      *
      * @param databaseName the stored name of the database the statement changes

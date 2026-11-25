@@ -20,6 +20,7 @@ import dev.frostlake.DatabaseEngine;
 import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.config.EngineConfig;
 import dev.frostlake.config.S3PathResolver;
+import dev.frostlake.executor.commands.DataTypeParser;
 import dev.frostlake.executor.commands.DeferredHandlerCheck;
 import dev.frostlake.executor.commands.FailureCode;
 import dev.frostlake.executor.commands.UnknownTypeJudgement;
@@ -50,6 +51,7 @@ import dev.frostlake.executor.expressions.LiteralType;
 import dev.frostlake.executor.expressions.MultiColumnScalarSubqueryException;
 import dev.frostlake.executor.expressions.NamedCallRewrite;
 import dev.frostlake.executor.expressions.OuterNameBindings;
+import dev.frostlake.executor.expressions.ParsedEchoPrinter;
 import dev.frostlake.executor.expressions.PerGroupNegations;
 import dev.frostlake.executor.expressions.PlannedCorrelations;
 import dev.frostlake.executor.expressions.PolicyOnlyCallRefusal;
@@ -122,6 +124,7 @@ import dev.frostlake.functions.FunctionRegistry;
 import dev.frostlake.functions.TableFunction;
 import dev.frostlake.functions.scalar.ArrayFunctionHelper;
 import dev.frostlake.functions.scalar.AutoTemporalParser;
+import dev.frostlake.functions.scalar.FractionScale;
 import dev.frostlake.functions.scalar.SharedFunctionHelpers;
 import dev.frostlake.functions.scalar.context.CurrentAccount;
 import dev.frostlake.functions.scalar.context.CurrentSchemas;
@@ -182,6 +185,8 @@ import dev.frostlake.metastore.SqlObject;
 import dev.frostlake.metastore.StatementAnswers;
 import dev.frostlake.metastore.StatementKind;
 import dev.frostlake.metastore.StreamSources;
+import dev.frostlake.metastore.SystemDatabase;
+import dev.frostlake.metastore.SystemSchema;
 import dev.frostlake.metastore.TemporaryObjects;
 import dev.frostlake.metastore.model.AggregationPolicy;
 import dev.frostlake.metastore.model.Alert;
@@ -266,6 +271,7 @@ import dev.frostlake.parser.SignatureTailLine;
 import dev.frostlake.parser.SqlCharStream;
 import dev.frostlake.parser.SqlSyntaxException;
 import dev.frostlake.parser.StageArgumentSyntax;
+import dev.frostlake.parser.StagePathTildeLines;
 import dev.frostlake.parser.StatementSeparation;
 import dev.frostlake.parser.StrayCommentCloseLines;
 import dev.frostlake.parser.SyntaxErrorListener;
@@ -278,6 +284,7 @@ import dev.frostlake.parser.ValueFunctionSyntax;
 import dev.frostlake.parser.WholeStatementReading;
 import dev.frostlake.parser.WindowedOperand;
 import dev.frostlake.persistence.CheckpointDebt;
+import dev.frostlake.persistence.PurgedFileHold;
 import dev.frostlake.persistence.WalStatementKinds;
 import dev.frostlake.security.SecurityManager;
 import dev.frostlake.security.SessionContext;
@@ -334,6 +341,7 @@ import dev.frostlake.types.UuidType;
 import dev.frostlake.types.VariantType;
 import dev.frostlake.types.VectorType;
 import dev.frostlake.types.WidthlessStringType;
+import dev.frostlake.values.ApproximateText;
 import dev.frostlake.values.ApproximateValues;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.CodePointText;
@@ -367,9 +375,11 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
+import org.antlr.v4.runtime.CharStream;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.misc.Interval;
 import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import org.slf4j.Logger;
@@ -834,11 +844,14 @@ public class QueryExecutor implements ImportLocalizer {
                 for (final String kept : version.keptStorages().values()) {
                     storageEngine.discardRetired(kept);
                 }
-                // The storage set aside for the transactions that wrote the table goes too, once none is open.
+                // The storage set aside for the transactions that wrote the table goes too, once none of them is open.
                 final String setAside = version.getStorageSetAside();
-                if (setAside != null && (transactionManager == null
-                        || !transactionManager.isWrittenByOpenTransaction(setAside))) {
-                    storageEngine.discardRetired(setAside);
+                if (setAside != null) {
+                    if (transactionManager == null) {
+                        storageEngine.discardRetired(setAside);
+                    } else {
+                        transactionManager.discardWhenUnwritten(setAside);
+                    }
                 }
             }
         });
@@ -900,6 +913,16 @@ public class QueryExecutor implements ImportLocalizer {
         return sessionDirectory;
     }
 
+    /**
+     * Refuses a CALL whose name reaches no routine, as compiling it does, without running it (see
+     * {@link SQLCommandVisitor#requireCalledRoutine}).
+     *
+     * @param call the CALL as written
+     */
+    public void requireCalledRoutine(final FrostlakeParser.CallStatementContext call) {
+        visitor.requireCalledRoutine(call);
+    }
+
     /** Whether the body of a procedure that runs with its owner's rights is executing. */
     public boolean insideOwnersRightsProcedure() {
         return visitor != null && visitor.insideOwnersRightsProcedure();
@@ -931,6 +954,16 @@ public class QueryExecutor implements ImportLocalizer {
             @Override
             public boolean sees(final String objectType, final String objectName, final String owner) {
                 return securityManager == null || securityManager.sees(objectType, objectName, owner);
+            }
+
+            @Override
+            public String missedContainer(final String databaseName, final String schemaName) {
+                return securityManager == null ? null : securityManager.missedUnseenContainer(databaseName, schemaName);
+            }
+
+            @Override
+            public boolean seesDatabaseRole(final String qualifiedName, final String owner) {
+                return securityManager == null || securityManager.seesDatabaseRole(qualifiedName, owner);
             }
         };
     }
@@ -1139,6 +1172,11 @@ public class QueryExecutor implements ImportLocalizer {
             securityManager == null ? null : securityManager.getSessionContext(),
             engineConfig == null ? null : engineConfig.getAccountId()) : null;
         if (outermost) {
+            // The scales a VARIANT's times and timestamps kept belong to the statement that met them (see
+            // FractionScale#carry).
+            FractionScale.forgetCarried();
+            // So do the answers of the procedures it CALLed as values (see AnonymousCallAnswers).
+            AnonymousCallAnswers.forget();
             // Remember it as well as pinning it: the write-ahead log records the statement at COMMIT, by
             // which point the pin has been released, and reading the clock again there would log the
             // commit time instead of the statement's. What is logged is the statement's START, which carries
@@ -1157,7 +1195,7 @@ public class QueryExecutor implements ImportLocalizer {
             if (apart != null) {
                 apart.complete();
             }
-            return outermost ? geoInOutputFormats(ltzInSessionZone(results)) : results;
+            return outermost ? AnonymousCallAnswers.handedOut(geoInOutputFormats(ltzInSessionZone(results))) : results;
         } finally {
             reentryDepth[0]--;
             if (apart != null) {
@@ -1704,6 +1742,10 @@ public class QueryExecutor implements ImportLocalizer {
             } catch (final SqlSyntaxException again) {
                 throw DollarStringLiterals.readsPast(sql, refused, again) ? again : refused;
             }
+            // The tree keeps the dollar string's own spelling for what quotes a value as written; the respelled text's
+            // reading no longer stands for that text.
+            DollarStringLiterals.keepWritten(tree, sql, refused);
+            SCRIPT_CACHE.remove(respelled);
             if (placesStages && compiled) {
                 SCRIPT_CACHE.put(sql, tree);
             }
@@ -1778,6 +1820,8 @@ public class QueryExecutor implements ImportLocalizer {
         KeywordScopeFirstFault.requireBefore(sql, tokens, errorListener);
         // A comment close no comment opened, at the text's end, names the end after its slash.
         StrayCommentCloseLines.requireBefore(sql, tokens, errorListener);
+        // A '~' in a stage path is refused where it stands, not where the path's prediction gave up.
+        StagePathTildeLines.requireBefore(sql, tokens, errorListener);
         if (scriptLevel) {
             ScriptingStatementPlacement.requireSqlStatementsBefore(tree, tokens, sql, errorListener);
             IntoListLookahead.requireBefore(tree, tokens, sql, errorListener);
@@ -1820,6 +1864,7 @@ public class QueryExecutor implements ImportLocalizer {
         }
         StrayArguments.require(tree);
         OperandRefusals.requireOfStatement(tree);
+        WithCalls.requireNone(tree);
         IntervalLiteralSyntax.requireReadable(tree);
         NamedCallRewrite.apply(tree);
         if (!placesStages) {
@@ -1935,6 +1980,56 @@ public class QueryExecutor implements ImportLocalizer {
         final FrostlakeParser.QueryStatementContext query =
             tree.flowChain().get(0).statement().get(0).queryStatement();
         return query == null ? null : query.selectStatement();
+    }
+
+    /**
+     * Whether the query {@code sql} aggregates with no GROUP BY, so it answers one row whatever it reads.
+     *
+     * @param sql the query's text
+     * @return true for one select block whose items aggregate under no grouping key
+     */
+    public boolean aggregatesToOneRow(final String sql) {
+        final FrostlakeParser.SelectStatementContext statement = subqueryStatement(sql);
+        if (statement == null || statement.selectOperand().size() != 1
+                || statement.selectOperand(0).selectClause() == null) {
+            return false;
+        }
+        final FrostlakeParser.SelectClauseContext clause = statement.selectOperand(0).selectClause();
+        return clause.groupByClause() == null
+            && UnreadColumnPruning.containsAggregate(clause.selectList(), getFunctionRegistry());
+    }
+
+    /**
+     * Whether the item at {@code index} of a subquery's one select is one value on every row the statistics know of:
+     * a literal, NULL included, or a column read bare from its one catalog table whose rows hold one value or nothing
+     * but NULLs.
+     *
+     * @param sql   the subquery's text
+     * @param index the item's place
+     * @return whether the place is a constant
+     */
+    public boolean placeIsConstant(final String sql, final int index) {
+        final FrostlakeParser.SelectStatementContext statement = subqueryStatement(sql);
+        return statement != null && new NullableAntiJoins(this, null, null).placeIsConstant(statement, index);
+    }
+
+    /**
+     * Enters the mode in which a catalog column answers NULL by what its rows hold, as the account's statistics
+     * tell it, rather than by its declaration (see HeldNullReading).
+     *
+     * @return the state to hand back to {@link #endHeldNullReading}
+     */
+    public StoredColumnValues beginHeldNullReading() {
+        return HeldNullReading.begin(this);
+    }
+
+    /**
+     * Leaves the mode {@link #beginHeldNullReading} entered.
+     *
+     * @param previous the state it handed back
+     */
+    public void endHeldNullReading(final StoredColumnValues previous) {
+        HeldNullReading.end(previous);
     }
 
     /**
@@ -2167,6 +2262,35 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
+     * The one item a query projects when it reads no relation and has no other clause - {@code SELECT a + 1}, with
+     * or without an alias or a DISTINCT, but no WHERE, TOP, ORDER BY or LIMIT - as written, or null for any other
+     * text.
+     * Such a query is the item itself wherever it stands (see SharedRowDraws).
+     *
+     * @param sql a subquery's text
+     * @return the item's expression, or null
+     */
+    public String fromlessBareItem(final String sql) {
+        final FrostlakeParser.SqlScriptContext script = queryStatementOf(sql);
+        if (script == null) {
+            return null;
+        }
+        final FrostlakeParser.SelectStatementContext query =
+            script.flowChain().get(0).statement().get(0).queryStatement().selectStatement();
+        if (query.withClause() != null || query.selectOperand().size() != 1 || query.orderByClause() != null
+                || query.limitClause() != null || query.fetchClause() != null) {
+            return null;
+        }
+        final FrostlakeParser.SelectClauseContext clause = query.selectOperand(0).selectClause();
+        if (clause == null || clause.topClause() != null || clause.intoClause() != null
+                || clause.whereClause() != null || clause.connectByClause() != null || clause.groupByClause() != null
+                || clause.havingClause() != null || clause.qualifyClause() != null) {
+            return null;
+        }
+        return fromlessSingleItem(sql);
+    }
+
+    /**
      * {@code sql} parsed as a script, or null when it does not parse.
      *
      * @param sql the text
@@ -2200,6 +2324,16 @@ public class QueryExecutor implements ImportLocalizer {
      */
     public static boolean planningOnly() {
         return ExplainPlan.planning();
+    }
+
+    /**
+     * Compile a query for its shape alone, as an EXPLAIN compiles it: a name it cannot resolve, a type it cannot
+     * convert and a select list that projects nothing are refused, and nothing it reads is carried out.
+     *
+     * @param query the query's text
+     */
+    public void compileQueryOnly(final String query) {
+        ExplainPlan.compileOnly(this, query);
     }
 
     /**
@@ -2529,7 +2663,7 @@ public class QueryExecutor implements ImportLocalizer {
      * @return its results
      */
     private List<ResultSet> executeInViewHome(final Schema home, final String sql) {
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(home.getDatabaseName(), home.getName());
         try {
@@ -2775,7 +2909,8 @@ public class QueryExecutor implements ImportLocalizer {
      * Lists the statement running on this thread under the text the EXECUTE IMMEDIATE it is runs, when it is a child
      * statement - a block's, a body's, one a block runs through {@link #execute}: the text's one statement takes no
      * row of its own then, and answers under the EXECUTE IMMEDIATE's row and ID, while the request's own EXECUTE
-     * IMMEDIATE keeps its text (live-verified). Its kind and its cells are those of the one statement the text holds.
+     * IMMEDIATE keeps its text, as does one a request of several statements runs (live-verified). Its kind and its
+     * cells are those of the one statement the text holds.
      *
      * @param text      the text the EXECUTE IMMEDIATE runs
      * @param statement the one statement the text holds, or null when it holds several
@@ -2783,8 +2918,14 @@ public class QueryExecutor implements ImportLocalizer {
     public void listChildAs(final String text, final FrostlakeParser.StatementContext statement) {
         final Deque<QueryHistory> rows = runningRows.get();
         if (rows.size() > 1 && !isUnrecorded()) {
+            final Iterator<QueryHistory> running = rows.iterator();
+            running.next();
+            // A statement of a request of several statements is sent as if on its own.
+            final boolean ofRequest = QueryTypeNames.MULTI_STATEMENT.equals(running.next().getQueryTypeName());
             final QueryHistory row = rows.peek();
-            row.listAs(text);
+            if (!ofRequest) {
+                row.listAs(text);
+            }
             if (statement == null) {
                 return;
             }
@@ -2954,6 +3095,28 @@ public class QueryExecutor implements ImportLocalizer {
      */
     public void setOwnSessionStatementSink(final OwnSessionStatementSink sink) {
         this.ownSessionStatementSink = sink;
+    }
+
+    /** Where a load's purge keeps its files until a checkpoint holds the load, or null to delete them at once. */
+    private PurgedFileHold purgedFileHold;
+
+    /**
+     * Wires where a load's purge keeps its files until a checkpoint holds the load: beside the engine's write-ahead
+     * log, which replays the load from its text.
+     *
+     * @param hold the hold, or null to delete purged files at once
+     */
+    public void setPurgedFileHold(final PurgedFileHold hold) {
+        this.purgedFileHold = hold;
+    }
+
+    /**
+     * Where a load's purge keeps its files until a checkpoint holds the load.
+     *
+     * @return the hold, or null when purged files are deleted at once
+     */
+    public PurgedFileHold getPurgedFileHold() {
+        return purgedFileHold;
     }
 
     /**
@@ -3232,9 +3395,8 @@ public class QueryExecutor implements ImportLocalizer {
             storageEngine.takeWrittenRows();
         }
         // A statement is listed in the query history while it runs, under the ID it ends with: the ID is
-        // reserved here and taken by the request's first statement - or, where its client was told the ID before it
-        // ran, by the request itself when it is several statements (see below).
-        final boolean assignedId = queryHistory != null && QueryResultCache.hasAssignedQueryId();
+        // reserved here and taken by the request's statement - or, when it is several statements, by the request
+        // itself (see below).
         final String[] reservedId = {queryHistory != null ? resultCache.reserveQueryId() : null};
         if (queryHistory != null) {
             queryHistory.setQueryId(reservedId[0]);
@@ -3275,7 +3437,17 @@ public class QueryExecutor implements ImportLocalizer {
             // Classify the recorded kind from the PARSED statement, not the raw text: a leading
             // comment or a parenthesized set operation reads as its real kind. The constructor's
             // text sniff stands only when the parse above refused the statement.
-            if (queryHistory != null && !tree.flowChain().isEmpty()
+            // A request of several statements is a statement of its own, the parent of the statements it runs: it
+            // keeps the ID reserved for it - the one its client was told, when it started asynchronously - and its row
+            // lists the whole text as MULTI_STATEMENT, while each statement takes an ID and a row of its own, listed
+            // under its own text, before the parent's row (live-verified). RESULT_SCAN of the parent's ID reads the
+            // request's own answer, and LAST_QUERY_ID names the parent, which ends last.
+            final boolean ownsId = queryHistory != null && lateralContext == null
+                && executeReentryDepth.get()[0] == 1 && (tree.flowChain().size() > 1 || laterStatement != null);
+            if (ownsId) {
+                queryHistory.setQueryType(StatementKind.OTHER);
+                queryHistory.setQueryTypeName(QueryTypeNames.MULTI_STATEMENT);
+            } else if (queryHistory != null && !tree.flowChain().isEmpty()
                     && !tree.flowChain().get(0).statement().isEmpty()) {
                 recordedStatement = tree.flowChain().get(0).statement().get(0);
                 queryHistory.setQueryType(statementKindOf(recordedStatement));
@@ -3286,12 +3458,7 @@ public class QueryExecutor implements ImportLocalizer {
             // transaction commits one as it completes and undoes only the one that fails.
             final StatementBoundaries boundaries = lateralContext == null && executeReentryDepth.get()[0] == 1
                 && (tree.flowChain().size() > 1 || laterStatement != null) ? statementBoundaries.get() : null;
-            // A request of several statements started asynchronously keeps the ID its client was told for itself, as
-            // the parent of its statements, which take IDs of their own: RESULT_SCAN of that ID reads the request's
-            // own answer, and the query history lists the request under it (live-verified).
-            final boolean ownsAssignedId = assignedId && lateralContext == null
-                && executeReentryDepth.get()[0] == 1 && tree.flowChain().size() > 1;
-            final String[] statementId = ownsAssignedId ? new String[1] : reservedId;
+            final String[] statementId = ownsId ? new String[1] : reservedId;
 
             // Visit each flow chain (a chain is usually a single statement; with the ->> flow
             // operator it is several, executed in order — each stage may read a prior stage's
@@ -3301,6 +3468,10 @@ public class QueryExecutor implements ImportLocalizer {
                 // The statement actually run, kept for the status row built after the try below.
                 FrostlakeParser.StatementContext executedStatement = null;
                 final List<ResultSet> priorFlowResults = flowChainResults;
+                // The row of one statement of a request of several, which it is listed under while it runs.
+                final String childText = ownsId
+                    ? BlockStatementText.of(chainCtx, visitor.getOriginalText(chainCtx)) : null;
+                QueryHistory childRow = ownsId ? beginChildStatement(childText, stages.get(stages.size() - 1)) : null;
                 final Object result;
                 // The statement a failure names: the stage being run, so a flow chain names its own.
                 FrostlakeParser.StatementContext failingStage = stages.get(stages.size() - 1);
@@ -3440,6 +3611,8 @@ public class QueryExecutor implements ImportLocalizer {
                     if (boundaries != null) {
                         boundaries.fail(statementFailure);
                     }
+                    failChildStatement(childRow, childText, statementFailure);
+                    childRow = null;
                     // A statement that fails inside a script of several is NAMED by the answer, the way
                     // the account names it; one sent on its own answers with its own error unadorned.
                     throw MultiStatementFailure.wrappingInRequest(tree, failingStage, statementFailure,
@@ -3462,7 +3635,10 @@ public class QueryExecutor implements ImportLocalizer {
                     // The status row is the statement's result like any other: RESULT_SCAN reads it under the
                     // statement's id, after a DDL, a SET, a USE or an ALTER SESSION as after a query. SQL the engine
                     // composes for itself is no statement and takes no id.
-                    if (recordsItself) {
+                    if (childRow != null) {
+                        status.markQueryId(completeChildStatement(childRow, childText, status));
+                        childRow = null;
+                    } else if (recordsItself) {
                         final String queryId = resultCache.cacheResult(sql, status, takeReserved(statementId));
                         status.markQueryId(queryId);
                         if (queryHistory != null) {
@@ -3482,7 +3658,11 @@ public class QueryExecutor implements ImportLocalizer {
                 if (answer instanceof ResultSet) {
                     final ResultSet resultSet = (ResultSet) answer;
                     // Cache the result for RESULT_SCAN (only for non-correlated, recorded queries)
-                    if (recordsItself) {
+                    if (childRow != null) {
+                        resultSet.markQueryId(completeChildStatement(childRow, childText, resultSet));
+                        childRow = null;
+                        hasResultSet = true;
+                    } else if (recordsItself) {
                         final String queryId = resultCache.cacheResult(sql, resultSet, takeReserved(statementId));
                         resultSet.markQueryId(queryId);
                         if (queryHistory != null) {
@@ -3509,6 +3689,8 @@ public class QueryExecutor implements ImportLocalizer {
                 if (lateralContext == null) {
                     storageEngine.snapshotDirtyTables();
                 }
+                // A statement that answered nothing to hand out - one a block's flow runs - completes all the same.
+                completeChildStatement(childRow, childText, null);
                 if (boundaries != null) {
                     boundaries.complete(visitor.getOriginalText(chainCtx));
                 }
@@ -3519,12 +3701,10 @@ public class QueryExecutor implements ImportLocalizer {
                 throw laterStatement;
             }
 
-            if (ownsAssignedId) {
-                final String queryId = resultCache.cacheResult(sql, new MultiStatementAnswer(results),
-                    takeReserved(reservedId));
-                if (queryHistory != null) {
-                    queryHistory.setQueryId(queryId);
-                }
+            if (ownsId) {
+                queryHistory.setQueryId(resultCache.cacheResult(sql, new MultiStatementAnswer(results),
+                    takeReserved(reservedId)));
+                hasResultSet = true;
             }
 
             // Generate a query ID for non-result-producing queries (only for non-correlated queries).
@@ -3546,7 +3726,8 @@ public class QueryExecutor implements ImportLocalizer {
                 for (final ResultSet rs : results) {
                     rowsProduced += rs.getRowCount();
                 }
-                queryHistory.markSuccess(LocalDateTime.now(ZoneOffset.UTC), rowsProduced);
+                // A request of several statements answers its own one row (see MultiStatementAnswer).
+                queryHistory.markSuccess(LocalDateTime.now(ZoneOffset.UTC), ownsId ? 1L : rowsProduced);
                 StatementHistoryCells.completed(queryHistory, listedStatement(queryHistory, recordedStatement), this,
                     results, writtenTableRows(), lastTransactionBefore, lastTransactionId(), transactionManager,
                     catalog);
@@ -5018,6 +5199,9 @@ public class QueryExecutor implements ImportLocalizer {
                 setCollations, terms.get(0).get(k), branchColumns, compared));
         }
         List<ResultSetColumn> accColumns = termColumns.get(0);
+        // The columns whose every arm projects one folded constant wrap, settled once the columns are; a UNION
+        // hands any other column's folded FLOAT on as a computed double (see SetOperations#withoutFloatOrigin).
+        final boolean[] keptWraps = new boolean[columnCount];
         // Under a reader that cannot tell duplicate rows apart, the top UNION keeps every row (see
         // DuplicateBlindReading).
         final boolean blindTop = duplicateBlindBodies.contains(ctx);
@@ -5046,8 +5230,8 @@ public class QueryExecutor implements ImportLocalizer {
                             final List<Row> leftReshaped = reshapeRowsByName(input, leftColumns, merged);
                             final List<Row> rightReshaped = reshapeRowsByName(termRows.rows(), rightColumns,
                                 merged);
-                            return SetOperations.applyUnion(leftReshaped, rightReshaped, hasAll, merged,
-                                mergedCollations);
+                            return SetOperations.withoutFloatOrigin(SetOperations.applyUnion(leftReshaped,
+                                rightReshaped, hasAll, merged, mergedCollations), keptWraps);
                         }
                     });
                     accColumns = merged;
@@ -5056,8 +5240,10 @@ public class QueryExecutor implements ImportLocalizer {
                     plan.add(new StageOperator(stageName) {
                         @Override
                         protected List<Row> apply(final List<Row> input) {
-                            return SetOperations.applyUnion(unifiedRows(input, branchColumns, compared),
-                                unifiedRows(termRows.rows(), branchColumns, compared), hasAll, layout, setCollations);
+                            return SetOperations.withoutFloatOrigin(SetOperations.applyUnion(
+                                unifiedRows(input, branchColumns, compared),
+                                unifiedRows(termRows.rows(), branchColumns, compared), hasAll, layout, setCollations),
+                                keptWraps);
                         }
                     });
                 }
@@ -5146,6 +5332,9 @@ public class QueryExecutor implements ImportLocalizer {
                 branchRows.add(arm.rows());
             }
             SetOperationFoldedWraps.keep(accColumns, branchColumns, branchRows);
+            for (int i = 0; i < accColumns.size() && i < keptWraps.length; i++) {
+                keptWraps[i] = accColumns.get(i).isUncheckedConstant();
+            }
         }
         // ORDER BY / LIMIT / FETCH apply once to the combined result (statement level). A set
         // operation's ORDER BY resolves against the combined OUTPUT only (its column names,
@@ -5793,6 +5982,7 @@ public class QueryExecutor implements ImportLocalizer {
                     && ctx.qualifyClause() == null && havingFiltersFromlessRow(ctx)
                     && !FromlessDual.isRead(stmtCtx, ctx)) {
                 rejectUnresolvableNamesWithoutFrom(stmtCtx, ctx);
+                rejectNullableAntiJoinsWithoutFrom(ctx, lateralContext);
                 return planSelectWithoutFrom(stmtCtx, ctx, lateralContext);
             }
 
@@ -5833,6 +6023,7 @@ public class QueryExecutor implements ImportLocalizer {
             final SelectPlan plan = new SelectPlan(this, functionRegistry);
             // A FROM clause opening with TABLE(GETNEXTVAL(…)) starts from a row of its own, which the call joins.
             final boolean drawHead = drawsSequence(firstTableRef);
+            rejectLongGetnextvalColumnLists(allTableRefs, allJoins);
             final TableData tableData = synthesizedSingleRow ? singleEmptyRowSource()
                 : drawHead ? getnextvalHead()
                 : plannedReference(firstTableRef, sourceContext(firstTableRef, lateralContext), cteResults);
@@ -6375,6 +6566,7 @@ public class QueryExecutor implements ImportLocalizer {
                 new WindowCorrelationRule(table, aliasToTable, allTables, lateralContext).reject(stmtCtx, ctx, echo);
             }
             rejectAggregatesOutsideAllowedClauses(ctx, echo, table, aliasToTable, allTables, lateralContext);
+            rejectAggregatesInLambdas(ctx, stmtCtx.orderByClause(), echo);
             // A GROUP BY ALL that finds no key groups nothing: the query is the one group an aggregate query
             // with no GROUP BY is, and is planned as one from here on (see groupsByNoKey).
             final boolean groupsByNoKey = !hasPivotSource
@@ -6479,12 +6671,20 @@ public class QueryExecutor implements ImportLocalizer {
                     valuesNestingKeys = nestedKeys;
                     displacedCorrelations = PlannedCorrelations.begin(nestedKeys);
                     plannedCorrelations = true;
+                } else if (nested == null && !nestedKeys.isEmpty()) {
+                    // Subqueries the list's statistics answer (see ValuesHavingNesting) run without a refusal.
+                    valuesNestingKeys = nestedKeys;
+                    displacedCorrelations = PlannedCorrelations.begin(nestedKeys);
+                    plannedCorrelations = true;
                 }
             }
             if (correlations == null && planTime && !hasPivotSource && !qualifiesWithoutWindow(ctx)) {
                 // A derived relation of a shape of its own is judged as the query it is (DerivedRelationJudgement).
                 subqueryRefusal = firstRefusal(subqueryRefusal,
                     DerivedRelationJudgement.refusal(this, stmtCtx, ctx, lateralContext));
+            }
+            if (correlations == null && planTime && !hasPivotSource && ctx.tableExpression() == null) {
+                rejectNullableAntiJoinsWithoutFrom(ctx, lateralContext);
             }
             if (correlations != null) {
                 final RuntimeException correlated = correlations.refusal();
@@ -6764,7 +6964,10 @@ public class QueryExecutor implements ImportLocalizer {
             final List<FrostlakeParser.ExpressionContext> windowOrderKeyTrees = new ArrayList<>();
             final Map<String, Integer> windowOrderKeyIndex = new HashMap<>();
             final Map<Row, Object[]> windowOrderKeyValues = new IdentityHashMap<>();
-            if (hasWindowFunctions && stmtCtx.orderByClause() != null && stmtCtx.selectOperand().size() == 1) {
+            // An aggregate query with no GROUP BY answers one row and its ORDER BY is dropped: a window there is never
+            // computed, so a fault its value would raise never is (live-verified).
+            if (hasWindowFunctions && stmtCtx.orderByClause() != null && stmtCtx.selectOperand().size() == 1
+                    && !(hasAggregates && !hasGroupBy)) {
                 final OrderKeyOutputNames outputNames =
                     orderByExecutor.outputNames(stmtCtx, table, aliasToTable, allTables);
                 for (final FrostlakeParser.OrderItemContext oi : orderByExecutor.unmatchedOrderItems(stmtCtx)) {
@@ -6882,12 +7085,13 @@ public class QueryExecutor implements ImportLocalizer {
                         windowOrderKeyExprs, windowOrderKeyTrees, windowOrderKeyValues,
                         pushJoinAliasContext ? aliasToTable : null, allTables, projectedAliasValues, freshAliasValues,
                         rowsAreProjected ? null : aheadOfNoRows(ctx, table, aliasToTable, allTables, lateralContext,
-                            !hasGroupBy && !hasAggregates)));
+                            !hasGroupBy && !hasAggregates), lateralContext));
                 } else if (ctx.qualifyClause() != null) {
                     // A QUALIFY with no window in the select list filters the rows as they are: SELECT-shape over
                     // grouped rows, FROM-shape otherwise. Its inline windows are computed by the stage itself.
                     plan.add(qualifyStage(ctx, rowsAreProjected ? windowShape : table, table, !rowsAreProjected,
-                        groupValues, pushJoinAliasContext ? aliasToTable : null, allTables, projectedAliasValues));
+                        groupValues, pushJoinAliasContext ? aliasToTable : null, allTables, projectedAliasValues,
+                        lateralContext));
                 }
             } finally {
                 if (pushJoinAliasContext) {
@@ -7463,7 +7667,7 @@ public class QueryExecutor implements ImportLocalizer {
                                  final Map<Row, Object[]> orderKeyValues,
                                  final Map<String, Table> aliasContext, final List<Table> allTables,
                                  final WhereAliasValues whereAliasValues, final boolean freshAliasValues,
-                                 final Runnable ahead) {
+                                 final Runnable ahead, final Map<String, Object> lateralContext) {
         // Over the FROM rows a window that reads a select alias reads the value the projection shows.
         final WhereAliasValues readAliasValues = rowsAreProjected ? null : whereAliasValues;
         return new StageOperator("WINDOW") {
@@ -7483,9 +7687,11 @@ public class QueryExecutor implements ImportLocalizer {
                     }
                     final GroupedExpressionValues savedGroupValues = windowEvaluator.beginGroupedValues(groupValues);
                     final WhereAliasValues savedAliasValues = windowEvaluator.beginAliasValues(readAliasValues);
+                    final Map<String, Object> savedOuterRow = windowEvaluator.beginOuterRow(lateralContext);
                     try {
                         results = windowEvaluator.computeWindowFunctions(input, ctx, windowShape, rowsAreProjected, table);
                     } finally {
+                        windowEvaluator.endOuterRow(savedOuterRow);
                         windowEvaluator.endAliasValues(savedAliasValues);
                         windowEvaluator.endGroupedValues(savedGroupValues);
                     }
@@ -7498,7 +7704,7 @@ public class QueryExecutor implements ImportLocalizer {
                         // row landed in one NULL partition. Filter first, then reshape only the
                         // survivors, remapping their precomputed window values to the new indices.
                         final List<Row> keptRows = applyQualify(rows, ctx, results, table, table, true,
-                            whereAliasValues, false);
+                            whereAliasValues, false, lateralContext);
                         final Map<Row, Integer> oldIndexByRow = new IdentityHashMap<>();
                         for (int i = 0; i < rows.size(); i++) {
                             oldIndexByRow.put(rows.get(i), i);
@@ -7540,7 +7746,8 @@ public class QueryExecutor implements ImportLocalizer {
                             final GroupedExpressionValues savedQualifyValues =
                                 windowEvaluator.beginGroupedValues(groupValues);
                             try {
-                                rows = applyQualify(rows, ctx, results, windowShape, table, false, null, false);
+                                rows = applyQualify(rows, ctx, results, windowShape, table, false, null, false,
+                                    lateralContext);
                             } finally {
                                 windowEvaluator.endGroupedValues(savedQualifyValues);
                             }
@@ -7565,7 +7772,7 @@ public class QueryExecutor implements ImportLocalizer {
                                   final Table baseTable, final boolean rowsAreBaseShape,
                                   final GroupedExpressionValues groupValues,
                                   final Map<String, Table> aliasContext, final List<Table> allTables,
-                                  final WhereAliasValues carry) {
+                                  final WhereAliasValues carry, final Map<String, Object> lateralContext) {
         return new StageOperator("QUALIFY[" + getOriginalText(ctx.qualifyClause().booleanExpr()) + "]") {
             @Override
             protected List<Row> apply(final List<Row> input) {
@@ -7577,7 +7784,7 @@ public class QueryExecutor implements ImportLocalizer {
                     final GroupedExpressionValues saved = windowEvaluator.beginGroupedValues(groupValues);
                     try {
                         return applyQualify(input, ctx, new HashMap<Integer, Map<Integer, Object>>(), shape, baseTable,
-                            rowsAreBaseShape, carry, true);
+                            rowsAreBaseShape, carry, true, lateralContext);
                     } finally {
                         windowEvaluator.endGroupedValues(saved);
                     }
@@ -8585,12 +8792,15 @@ public class QueryExecutor implements ImportLocalizer {
      * truncated"). A NULL in a NOT NULL column is the bare "NULL result in a non-nullable column" there
      * (live-verified). A number too wide for its column prints the type {@code {nullable}} when the column or the
      * query's column can be NULL (see {@link #enforceColumnConstraintsForDml}).
+     * A constant text the plan folds is written as its folded value: {@code CREATE TABLE t (f FLOAT) AS SELECT '2e308'}
+     * stores inf, where the same text read from a column is refused (see ApproximateText; live-verified).
      *
      * @param envelopeName    the table as the CTAS envelope names it, one level up from how it was written
      * @param nullableSources one flag per column, set where the value written can be NULL; null when none is known
+     * @param foldedSources   one flag per column, set where the value is a text the plan folds; null when none is
      */
     public void writeCtasRow(final Table table, final Row row, final String envelopeName,
-                             final boolean[] nullableSources) {
+                             final boolean[] nullableSources, final boolean[] foldedSources) {
         final List<TableColumn> cols = table.getColumns();
         for (int i = 0; i < cols.size() && i < row.getValues().size(); i++) {
             if (cols.get(i).isVirtual()) {
@@ -8599,7 +8809,13 @@ public class QueryExecutor implements ImportLocalizer {
             try {
                 rejectValuePastColumnRange(row.getValue(i), cols.get(i), false,
                     nullableSources != null && i < nullableSources.length && nullableSources[i]);
-                row.setValue(i, coerceWriteValue(row.getValue(i), cols.get(i).getDataType()));
+                final DataType declared = cols.get(i).getDataType();
+                if (foldedSources != null && i < foldedSources.length && foldedSources[i]
+                        && row.getValue(i) instanceof CharSequence && declared instanceof NumericType
+                        && NumericType.isApproximate(declared)) {
+                    row.setValue(i, ApproximateValues.written(row.getValue(i)));
+                }
+                row.setValue(i, coerceWriteValue(row.getValue(i), declared));
             } catch (final RuntimeException violation) {
                 throw DmlWriteTarget.failedOnColumn(envelopeName, cols.get(i).getName(), violation);
             }
@@ -8709,6 +8925,12 @@ public class QueryExecutor implements ImportLocalizer {
             // VALUE: a VARIANT STRING unquotes (live stores Theodore, not "Theodore", in a
             // VARCHAR column), while containers coerce via their JSON text.
             final JsonNode variantNode = ((VariantValue) value).node();
+            // A text member past the double's range fails its cast to REAL (see ApproximateText).
+            if (type instanceof NumericType && NumericType.isApproximate(type) && variantNode != null
+                    && variantNode.isTextual() && ApproximateText.overflows(variantNode.asText())) {
+                throw new RuntimeException("Failed to cast variant value " + ((VariantValue) value).text()
+                    + " to REAL");
+            }
             // A double member is written into an exact column by its binary value, as a FLOAT is (see
             // VariantNumbers.binaryDouble).
             final Double binary = type instanceof NumericType && !NumericType.isApproximate(type)
@@ -8770,7 +8992,7 @@ public class QueryExecutor implements ImportLocalizer {
             // integer is 1234567890123456768. Keeping the value's arrival class instead — a BigDecimal
             // from a literal, a Long from an integer — made the same column hold three carriers and
             // answer three different things through ::NUMBER, comparison and SUM.
-            final Double approximate = ApproximateValues.written(value);
+            final Double approximate = ApproximateValues.stored(value);
             return approximate != null ? approximate : value;
         }
         if (type instanceof NumericType && value instanceof String) {
@@ -8982,6 +9204,9 @@ public class QueryExecutor implements ImportLocalizer {
                 .recordTruncate(fullyQualifiedName, storageEngine.getTableStorage(fullyQualifiedName).getRowIds());
         } else {
             resetCopyLoadHistory(fullyQualifiedName);
+            if (streamManager != null && storageEngine.hasTable(fullyQualifiedName)) {
+                streamManager.trackTruncate(fullyQualifiedName, storageEngine.getTableStorage(fullyQualifiedName));
+            }
             storageEngine.truncateTable(fullyQualifiedName);
         }
     }
@@ -9013,8 +9238,8 @@ public class QueryExecutor implements ImportLocalizer {
     /**
      * PUT — live's nine-column result shape: compressions, the constant ENCRYPTED marker, and a
      * message cell. AUTO_COMPRESS defaults to TRUE, gzipping an uncompressed source and renaming
-     * the target {@code name.gz}; re-PUTting an identical file answers SKIPPED with live's own
-     * sentence (OVERWRITE=TRUE forces the upload).
+     * the target {@code name.gz}; re-PUTting a file whose target name the stage already holds answers SKIPPED
+     * with live's own sentence, whatever the file holds (OVERWRITE=TRUE forces the upload).
      */
     public ResultSet executePutFromContext(final FrostlakeParser.PutStatementContext ctx) {
         if (StatementClock.isReplay()) {
@@ -9066,12 +9291,45 @@ public class QueryExecutor implements ImportLocalizer {
             if (putPrefix == null) {
                 Files.createDirectories(stageDir);
             }
-            for (final Path src : resolveLocalSources(localPath)) {
-                final String sourceName = src.getFileName().toString();
+            // The files are taken in the order the account's driver reports them in: that of a hash map keyed by
+            // their paths and filled from a hash set of them. Two files bound for one target name collide, the one
+            // taken first reported COLLISION, and a target name the stage already holds is SKIPPED whatever its
+            // content; OVERWRITE = TRUE drops both checks and uploads every file (live-verified).
+            final List<Path> sources = resolveLocalSources(localPath);
+            final Map<String, Path> pathOf = new HashMap<>();
+            final Set<String> paths = new HashSet<>();
+            for (final Path src : sources) {
+                pathOf.put(src.toString(), src);
+                paths.add(src.toString());
+            }
+            final Map<String, Path> byPath = new HashMap<>(sources.size());
+            for (final String path : paths) {
+                byPath.put(path, pathOf.get(path));
+            }
+            final Map<String, String> compressionOf = new HashMap<>();
+            final Map<String, String> sourceOfTarget = new HashMap<>();
+            final Map<String, String> collision = new HashMap<>();
+            for (final Map.Entry<String, Path> entry : byPath.entrySet()) {
                 // The source's compression is read off the file unless SOURCE_COMPRESSION names it (see
                 // PutSourceCompression); a compressed file is uploaded as it is, under its own name.
                 final String sourceCompression = PutSourceCompression.AUTO_DETECT.equals(sourceCompressionOption)
-                    ? PutSourceCompression.detect(src) : sourceCompressionOption;
+                    ? PutSourceCompression.detect(entry.getValue()) : sourceCompressionOption;
+                compressionOf.put(entry.getKey(), sourceCompression);
+                if (overwrite || !PutSourceCompression.isSupported(sourceCompression)) {
+                    continue;
+                }
+                final String sourceName = entry.getValue().getFileName().toString();
+                final String targetName = autoCompress && PutSourceCompression.NONE.equals(sourceCompression)
+                    ? sourceName + ".gz" : sourceName;
+                final String earlier = sourceOfTarget.put(targetName, entry.getKey());
+                if (earlier != null) {
+                    collision.put(earlier, earlier + " has same name as " + entry.getKey());
+                }
+            }
+            for (final Map.Entry<String, Path> entry : byPath.entrySet()) {
+                final Path src = entry.getValue();
+                final String sourceName = src.getFileName().toString();
+                final String sourceCompression = compressionOf.get(entry.getKey());
                 final int sourceSize = (int) Files.size(src);
                 if (!PutSourceCompression.isSupported(sourceCompression)) {
                     rows.add(new Row(Arrays.asList(sourceName, null, sourceSize, 0, sourceCompression,
@@ -9083,16 +9341,20 @@ public class QueryExecutor implements ImportLocalizer {
                 final String targetName = compressing ? sourceName + ".gz" : sourceName;
                 final Path dest = putPrefix == null ? stageDir.resolve(targetName)
                     : StagePathSegments.fileToWrite(putTarget.getRoot(), putPrefix + targetName);
-                final byte[] payload = compressing
-                    ? gzipBytes(Files.readAllBytes(src)) : Files.readAllBytes(src);
                 final String targetCompression = compressing ? "GZIP" : sourceCompression;
-                if (!overwrite && Files.isRegularFile(dest)
-                        && Arrays.equals(Files.readAllBytes(dest), payload)) {
+                if (collision.containsKey(entry.getKey())) {
+                    rows.add(new Row(Arrays.asList(sourceName, targetName, sourceSize, 0,
+                        sourceCompression, targetCompression, "COLLISION", "", collision.get(entry.getKey()))));
+                    continue;
+                }
+                if (!overwrite && Files.isRegularFile(dest)) {
                     rows.add(new Row(Arrays.asList(sourceName, targetName, sourceSize, 0,
                         sourceCompression, targetCompression, "SKIPPED", "",
                         "File with same destination name and checksum already exists: " + targetName)));
                     continue;
                 }
+                final byte[] payload = compressing
+                    ? gzipBytes(Files.readAllBytes(src)) : Files.readAllBytes(src);
                 Files.write(dest, payload);
                 rows.add(new Row(Arrays.asList(sourceName, targetName, sourceSize,
                     (int) Files.size(dest), sourceCompression, targetCompression,
@@ -9609,7 +9871,7 @@ public class QueryExecutor implements ImportLocalizer {
         final String tableName = kind == StageKind.TABLE
             ? QualifiedName.parse(stagePart.substring(1)).last() : null;
         return new StagePrefix(kind, resolveCopyBaseDir(stageOnly), path, slash >= 0,
-            copyPatternPrefix(stageOnly), tableName);
+            copyPatternPrefix(stageOnly), tableName, clientEncryptedStage(stageOnly));
     }
 
     /**
@@ -9730,7 +9992,7 @@ public class QueryExecutor implements ImportLocalizer {
                 }
                 return null;
             }
-            return subPath.isEmpty() ? stage.getLocalPath() : stage.getLocalPath().resolve(subPath);
+            return stage.localPathFor(subPath);
         }
         if (S3PathResolver.isS3Url(fromLocation)) {
             return s3PathResolver != null ? s3PathResolver.toLocalPath(fromLocation) : null;
@@ -9739,6 +10001,32 @@ public class QueryExecutor implements ImportLocalizer {
             return Paths.get(fromLocation.substring(7));
         }
         return Paths.get(fromLocation);
+    }
+
+    /**
+     * Whether a stage keeps its files encrypted on the client, so they read as their stored objects: the user stage,
+     * a table stage, and a named internal stage not encrypted on the server side (live-verified).
+     *
+     * @param location a stage reference, {@code @name[/path]}, {@code @~[/path]} or {@code @%table[/path]}
+     * @return true for a client-encrypted stage, false for any other or an unknown one
+     */
+    public boolean clientEncryptedStage(final String location) {
+        if (location == null || !location.startsWith("@")) {
+            return false;
+        }
+        if (location.startsWith("@~") || location.startsWith("@%")) {
+            return true;
+        }
+        final String ref = location.substring(1);
+        final int slash = ref.indexOf('/');
+        final Stage stage;
+        try {
+            stage = catalog.getStage(slash >= 0 ? ref.substring(0, slash) : ref);
+        } catch (final RuntimeException unknown) {
+            return false;
+        }
+        return stage != null && stage.getType() == StageType.INTERNAL && stage.getUrl() == null
+            && !"SNOWFLAKE_SSE".equalsIgnoreCase(stage.getEncryptionType());
     }
 
     /**
@@ -10525,9 +10813,10 @@ public class QueryExecutor implements ImportLocalizer {
      */
     /**
      * The prefix PATTERN-matching prepends to a staged file's root-relative name, mirroring the
-     * shape of the account's internal paths: {@code stages/<name>/} for a named stage,
-     * {@code tables/<name>/} for a table stage and {@code users/<user>/} for the user stage (the
-     * account puts an opaque id where the name sits here). Lower-cased, subpath included.
+     * shape of the account's internal paths: {@code stages/<id>/} for a named stage, its storage id
+     * standing where its name sits ({@link StageStorageId}), {@code tables/<number>/} for a table stage,
+     * the table's number standing there, and {@code users/<user>/} for the user stage. A subpath
+     * written after the stage follows, lower-cased.
      */
     public String copyPatternPrefix(final String fromLocation) {
         if (fromLocation == null || !fromLocation.startsWith("@")) {
@@ -10537,14 +10826,22 @@ public class QueryExecutor implements ImportLocalizer {
         while (body.endsWith("/")) {
             body = body.substring(0, body.length() - 1);
         }
-        if (body.startsWith("%")) {
-            return "tables/" + body.substring(1).toLowerCase(Locale.ROOT) + "/";
-        }
         if (body.startsWith("~")) {
             final String rest = body.substring(1);
             return "users/frostlake" + rest.toLowerCase(Locale.ROOT) + "/";
         }
-        return "stages/" + body.toLowerCase(Locale.ROOT) + "/";
+        final int slash = body.indexOf('/');
+        final String stagePart = slash >= 0 ? body.substring(0, slash) : body;
+        final String subPath = slash >= 0 ? body.substring(slash).toLowerCase(Locale.ROOT) : "";
+        if (stagePart.startsWith("%")) {
+            final Table table = stagedTable(stagePart.substring(1));
+            final String folder = table != null ? String.valueOf(table.getTableId())
+                : stagePart.substring(1).toLowerCase(Locale.ROOT);
+            return "tables/" + folder + subPath + "/";
+        }
+        final Stage stage = catalog.getStage(stagePart);
+        final String folder = stage != null ? StageStorageId.of(stage) : stagePart.toLowerCase(Locale.ROOT);
+        return "stages/" + folder + subPath + "/";
     }
 
     /** Forget a table's COPY load history — TRUNCATE and CREATE OR REPLACE / DROP TABLE all do. */
@@ -11473,7 +11770,7 @@ public class QueryExecutor implements ImportLocalizer {
         if (home == null || home.length != 3) {
             return evaluator.evaluate(expressionText, row);
         }
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(home[0], home[1]);
         try {
@@ -11494,7 +11791,7 @@ public class QueryExecutor implements ImportLocalizer {
      */
     private List<ResultSet> executeInViewScope(final String viewName, final String body) {
         final String[] scope = viewScope(viewName);
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(scope[0], scope[1]);
         final Map<String, ResultSet> outerCtes = suspendCteScope();
@@ -11569,7 +11866,7 @@ public class QueryExecutor implements ImportLocalizer {
      */
     private PlannedQuery planInViewScope(final String viewName, final String body, final String owner) {
         final String[] scope = viewScope(viewName);
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(scope[0], scope[1]);
         // The body reads the view's underlying objects with its owner's rights, as Snowflake's views do.
@@ -11825,7 +12122,7 @@ public class QueryExecutor implements ImportLocalizer {
      */
     public List<TableColumn> resolveViewShapeInScope(final String database, final String schema, final String body,
                                                      final List<String> columnNames, final String recursiveViewName) {
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         final boolean savedCompiling = compilingViewBody;
         catalog.restoreContext(database, schema);
@@ -11853,7 +12150,7 @@ public class QueryExecutor implements ImportLocalizer {
      */
     public List<TableColumn> resolveQueryResultColumnsInScope(final String database, final String schema,
                                                               final String body) {
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         final boolean savedCompiling = compilingViewBody;
         catalog.restoreContext(database, schema);
@@ -11916,7 +12213,7 @@ public class QueryExecutor implements ImportLocalizer {
         if (home == null) {
             return body.run();
         }
-        final String callerDatabase = catalog.getCurrentDatabase();
+        final String callerDatabase = catalog.heldDatabaseName();
         final String callerSchema = catalog.heldSchemaName();
         final boolean elsewhere = !home.getDatabaseName().equals(callerDatabase) || !home.getName().equals(callerSchema);
         final boolean savedCompiling = compilingViewBody;
@@ -12039,6 +12336,28 @@ public class QueryExecutor implements ImportLocalizer {
             // not a dynamic table
         }
         return findStream(name) != null ? "STREAM" : null;
+    }
+
+    /**
+     * The name of the view a relation's name resolves to when the SNOWFLAKE database's share holds it: a view no role
+     * owns in one of the schemas the database starts with.
+     *
+     * @param name the relation as a statement resolves it
+     * @return the view's name, or null for any other relation
+     */
+    public String sharedViewName(final String name) {
+        try {
+            final Schema schema = catalog.requireOwningSchema(
+                QualifiedName.of(catalog.withoutAccount(QualifiedName.parse(name).parts(), 3)));
+            final View view = resolveView(name);
+            if (view != null && view.getOwner() == null
+                    && SystemSchema.of(schema.getDatabaseName(), schema.getName()) != null) {
+                return view.getName();
+            }
+        } catch (final RuntimeException notAView) {
+            // not a view
+        }
+        return null;
     }
 
     /**
@@ -13028,6 +13347,18 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
+     * Refuse a window a query compiles no plan for, as the query does ahead of its relations: a frame with no ORDER
+     * BY, a frame no window takes or one too wide, and then a frame or an ordering the call's function does not take
+     * (see WindowFunctionEvaluator). What a block holds is judged so while the block compiles.
+     *
+     * @param node an OVER clause or a call; the walk covers what it holds
+     */
+    public void rejectWindowShapes(final ParseTree node) {
+        windowEvaluator.rejectFrameWithoutOrderBy(node);
+        windowEvaluator.rejectUnsupportedFrameForWholePartitionAggregate(node);
+    }
+
+    /**
      * Refuse a query whose FROM clauses name a relation the session holds no SELECT on, walking every query
      * nested in it: what a CREATE VIEW asks of its body before the view is stored.
      *
@@ -13845,6 +14176,7 @@ public class QueryExecutor implements ImportLocalizer {
         // Parse the predicate once, then evaluate the AST per row — the string overload would take
         // the shared parse-cache monitor for every row.
         final Expression parsedWhere = evaluator.withNarrowingCastEqualitiesAnswered(ExpressionEvaluator.parse(whereExpr));
+        evaluator.markPredicate(parsedWhere);
         final List<Row> filtered = new ArrayList<>();
         for (final Row row : rows) {
             final Object result = evaluator.evaluate(parsedWhere, row);
@@ -13866,7 +14198,8 @@ public class QueryExecutor implements ImportLocalizer {
      * @param raw      the rows as stored
      * @return the read, masking the rows as it produces them; {@code raw} itself when no column is masked
      */
-    private RowsProvider maskedRows(final Table relation, final Table owner, final RowsProvider raw) {
+    private RowsProvider maskedRows(final Table relation, final Table owner, final RowsProvider stored) {
+        final RowsProvider raw = virtualColumnsRead(relation, owner, stored);
         // A row access policy keeps the rows it allows where the relation is read, ahead of any join, so each
         // relation of a join - a self-join's both sides, the null-extended side of an outer join - and the sources
         // of an UPDATE ... FROM or a DELETE ... USING are filtered alike; it reads the values unmasked, and masking
@@ -13888,6 +14221,29 @@ public class QueryExecutor implements ImportLocalizer {
             @Override
             public String describe() {
                 return raw.describe();
+            }
+        };
+    }
+
+    /**
+     * A relation's rows with its table's virtual columns computed as the reading session reads them (see
+     * {@link VirtualColumns#read}); the rows themselves where the table has none.
+     */
+    private RowsProvider virtualColumnsRead(final Table relation, final Table owner, final RowsProvider stored) {
+        final Table table = owner != null ? owner : relation;
+        if (!VirtualColumns.any(table)) {
+            return stored;
+        }
+        final QueryExecutor executor = this;
+        return new RowsProvider() {
+            @Override
+            public List<Row> rows() {
+                return VirtualColumns.read(executor, relation, table, stored.rows());
+            }
+
+            @Override
+            public String describe() {
+                return stored.describe();
             }
         };
     }
@@ -15863,22 +16219,45 @@ public class QueryExecutor implements ImportLocalizer {
         if (query == null || !(lateralContext == null || SubqueryCompilation.compiles(lateralContext))) {
             return null;
         }
-        final RuntimeException unsupported = UnsupportedLateralSubquery.refusal(query, joinCtx,
-            aliasToTable == null ? null : aliasToTable.keySet(), table,
-            table == null ? -1 : storedRowCount(table.getQualifiedName()),
-            UnsupportedLateralSubquery.readsOutside(select, source, joinCtx), new BoundColumnPins(this, aliasToTable),
-            functionRegistry);
-        if (unsupported != null) {
-            return unsupported;
-        }
         final ExpressionEvaluator scope = new ExpressionEvaluator(table, functionRegistry, catalog, this);
         if (aliasToTable != null && allTables != null && !allTables.isEmpty()) {
             scope.setMultiTableContext(aliasToTable, allTables);
+        }
+        // A WHERE the statistics of the relations to its left settle FALSE prunes the scan before the body is planned,
+        // so no shape of it is refused: ... WHERE o.id > 9 over ids 1 to 5 answers no row (live-verified).
+        if (!settledFalse(select, scope)) {
+            final RuntimeException unsupported = UnsupportedLateralSubquery.refusal(query, joinCtx,
+                aliasToTable == null ? null : aliasToTable.keySet(), table,
+                table == null ? -1 : storedRowCount(table.getQualifiedName()),
+                UnsupportedLateralSubquery.readsOutside(select, source, joinCtx), new BoundColumnPins(this, aliasToTable),
+                functionRegistry);
+            if (unsupported != null) {
+                return unsupported;
+            }
+            if (aliasToTable != null && allTables != null && new CorrelatedSubqueryRule(this,
+                    LateralInputFilter.offeredNames(aliasToTable, allTables), aliasToTable)
+                    .refusesLateralWindow(query, UnsupportedLateralSubquery.namesReadOutside(select, source))) {
+                return new RuntimeException(SqlCompilationError.of("Unsupported subquery type cannot be evaluated"));
+            }
         }
         final SubqueryExpression subquery = new SubqueryExpression(getOriginalText(query));
         subquery.setQueryPosition(new SourcePosition(query.getStart().getLine(), query.getStart().getCharPositionInLine()));
         subquery.setLateral(true);
         return scope.compileSubquery(subquery, lateralContext);
+    }
+
+    /** Whether the statistics of the relations in {@code scope} settle a select's WHERE FALSE on every row. */
+    private boolean settledFalse(final FrostlakeParser.SelectClauseContext select,
+                                 final ExpressionEvaluator scope) {
+        if (select == null || select.whereClause() == null) {
+            return false;
+        }
+        try {
+            final Expression where = ExpressionEvaluator.parse(getOriginalText(select.whereClause().booleanExpr()));
+            return Boolean.FALSE.equals(scope.settledCondition(where));
+        } catch (final RuntimeException unsettled) {
+            return false;
+        }
     }
 
     /** Whether a parse subtree holds a query of its own. */
@@ -16441,6 +16820,176 @@ public class QueryExecutor implements ImportLocalizer {
         // HAVING is judged by the same rule: live refuses SUM(AVG(n)) > 0 there with the nesting
         // sentence, where it used to pass here unjudged.
         rejectMisplacedCallsInsideAggregate(ctx.havingClause(), echo, table, aliasToTable, allTables);
+    }
+
+    /**
+     * An aggregate or a window call written in a lambda's body is refused at the call's own place, named without its
+     * OVER clause, whatever clause the lambda stands in; a WHERE's or an ON's own aggregate refusal and a QUALIFY with
+     * no window function are raised first, and a query nested in the body is judged as itself (live-verified):
+     *
+     * <pre>
+     *   TRANSFORM([1], x INT -&gt; x + MAX(o.i))            Function 'MAX(O.I)' is not allowed inside lambda expression.
+     *   TRANSFORM([1], x INT -&gt; x + MAX(o.i) OVER ())    the same
+     *   TRANSFORM([1], x INT -&gt; x + AVG(o.i))            Function 'SUM(O.I)' is not allowed inside lambda expression.
+     *   FILTER([1], x INT -&gt; x &gt; SUM(o.i))              Function 'SUM(O.I)' is not allowed inside lambda expression.
+     * </pre>
+     *
+     * <p>The sentence keeps live's trailing space after its full stop.
+     *
+     * @param ctx     the query's select
+     * @param orderBy the statement's ORDER BY, or null
+     * @param echo    how the call is named
+     */
+    private void rejectAggregatesInLambdas(final FrostlakeParser.SelectClauseContext ctx,
+                                           final FrostlakeParser.OrderByClauseContext orderBy, final PlanEcho echo) {
+        for (int i = 0; i < ctx.getChildCount(); i++) {
+            final ParseTree part = ctx.getChild(i);
+            if (part != ctx.qualifyClause() || !qualifiesWithoutWindow(ctx)) {
+                rejectAggregatesInLambdas(part, echo);
+            }
+        }
+        if (orderBy != null) {
+            rejectAggregatesInLambdas(orderBy, echo);
+        }
+    }
+
+    private void rejectAggregatesInLambdas(final ParseTree node, final PlanEcho echo) {
+        if (node instanceof FrostlakeParser.SelectStatementContext
+                || node instanceof FrostlakeParser.MatchRecognizeClauseContext) {
+            return;
+        }
+        if (node instanceof FrostlakeParser.LambdaFunctionContext) {
+            final ParserRuleContext call = firstAggregateCallInLambda(((FrostlakeParser.LambdaFunctionContext) node)
+                .booleanExpr());
+            if (call != null) {
+                final SourcePosition at = ExpressionSource.place(call.getStart().getLine(),
+                    call.getStart().getCharPositionInLine());
+                throw new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
+                    "Function '" + lambdaCallName((FrostlakeParser.LambdaFunctionContext) node, call, echo)
+                    + "' is not allowed inside lambda expression. "));
+            }
+            return;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            rejectAggregatesInLambdas(node.getChild(i), echo);
+        }
+    }
+
+    /**
+     * An aggregate call in a lambda's body as the refusal names it. Where it reads the lambda's parameters they are
+     * named as the call converts them: a TRANSFORM's or a FILTER's element is a VARIANT cast to the type its
+     * parameter declares, a REDUCE's parameter is its declared type as it is, and an untyped one stays a VARIANT
+     * (live-verified):
+     *
+     * <pre>
+     *   TRANSFORM([1], x INT -&gt; MAX(x))                       Function 'MAX(TO_NUMBER(X))' …
+     *   TRANSFORM(['a'], x VARCHAR -&gt; COUNT(x))               Function 'COUNT(CAST(X AS VARCHAR(134217728)))' …
+     *   TRANSFORM([1], x -&gt; AVG(x))                           Function 'SUM(CAST(X AS FLOAT))' …
+     *   REDUCE([1], 0, (acc INT, x INT) -&gt; acc + AVG(x))      Function 'SUM(X)' …
+     * </pre>
+     */
+    private String lambdaCallName(final FrostlakeParser.LambdaFunctionContext lambda, final ParserRuleContext call,
+                                  final PlanEcho echo) {
+        if (!(call instanceof FrostlakeParser.FunctionCallExprContext)
+                || ((FrostlakeParser.FunctionCallExprContext) call).overClause() != null
+                || call.getStart().getInputStream() == null) {
+            return echo.printCallWithoutWindow(call);
+        }
+        final Map<String, FrostlakeParser.LambdaParamContext> parameters = new LinkedHashMap<>();
+        for (final FrostlakeParser.LambdaParamContext parameter : lambda.lambdaParams().lambdaParam()) {
+            parameters.put(SqlIdentifiers.canonicalText(parameter.identifier().getText()), parameter);
+        }
+        final List<FrostlakeParser.QualifiedNameExprContext> reads = new ArrayList<>();
+        collectParameterReads(call, parameters, reads);
+        if (reads.isEmpty()) {
+            return echo.printCallWithoutWindow(call);
+        }
+        boolean reduce = false;
+        final ParserRuleContext argument = lambda.getParent();
+        if (argument != null && argument.getParent() instanceof FrostlakeParser.FunctionArgListContext
+                && argument.getParent().getParent() instanceof FrostlakeParser.FunctionCallExprContext) {
+            reduce = "REDUCE".equalsIgnoreCase(((FrostlakeParser.FunctionCallExprContext) argument.getParent()
+                .getParent()).functionName().getText());
+        }
+        final List<TableColumn> columns = new ArrayList<>();
+        for (final Map.Entry<String, FrostlakeParser.LambdaParamContext> parameter : parameters.entrySet()) {
+            final FrostlakeParser.LambdaParamContext declared = parameter.getValue();
+            final DataType type = reduce && declared.dataTypeName() != null
+                ? DataTypeParser.parse(declared.dataTypeName(), declared.typeParameters()) : VariantType.VARIANT;
+            final TableColumn column = new TableColumn(parameter.getKey(), type, true, null, false, false, false);
+            column.setStaticallyTyped(true);
+            columns.add(column);
+        }
+        final CharStream input = call.getStart().getInputStream();
+        final StringBuilder text = new StringBuilder();
+        int next = call.getStart().getStartIndex();
+        for (final FrostlakeParser.QualifiedNameExprContext read : reads) {
+            final FrostlakeParser.LambdaParamContext declared =
+                parameters.get(SqlIdentifiers.canonicalText(read.getText()));
+            text.append(input.getText(new Interval(next, read.getStart().getStartIndex() - 1)));
+            final String name = input.getText(new Interval(read.getStart().getStartIndex(),
+                read.getStop().getStopIndex()));
+            if (!reduce && declared.dataTypeName() != null) {
+                final int typeEnd = declared.typeParameters() != null ? declared.typeParameters().getStop().getStopIndex()
+                    : declared.dataTypeName().getStop().getStopIndex();
+                text.append("CAST(").append(name).append(" AS ")
+                    .append(input.getText(new Interval(declared.dataTypeName().getStart().getStartIndex(), typeEnd)))
+                    .append(')');
+            } else {
+                text.append(name);
+            }
+            next = read.getStop().getStopIndex() + 1;
+        }
+        text.append(input.getText(new Interval(next, call.getStop().getStopIndex())));
+        return echo.printLambdaCall(text.toString(), new Table("", columns, false));
+    }
+
+    /** The bare names in {@code node} that read one of the lambda's parameters, outside nested queries and lambdas. */
+    private static void collectParameterReads(final ParseTree node,
+                                              final Map<String, FrostlakeParser.LambdaParamContext> parameters,
+                                              final List<FrostlakeParser.QualifiedNameExprContext> into) {
+        if (node instanceof FrostlakeParser.SelectStatementContext
+                || node instanceof FrostlakeParser.LambdaFunctionContext) {
+            return;
+        }
+        if (node instanceof FrostlakeParser.QualifiedNameExprContext) {
+            final FrostlakeParser.QualifiedNameExprContext name = (FrostlakeParser.QualifiedNameExprContext) node;
+            if (name.qualifiedName().namePart().isEmpty()
+                    && parameters.containsKey(SqlIdentifiers.canonicalText(name.getText()))) {
+                into.add(name);
+            }
+            return;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            collectParameterReads(node.getChild(i), parameters, into);
+        }
+    }
+
+    /** The first aggregate or window call written in a lambda's body outside the queries nested in it. */
+    private ParserRuleContext firstAggregateCallInLambda(final ParseTree node) {
+        if (node instanceof FrostlakeParser.SelectStatementContext) {
+            return null;
+        }
+        if (node instanceof FrostlakeParser.FunctionCallStarExprContext
+                && functionRegistry.hasAggregateFunction(((FrostlakeParser.FunctionCallStarExprContext) node)
+                    .functionName().getText().toUpperCase(Locale.ROOT))) {
+            return (ParserRuleContext) node;
+        }
+        if (node instanceof FrostlakeParser.FunctionCallExprContext) {
+            final FrostlakeParser.FunctionCallExprContext call = (FrostlakeParser.FunctionCallExprContext) node;
+            if (call.overClause() != null
+                    || functionRegistry.hasAggregateFunction(call.functionName().getText().toUpperCase(Locale.ROOT))
+                    && callChoosesAggregate(call)) {
+                return call;
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            final ParserRuleContext found = firstAggregateCallInLambda(node.getChild(i));
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 
     /**
@@ -17525,7 +18074,10 @@ public class QueryExecutor implements ImportLocalizer {
 
     private void collectWindowCallsOutsideNestedQueries(final ParseTree node,
                                                         final List<FrostlakeParser.FunctionCallExprContext> out) {
-        if (node instanceof FrostlakeParser.SelectClauseContext
+        // A nested query's ORDER BY stands beside its select, inside its statement, and is that query's own:
+        // EXISTS (SELECT 1 FROM i ORDER BY ROW_NUMBER() OVER (ORDER BY val)) is answered (live-verified).
+        if (node instanceof FrostlakeParser.SelectStatementContext
+                || node instanceof FrostlakeParser.SelectClauseContext
                 || node instanceof FrostlakeParser.MatchRecognizeClauseContext) {
             return;
         }
@@ -17578,6 +18130,57 @@ public class QueryExecutor implements ImportLocalizer {
                 }
             }
             windowEvaluator.rejectRangeFrameKeys(over, table, aliasToTable, allTables);
+        }
+    }
+
+    /**
+     * The compile checks of the window calls a select item holds — each call's declared type, its arguments'
+     * families and the types its PARTITION BY and ORDER BY keys are built with, as the projection path judges
+     * them — brought forward for an aggregate query, where the grouped select-list validator would otherwise
+     * speak first: beside {@code MAX(id)}, {@code MAX(b::FLOAT) OVER ()} and {@code MAX(id) OVER (ORDER BY
+     * b::FLOAT)} over a BOOLEAN are "invalid type [CAST(FZ.B AS FLOAT)] for parameter 'TO_DOUBLE'", not a
+     * group-by sentence (live-verified).
+     *
+     * @param item        the select item's expression
+     * @param table       the relation the window arguments read
+     * @param aliasToTable the FROM aliases, or null
+     * @param allTables   the FROM relations, or null
+     * @param ctx         the select clause, whose output aliases a window argument may name
+     */
+    void rejectWindowArgumentTypes(final ParseTree item, final Table table, final Map<String, Table> aliasToTable,
+                                   final List<Table> allTables, final FrostlakeParser.SelectClauseContext ctx) {
+        final List<FrostlakeParser.FunctionCallExprContext> calls = new ArrayList<>();
+        windowEvaluator.collectWindowFunctionCalls(item, calls);
+        if (calls.isEmpty()) {
+            return;
+        }
+        final ExpressionEvaluator checker = new ExpressionEvaluator(table, getFunctionRegistry(), getCatalog(), this);
+        if (aliasToTable != null && allTables != null && !allTables.isEmpty()) {
+            checker.setMultiTableContext(aliasToTable, allTables);
+        }
+        checker.setScopeExemptNames(selectItemAliasNames(ctx));
+        for (final FrostlakeParser.FunctionCallExprContext call : calls) {
+            final List<FrostlakeParser.FunctionCallExprContext> one = new ArrayList<>();
+            one.add(call);
+            windowEvaluator.rejectWindowArguments(one, checker);
+            final List<ParserRuleContext> keys = new ArrayList<>();
+            if (call.overClause().partitionByClause() != null) {
+                keys.addAll(KeyContexts.partitionKeys(call.overClause().partitionByClause()));
+            }
+            if (call.overClause().orderByClause() != null) {
+                for (final FrostlakeParser.OrderItemContext orderItem : call.overClause().orderByClause().orderItem()) {
+                    keys.add(KeyContexts.of(orderItem));
+                }
+            }
+            for (final ParserRuleContext key : keys) {
+                final SourcePosition displaced = ExpressionSource.beginNested(new SourcePosition(
+                    key.getStart().getLine(), key.getStart().getCharPositionInLine()));
+                try {
+                    checker.validateStrict(ExpressionEvaluator.parse(ParseTreeText.getOriginalText(key)));
+                } finally {
+                    ExpressionSource.end(displaced);
+                }
+            }
         }
     }
 
@@ -18948,12 +19551,15 @@ public class QueryExecutor implements ImportLocalizer {
      * @param carry      the select items' values kept for the projection to show, or null
      * @param freshCarry whether this stage is the first to keep them, which starts each run afresh; a window stage's
      *                   values are read on, so an item it computed is not drawn again (live-verified)
+     * @param lateralContext the outer row of a correlated query, which the predicate may read beside the window
+     *                   values: {@code EXISTS (SELECT 1 FROM i QUALIFY ROW_NUMBER() OVER (ORDER BY v) = o.id)}; null
+     *                   for a query of its own
      */
     private List<Row> applyQualify(final List<Row> rows, final FrostlakeParser.SelectClauseContext ctx,
                                     final Map<Integer, Map<Integer, Object>> windowFunctionResults,
                                     final Table table, final Table baseTable,
                                     final boolean rowsAreBaseShape, final WhereAliasValues carry,
-                                    final boolean freshCarry) {
+                                    final boolean freshCarry, final Map<String, Object> lateralContext) {
         if (carry != null && freshCarry) {
             carry.clear();
         }
@@ -19028,6 +19634,7 @@ public class QueryExecutor implements ImportLocalizer {
             qAliases.add(SelectItemAccessors.getItemAlias(item) != null ? (SelectItemAccessors.getItemAlias(item)) : null);
         }
         final ExpressionEvaluator qEv = new ExpressionEvaluator(table, functionRegistry, catalog, this);
+        qEv.setOuterLateralContext(lateralContext);
         // Over grouped rows an aggregate written beside a window — QUALIFY SUM(b) / SUM(SUM(b)) OVER () > 0.3 — is
         // valued over the row's group (see WindowFunctionEvaluator.groupAggregateCalls).
         final Map<String, String> groupAggregates = windowEvaluator.groupAggregateCalls(qualifyBool);
@@ -19448,7 +20055,7 @@ public class QueryExecutor implements ImportLocalizer {
         rejectQualifyWithoutWindow(ctx);
     }
 
-    boolean hasAggregateFunctionInExpression(final FrostlakeParser.ExpressionContext expr) {
+    public boolean hasAggregateFunctionInExpression(final FrostlakeParser.ExpressionContext expr) {
         return windowEvaluator.hasAggregateFunctionInExpression(expr);
     }
 
@@ -19794,6 +20401,34 @@ public class QueryExecutor implements ImportLocalizer {
         return windowEvaluator.sortRowsForWindow(rows, orderByClause, table);
     }
 
+    /**
+     * A grouped aggregate's rows in its WITHIN GROUP order. Over a join the keys read the relation each
+     * qualifier names, so {@code ORDER BY x.b, y.b} over a self-join orders by each side's own column rather
+     * than by whichever relation's {@code b} comes last in the joined row.
+     *
+     * @param rows          the group's rows
+     * @param orderByClause the WITHIN GROUP ordering
+     * @param table         the joined relation
+     * @param aliasToTable  the FROM clause's relations by name, or null
+     * @param allTables     every relation of the FROM clause, or null
+     * @return the rows in the ordering's order
+     */
+    List<Row> sortRowsWithinGroup(final List<Row> rows, final FrostlakeParser.OrderByClauseContext orderByClause,
+                                  final Table table, final Map<String, Table> aliasToTable,
+                                  final List<Table> allTables) {
+        if (aliasToTable == null || allTables == null || allTables.size() < 2) {
+            return windowEvaluator.sortRowsForWindow(rows, orderByClause, table);
+        }
+        windowAliasToTableStack.get().push(aliasToTable);
+        windowAllTablesStack.get().push(allTables);
+        try {
+            return windowEvaluator.sortRowsForWindow(rows, orderByClause, table);
+        } finally {
+            windowAliasToTableStack.get().pop();
+            windowAllTablesStack.get().pop();
+        }
+    }
+
     private List<Row> projectRows(final List<Row> rows, final Table table, final FrostlakeParser.SelectClauseContext ctx,
                                   final Map<String, Table> aliasToTable, final List<Table> allTables) {
         // Project each row to only include selected columns
@@ -19869,15 +20504,24 @@ public class QueryExecutor implements ImportLocalizer {
                 if (group == null || group.isEmpty()) {
                     return GroupedExpressionValues.UNRESOLVED;
                 }
+                final FrostlakeParser.ExpressionContext expr;
                 try {
-                    final FrostlakeParser.ExpressionContext expr = expressionContextIn(
-                        AntlrExpressionParser.parseTree(expressionText));
-                    if (expr == null) {
-                        return GroupedExpressionValues.UNRESOLVED;
-                    }
+                    expr = expressionContextIn(AntlrExpressionParser.parseTree(expressionText));
+                } catch (final RuntimeException notAnExpression) {
+                    return GroupedExpressionValues.UNRESOLVED;
+                }
+                if (expr == null) {
+                    return GroupedExpressionValues.UNRESOLVED;
+                }
+                try {
                     return groupByEvaluator.evaluateOverGroup(expr, group, table,
                         aliasToTable, allTables, new HashMap<String, Object>());
                 } catch (final RuntimeException notComputableOverTheGroup) {
+                    if (!SqlCompilationError.isCompilationError(notComputableOverTheGroup.getMessage())) {
+                        // A value the group computes but a row of it cannot is the row's fault, raised as it stands:
+                        // SUM(SUM(s::INT)) OVER () over a text that is no number names the text (live-verified).
+                        throw notComputableOverTheGroup;
+                    }
                     return GroupedExpressionValues.UNRESOLVED;
                 }
             }
@@ -19890,20 +20534,21 @@ public class QueryExecutor implements ImportLocalizer {
      * @param expressionText the expression
      * @return its expression node, or null when the text holds none
      */
-    FrostlakeParser.ExpressionContext parsedExpression(final String expressionText) {
+    public FrostlakeParser.ExpressionContext parsedExpression(final String expressionText) {
         return expressionContextIn(AntlrExpressionParser.parseTree(expressionText));
     }
 
     /**
      * An aggregate call's value over a set of one relation's rows, computed as a grouped query computes it over a
-     * group — over no rows too, where a count is zero and a list is empty.
+     * group — over no rows too, where a count is zero and a list is empty. An expression over aggregate calls is
+     * computed the same way, as a grouped query's select item over the group.
      *
-     * @param call  the aggregate call
+     * @param call  the aggregate call, or an expression over aggregate calls
      * @param rows  the rows aggregated
      * @param table the relation the rows belong to
      * @return the aggregate's value
      */
-    Object aggregateOverRows(final FrostlakeParser.ExpressionContext call, final List<Row> rows, final Table table) {
+    public Object aggregateOverRows(final FrostlakeParser.ExpressionContext call, final List<Row> rows, final Table table) {
         return groupByEvaluator.evaluateOverGroup(call, rows, table, new HashMap<String, Table>(),
             new ArrayList<Table>(), new HashMap<String, Object>());
     }
@@ -20009,18 +20654,19 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
-     * An UPDATE's SET value over the row being updated, typed like a projection under the target's
+     * The evaluator of an UPDATE's SET values over the row being updated, typed like a projection under the target's
      * ALIAS when one was written — {@code UPDATE upd u SET d = COALESCE(u.va, u.d)} folds and casts
-     * exactly as the bare form does, so the refusal is the cast's own sentence.
+     * exactly as the bare form does, so the refusal is the cast's own sentence. One evaluator serves every SET
+     * value of a row, so two values written alike that draw (ENCRYPT) share one draw for the row (live-verified).
      */
-    Object evaluateUpdateValue(final String expr, final Row row, final Table table, final String alias) {
+    ExpressionEvaluator updateValueEvaluator(final Table table, final String alias) {
         final ExpressionEvaluator evaluator = new ExpressionEvaluator(table, functionRegistry, catalog, this);
         final Map<String, Table> aliasToTable = new HashMap<>();
         aliasToTable.put((alias != null ? alias : table.getName()).toUpperCase(Locale.ROOT), table);
         final List<Table> relations = new ArrayList<>();
         relations.add(table);
         evaluator.setDeclaredTypeBase(table, aliasToTable, relations);
-        return evaluator.evaluate(expr, row);
+        return evaluator;
     }
 
     /**
@@ -20099,13 +20745,36 @@ public class QueryExecutor implements ImportLocalizer {
     /**
      * Note the running DML statement as one of the given kind writing a table, whether or not it changed a row, so a
      * stream's backlog lists the version it wrote (see TransactionWriteSet#noteStatementTarget); EXPLAIN writes none.
+     * Where DML applies at once, the statement has written its rows by now, so its versions are written here (see
+     * StreamManager#noteImmediateStatement).
      *
      * @param fullyQualifiedName the table written
      * @param kind               INSERT, UPDATE, DELETE or MERGE
      */
     void noteStatementTarget(final String fullyQualifiedName, final StreamVersionKind kind) {
-        if (deferredApply && !ExplainPlan.planning() && transactionManager.hasActiveTransaction()) {
-            transactionManager.getCurrentTransaction().getWriteSet().noteStatementTarget(fullyQualifiedName, kind);
+        noteStatementTarget(fullyQualifiedName, kind, false);
+    }
+
+    /**
+     * The same, for a statement that may have rewritten the table though it changed no row: an INSERT whose source
+     * the account read rather than settled empty (see InsertSourcePruning).
+     *
+     * @param fullyQualifiedName the table written
+     * @param kind               INSERT, UPDATE, DELETE or MERGE
+     * @param rewritten          whether the statement rewrote the table
+     */
+    void noteStatementTarget(final String fullyQualifiedName, final StreamVersionKind kind, final boolean rewritten) {
+        if (ExplainPlan.planning()) {
+            return;
+        }
+        if (deferredApply) {
+            if (transactionManager.hasActiveTransaction()) {
+                transactionManager.getCurrentTransaction().getWriteSet().noteStatementTarget(fullyQualifiedName, kind,
+                    rewritten);
+            }
+        } else if (streamManager != null) {
+            streamManager.noteImmediateStatement(storageEngine, fullyQualifiedName, kind, rewritten,
+                transactionManager.isLastingTransaction() ? transactionManager.getCurrentTransaction() : null);
         }
     }
 
@@ -20783,7 +21452,8 @@ public class QueryExecutor implements ImportLocalizer {
         if (read != null) {
             final String text = getOriginalText(body);
             try {
-                pruned = UnreadColumnPruning.pruned(text, parseSelectStatement(text), names, read, functionRegistry);
+                pruned = UnreadColumnPruning.pruned(text, parseSelectStatement(text), names, read,
+                    UnreadColumnPruning.namesReadOutsideOrder(reference, body), functionRegistry);
             } catch (final RuntimeException unreadable) {
                 pruned = null;   // a body this cannot take apart runs as written
             }
@@ -20935,11 +21605,11 @@ public class QueryExecutor implements ImportLocalizer {
             final FrostlakeParser.FlattenArgListContext fal = source.flattenArgList();
             if (fal.namedArgumentList() != null) {
                 // All named: FLATTEN(INPUT => expr, OUTER => true, ...)
-                validateTableFunctionCall("FLATTEN", "", source.FLATTEN().getSymbol(),
+                validateTableFunctionCall("FLATTEN", null, source.FLATTEN().getSymbol(),
                     null, fal.namedArgumentList().namedArgument());
             } else {
                 // Mixed: first positional arg = INPUT, then optional named args
-                validateTableFunctionCall("FLATTEN", "FLATTEN", source.FLATTEN().getSymbol(),
+                validateTableFunctionCall("FLATTEN", null, source.FLATTEN().getSymbol(),
                     Arrays.asList(fal.expression()), fal.namedArgument());
             }
             final TableFunction flattenFunc = functionRegistry.getTableFunction("FLATTEN");
@@ -21183,6 +21853,15 @@ public class QueryExecutor implements ImportLocalizer {
             // not fold is refused in VALUES (see ValuesFoldRule).
             final ExpressionEvaluator valuesTyper = new ExpressionEvaluator(
                 new Table("DUMMY", new ArrayList<>(), false), functionRegistry, catalog, this);
+            // Every row holds as many values as the first: VALUES (1), (1, 2) is refused (live-verified).
+            final int width = source.valueTupleList().valueTuple(0).valueList().booleanExpr().size();
+            for (final FrostlakeParser.ValueTupleContext tuple : source.valueTupleList().valueTuple()) {
+                final int written = tuple.valueList().booleanExpr().size();
+                if (written != width) {
+                    throw new RuntimeException(SqlCompilationError.of(
+                        "Inconsistent number of values in the VALUES clause expecting " + width + " but got " + written));
+                }
+            }
             boolean laterRow = false;
             for (final FrostlakeParser.ValueTupleContext tuple : source.valueTupleList().valueTuple()) {
                 for (final FrostlakeParser.BooleanExprContext expr : tuple.valueList().booleanExpr()) {
@@ -21212,6 +21891,11 @@ public class QueryExecutor implements ImportLocalizer {
                         ValuesSemiStructuredParts.refusalOf(parsed, valuesTyper, functionRegistry);
                     if (semiStructured != null) {
                         throw semiStructured;
+                    }
+                    // A function VALUES refuses, wherever it sits in the item, as in an INSERT's VALUES.
+                    if (ValuesRefusedFunctions.holdsOne(parsed)) {
+                        throw new RuntimeException(SqlCompilationError.of("Invalid expression ["
+                            + ParsedEchoPrinter.print(parsed, new ValuesItemEcho(valuesTyper)) + "] in VALUES clause"));
                     }
                     final RuntimeException unfolded = ValuesFoldRule.refusalOf(parsed, exprText, valuesTyper, this);
                     if (unfolded != null) {
@@ -21436,7 +22120,15 @@ public class QueryExecutor implements ImportLocalizer {
             TableData compiledBody = null;
             try {
                 if ((keepsNoRow || !definition.equals(view.getDefinition())) && judged) {
-                    compiledBody = plannedView(view, tableName, view.getDefinition(), alias);
+                    // Beside a blanked text the whole body compiles for its names alone (see UnfoldedBody).
+                    final boolean unfolded = keepsNoRow ? UnfoldedBody.isActive() : UnfoldedBody.begin();
+                    try {
+                        compiledBody = plannedView(view, tableName, view.getDefinition(), alias);
+                    } finally {
+                        if (!keepsNoRow) {
+                            UnfoldedBody.end(unfolded);
+                        }
+                    }
                 }
                 // The body is expanded first, so a relation it may not read is reported ahead of the view's own
                 // SELECT (live-verified). A reader that cannot tell duplicate rows apart has it planned without its
@@ -21752,6 +22444,24 @@ public class QueryExecutor implements ImportLocalizer {
         }
         final ValueRange range = columnValueRange(stored, declared.getName());
         return range == null ? null : range.convertedToBoolean();
+    }
+
+    /**
+     * Refuses a select without FROM for the first anti-join of its select list the account cannot evaluate, as a
+     * select over a table is refused (see {@link NullableAntiJoins}): {@code SELECT 1 NOT IN (SELECT k FROM wn)} over a
+     * column holding a NULL (live-verified). A query run for an outer row, a shape or a relation body is not judged.
+     */
+    private void rejectNullableAntiJoinsWithoutFrom(final FrostlakeParser.SelectClauseContext ctx,
+                                                    final Map<String, Object> lateralContext) {
+        if (lateralContext != null || RelationShapeOnly.isActive() || RelationBody.isActive()
+                || SubqueryCompilation.outerNames() != null) {
+            return;
+        }
+        final RuntimeException refused = new NullableAntiJoins(this,
+            new CorrelatedSubqueryRule(this, new HashSet<String>()), null).refusal(ctx.selectList().selectItem());
+        if (refused != null) {
+            throw refused;
+        }
     }
 
     /**
@@ -22083,11 +22793,11 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
-     * The relation an IDENTIFIER() reference names in FROM, read at the point its time travel clause names, as the
-     * relation written by name is: a view's body as of the point, a dynamic table's refresh, a base table's version;
+     * The relation an IDENTIFIER() reference names in FROM, or a MERGE source names, read at the point its time travel
+     * clause names, as the relation written by name in FROM is: a view's body as of the point, a dynamic table's refresh, a base table's version;
      * a materialized view and a stream keep no history to read.
      */
-    private TableData identifierSourceAtTravelPoint(final String name, final String alias,
+    TableData identifierSourceAtTravelPoint(final String name, final String alias,
                                                     final FrostlakeParser.TimeTravelClauseContext travel) {
         final String[] parts = QualifiedName.parse(name).parts();
         if (parts.length == 3 && WrittenDatabases.hides(parts[0], this)) {
@@ -22916,7 +23626,7 @@ public class QueryExecutor implements ImportLocalizer {
         } catch (final RuntimeException unparsed) {
             return;
         }
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(home[0], home[1]);
         try {
@@ -23345,7 +24055,7 @@ public class QueryExecutor implements ImportLocalizer {
             return plannedDynamicTableBody(dynamicTable, dynamicTable.getDefinitionDatabase(),
                 dynamicTable.getDefinitionSchema());
         }
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(database, schema);
         final PlannedQuery body;
@@ -23365,7 +24075,7 @@ public class QueryExecutor implements ImportLocalizer {
         return new PlannedQuery(shape, body.description) {
             @Override
             ResultSet run() {
-                final String readerDatabase = catalog.getCurrentDatabase();
+                final String readerDatabase = catalog.heldDatabaseName();
                 final String readerSchema = catalog.heldSchemaName();
                 catalog.restoreContext(database, schema);
                 try {
@@ -23715,15 +24425,113 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
+     * Re-binds a view stream to the tables its view's names read now, where they are not the ones it reads: tables
+     * dropped or replaced under their names (see StreamSources#rebind), or ones still there that the names no longer
+     * read (see StreamSources#tablesReadAway). The stream reads its view by name, so in the second case it then holds
+     * the changes each table it now reads took since its offset, where the table tracked changes all that while, and
+     * none of the tables it read before (live-verified). A stream listed as reading the tables that replaced its own
+     * is listed as reading its own again once they are all back. A read of the stream and SYSTEM$STREAM_HAS_DATA both
+     * re-bind.
+     *
+     * @param stream the stream
+     * <p>The write-ahead log keeps no record of a read, so a statement that re-bound a stream owes a checkpoint, which
+     * keeps the stream as the re-bind left it: a recovery then reads it bound as before, with the changes it captured
+     * since (see CheckpointDebt#oweUnlogged).
+     *
+     * @return the full name of the first table whose change tracking the re-bind turned on, which the read that
+     *         re-bound the stream is refused over; null otherwise
+     */
+    public String rebindViewStream(final Stream stream) {
+        final List<Table> boundBefore = stream.getBaseTables();
+        final List<Table> shownBefore = stream.getShownTables();
+        try {
+            return rebindInPlace(stream);
+        } finally {
+            // Binding a stream by its recorded names the first time it is used changes nothing a snapshot holds.
+            if ((boundBefore != null && stream.getBaseTables() != boundBefore) || stream.getShownTables() != shownBefore) {
+                CheckpointDebt.oweUnlogged();
+            }
+        }
+    }
+
+    /** {@link #rebindViewStream}'s work. */
+    private String rebindInPlace(final Stream stream) {
+        final List<Table> away = StreamSources.tablesReadAway(catalog, stream);
+        if (away == null) {
+            final List<Table> bound = StreamSources.baseTablesOf(catalog, stream);
+            if (bound != null && stream.getShownTables() != null && !sameTables(bound, stream.getShownTables())) {
+                // A stream listed as reading the tables that replaced its own, once UNDROP brought its own back, is
+                // listed as reading its own again from its next read on (live-verified).
+                stream.showOn(bound);
+            }
+            return StreamSources.rebind(catalog, stream);
+        }
+        final List<StreamRecord> carried = new ArrayList<>();
+        for (final Table table : away) {
+            if (table.getChangeTrackingSince() > stream.getOffsetSequence()) {
+                continue;
+            }
+            carried.addAll(changesSinceOffset(stream, table));
+        }
+        final String untracked = StreamSources.follow(catalog, stream, away);
+        for (final StreamRecord change : carried) {
+            stream.addRecord(change);
+        }
+        return untracked;
+    }
+
+    /** Whether two lists hold the very same tables in the same order. */
+    private static boolean sameTables(final List<Table> one, final List<Table> other) {
+        if (one.size() != other.size()) {
+            return false;
+        }
+        for (int i = 0; i < one.size(); i++) {
+            if (one.get(i) != other.get(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The changes a table a view stream is re-bound to took since the stream's offset, read from its versions as a
+     * CHANGES clause reads them, each tagged with the table and numbered as the latest version it was read from.
+     *
+     * @param stream the stream
+     * @param table  the table
+     * @return the changes
+     */
+    private List<StreamRecord> changesSinceOffset(final Stream stream, final Table table) {
+        final List<StreamRecord> carried = new ArrayList<>();
+        final Schema holder = StreamSources.holderOf(catalog, table);
+        final String key = holder == null ? null : holder.qualifiedName(table.getName());
+        if (key == null || !storageEngine.hasTable(key)) {
+            return carried;
+        }
+        final TableStorage storage = storageEngine.getTableStorage(key);
+        final TableSnapshot end = storage.snapshotUpTo(Long.MAX_VALUE);
+        if (end == null) {
+            return carried;
+        }
+        final String tag = table.getName().toUpperCase(Locale.ROOT);
+        for (final StreamRecord change : changesBetween(storage, storage.snapshotUpTo(stream.getOffsetSequence()),
+                end, stream.getStreamType() != StreamType.STANDARD)) {
+            carried.add(new StreamRecord(change.getValues(), change.getChangeType(), change.isUpdate(),
+                change.getRowId(), tag, end.sequence));
+        }
+        return carried;
+    }
+
+    /**
      * Materialize a VIEW-sourced stream: change records are captured against the view's base table,
      * then projected through the view's select list here — rows outside the view's WHERE predicate
      * are not part of the view, so their changes don't surface (an update that moves a row out of
      * the view surfaces only its DELETE half, and vice versa).
      */
     private TableData buildViewStreamTableData(final Stream stream, final String alias) {
-        // A stream whose view's tables were replaced under their names is re-bound to them by its first read, refused
-        // where a table tracked no changes until then (see StreamSources.rebind).
-        final String untracked = StreamSources.rebind(catalog, stream);
+        // A stream whose view's names read other tables than its own is re-bound to them by its first read, refused
+        // where a table tracked no changes until then (see rebindViewStream).
+        final String untracked = rebindViewStream(stream);
         if (untracked != null) {
             throw new RuntimeException(SqlCompilationError.inline("Change tracking is not enabled or has been missing"
                 + " for the time range requested on table '" + untracked + "'."));
@@ -23806,6 +24614,79 @@ public class QueryExecutor implements ImportLocalizer {
                 chains.size() > 1 ? chainIndex : -1));
         }
         return new TableData(virtual, viewPolicyKept(view, virtual, rows), alias);
+    }
+
+    /**
+     * Whether a view stream has data in a session where temporary tables that track changes hide some of its tables:
+     * a hidden table's changes no longer count, the temporary table's since the stream's offset do, and the other
+     * tables' count as always (see Stream#hasData; live-verified).
+     *
+     * @param stream the view stream
+     * @return whether SYSTEM$STREAM_HAS_DATA answers TRUE
+     */
+    public boolean shadowedViewStreamHasData(final Stream stream) {
+        final List<Table> bound = StreamSources.baseTablesOf(catalog, stream);
+        final List<Table> shadows = StreamSources.trackedShadowsOf(catalog, stream);
+        if (bound == null || shadows == null) {
+            return stream.hasData();
+        }
+        final boolean appendOnly = stream.getStreamType() != StreamType.STANDARD;
+        final Set<String> hiddenTables = new HashSet<>();
+        final Set<String> hiddenKeys = new HashSet<>();
+        for (int i = 0; i < bound.size() && i < shadows.size(); i++) {
+            if (shadows.get(i) == null) {
+                continue;
+            }
+            final Table hidden = bound.get(i);
+            hiddenTables.add(hidden.getName().toUpperCase(Locale.ROOT));
+            final Schema holder = StreamSources.holderOf(catalog, hidden);
+            if (holder != null) {
+                hiddenKeys.add(holder.qualifiedName(hidden.getName()).toUpperCase(Locale.ROOT));
+            }
+            if (shadowTookData(stream, shadows.get(i), appendOnly)) {
+                return true;
+            }
+        }
+        return stream.hasDataBeside(hiddenTables, hiddenKeys);
+    }
+
+    /**
+     * Whether a temporary table hiding one of a view stream's tables changed its rows since the stream's offset: a
+     * write that changed no row does not count, nor, for a stream that reads inserts alone, one that left the table
+     * empty (live-verified for a standard stream).
+     */
+    private boolean shadowTookData(final Stream stream, final Table temporary, final boolean appendOnly) {
+        final Schema holder = StreamSources.holderOf(catalog, temporary);
+        final String key = holder == null ? null : holder.qualifiedName(temporary.getName());
+        if (key == null || !storageEngine.hasTable(key)) {
+            return false;
+        }
+        final TableStorage storage = storageEngine.getTableStorage(key);
+        final TableSnapshot atOffset = storage.snapshotUpTo(stream.getOffsetSequence());
+        List<Row> before = atOffset == null ? new ArrayList<>() : atOffset.rows;
+        for (final TableSnapshot snapshot : storage.getSnapshots()) {
+            if (snapshot.sequence <= stream.getOffsetSequence()) {
+                continue;
+            }
+            if (!sameRows(before, snapshot.rows) && (!appendOnly || !snapshot.rows.isEmpty())) {
+                return true;
+            }
+            before = snapshot.rows;
+        }
+        return false;
+    }
+
+    /** Whether two snapshots hold the same stored rows: a write installs new rows, never changes one in place. */
+    private static boolean sameRows(final List<Row> first, final List<Row> second) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (int i = 0; i < first.size(); i++) {
+            if (first.get(i) != second.get(i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -24108,7 +24989,7 @@ public class QueryExecutor implements ImportLocalizer {
             preCtes.put(bare, preTable);
             preCtes.put(baseName, preTable);
         }
-        final String savedDatabase = catalog.getCurrentDatabase();
+        final String savedDatabase = catalog.heldDatabaseName();
         final String savedSchema = catalog.heldSchemaName();
         catalog.restoreContext(viewHome.getDatabaseName(), viewHome.getName());
         final ResultSet preResult;
@@ -27122,11 +28003,26 @@ public class QueryExecutor implements ImportLocalizer {
         }
     }
 
-    /** Canonical schema part written immediately before the function's own name, or empty when the
-     *  call is unqualified (or keyword-named). */
-    private String schemaQualifierOf(final FrostlakeParser.FunctionNameContext nameCtx) {
-        final String[] parts = ParseTreeText.functionNameParts(nameCtx);
-        return parts == null || parts.length < 2 ? "" : parts[parts.length - 2];
+    /**
+     * Refuses an INFORMATION_SCHEMA table function whose database is not there for the session: one written that
+     * does not exist or that its roles do not see, or, written with INFORMATION_SCHEMA alone, a session with no
+     * current database. Live answers {@code Invalid identifier} with the name as written, before the arguments are
+     * read; the SNOWFLAKE database is always there.
+     *
+     * @param functionName the function's own name, upper-cased
+     * @param written      the name's canonical parts as written, or null for a keyword-named call
+     */
+    private void requireInformationSchemaDatabase(final String functionName, final String[] written) {
+        if (!TableFunctionArguments.livesInInformationSchema(functionName) || written == null || written.length < 2) {
+            return;
+        }
+        final String database = written.length >= 3 ? written[written.length - 3] : catalog.getCurrentDatabase();
+        if (database != null && (SystemDatabase.is(database)
+                || catalog.hasDatabaseExact(database) && !WrittenDatabases.hides(database, this))) {
+            return;
+        }
+        throw new RuntimeException(SqlCompilationError.of("Invalid identifier "
+            + TableFunctionArguments.spelledName(functionName, written)));
     }
 
     /**
@@ -27161,6 +28057,33 @@ public class QueryExecutor implements ImportLocalizer {
             return namesGetnextval(((FrostlakeParser.FunctionCallNamedArgsExprContext) call).functionName());
         }
         return false;
+    }
+
+    /**
+     * Refuses a GETNEXTVAL item of a FROM list whose column list names more columns than its one, before any name
+     * the statement reads is resolved: {@code SELECT v FROM TABLE(GETNEXTVAL(s)) s(v, w)} is the mismatch, not an
+     * invalid identifier (live-verified).
+     *
+     * @param refs  the FROM list's items
+     * @param joins its joined items
+     */
+    private void rejectLongGetnextvalColumnLists(final List<FrostlakeParser.TableReferenceContext> refs,
+                                                 final List<FrostlakeParser.JoinClauseContext> joins) {
+        final List<FrostlakeParser.TableReferenceContext> items = new ArrayList<>(refs);
+        for (final FrostlakeParser.JoinClauseContext join : joins) {
+            if (join.tableReference() != null) {
+                items.add(join.tableReference());
+            }
+        }
+        final int produced = Getnextval.columns().size();
+        for (final FrostlakeParser.TableReferenceContext item : items) {
+            if (drawsSequence(item)) {
+                final List<String> aliases = columnAliasList(item.identifierList());
+                if (aliases != null && aliases.size() > produced) {
+                    requireColumnListFits(aliases.size(), produced, sourceAlias(item));
+                }
+            }
+        }
     }
 
     /**
@@ -27264,7 +28187,7 @@ public class QueryExecutor implements ImportLocalizer {
         final boolean hasNamed = ctx.namedArgument() != null && !ctx.namedArgument().isEmpty();
         if (hasNamed) {
             final Map<String, Object> namedArgs = new HashMap<>();
-            validateTableFunctionCall(functionName, schemaQualifierOf(ctx.functionName()),
+            validateTableFunctionCall(functionName, ParseTreeText.functionNameParts(ctx.functionName()),
                 ctx.functionName().getStart(), ctx.expression(), ctx.namedArgument());
             // A leading positional argument fills the function's first parameter — INPUT for
             // FLATTEN, SQL for TO_QUERY.
@@ -27280,7 +28203,7 @@ public class QueryExecutor implements ImportLocalizer {
                 ? getOriginalText(ctx.expression(0)) : namedInputText(ctx.namedArgument());
             return plannedCall(functionName, callText, tableFunc, namedArgs, inputText, lateralContext);
         }
-        validateTableFunctionCall(functionName, schemaQualifierOf(ctx.functionName()),
+        validateTableFunctionCall(functionName, ParseTreeText.functionNameParts(ctx.functionName()),
             ctx.functionName().getStart(), ctx.expression(), null);
         if (ctx.expression() == null || ctx.expression().isEmpty()) {
             return plannedCall(functionName, callText, tableFunc, new HashMap<>());
@@ -27329,7 +28252,7 @@ public class QueryExecutor implements ImportLocalizer {
                 return;
             }
             validateTableFunctionCall(functionSimpleName(call.functionName()),
-                schemaQualifierOf(call.functionName()), call.functionName().getStart(),
+                ParseTreeText.functionNameParts(call.functionName()), call.functionName().getStart(),
                 call.expression(), call.namedArgument());
             return;
         }
@@ -27337,10 +28260,10 @@ public class QueryExecutor implements ImportLocalizer {
             // LATERAL FLATTEN( … ) written without TABLE: judged as the call it is, whatever rows are to its left.
             final FrostlakeParser.FlattenArgListContext arguments = source.flattenArgList();
             if (arguments.namedArgumentList() != null) {
-                validateTableFunctionCall("FLATTEN", "", source.FLATTEN().getSymbol(), null,
+                validateTableFunctionCall("FLATTEN", null, source.FLATTEN().getSymbol(), null,
                     arguments.namedArgumentList().namedArgument());
             } else {
-                validateTableFunctionCall("FLATTEN", "FLATTEN", source.FLATTEN().getSymbol(),
+                validateTableFunctionCall("FLATTEN", null, source.FLATTEN().getSymbol(),
                     Arrays.asList(arguments.expression()), arguments.namedArgument());
             }
             return;
@@ -27482,11 +28405,12 @@ public class QueryExecutor implements ImportLocalizer {
         }
         final String[] written = ParseTreeText.functionNameParts(name);
         if (written != null && written.length > 1) {
-            final StringBuilder spelled = new StringBuilder();
-            for (final String part : written) {
-                spelled.append(spelled.length() > 0 ? "." : "").append(SqlIdentifiers.spellCanonical(part));
-            }
-            return new RuntimeException(SqlCompilationError.of("Unknown user-defined table function " + spelled));
+            final String spelled = TableFunctionArguments.spelledName(functionSimpleName(name), written);
+            // Under INFORMATION_SCHEMA, whose functions are the system's, it is no table function at all
+            // (live-verified).
+            return new RuntimeException(SqlCompilationError.of(
+                ("INFORMATION_SCHEMA".equals(written[written.length - 2]) ? "Unknown table function "
+                    : "Unknown user-defined table function ") + spelled));
         }
         return new RuntimeException(SqlCompilationError.of("Unknown table function "
             + SqlIdentifiers.spellCanonical(functionSimpleName(name))));
@@ -27514,7 +28438,7 @@ public class QueryExecutor implements ImportLocalizer {
         if (functionRegistry.getTableFunction(functionName) == null) {
             return;
         }
-        validateTableFunctionCall(functionName, schemaQualifierOf(name), name.getStart(), positional, named);
+        validateTableFunctionCall(functionName, ParseTreeText.functionNameParts(name), name.getStart(), positional, named);
     }
 
     /**
@@ -27531,26 +28455,27 @@ public class QueryExecutor implements ImportLocalizer {
      * @param positional the positional arguments in order, or null when there are none
      * @param named      the named arguments in order, or null when there are none
      */
-    private void validateTableFunctionCall(final String functionName, final String schemaQualifier,
+    private void validateTableFunctionCall(final String functionName, final String[] writtenName,
                                            final Token nameToken,
                                            final List<FrostlakeParser.ExpressionContext> positional,
                                            final List<FrostlakeParser.NamedArgumentContext> named) {
-        validateTableFunctionCall(functionName, schemaQualifier, nameToken, positional, named,
+        validateTableFunctionCall(functionName, writtenName, nameToken, positional, named,
             positional == null ? 0 : positional.size());
     }
 
     /**
-     * {@link #validateTableFunctionCall(String, String, Token, List, List)} for a call whose arguments may hold a
+     * {@link #validateTableFunctionCall(String, String[], Token, List, List)} for a call whose arguments may hold a
      * subquery written bare, which is the call's whole argument list and no expression among the positional ones.
      *
      * @param writtenCount the number of arguments the call writes, such a subquery counted
      */
-    private void validateTableFunctionCall(final String functionName, final String schemaQualifier,
+    private void validateTableFunctionCall(final String functionName, final String[] writtenName,
                                            final Token nameToken,
                                            final List<FrostlakeParser.ExpressionContext> positional,
                                            final List<FrostlakeParser.NamedArgumentContext> named,
                                            final int writtenCount) {
-        TableFunctionArguments.validateQualification(functionName, schemaQualifier);
+        TableFunctionArguments.validateQualification(functionName, writtenName);
+        requireInformationSchemaDatabase(functionName, writtenName);
         final List<String> namesInOrder = new ArrayList<>();
         // A named argument as the call spells it, which is how a type refusal names it: 'input' for input => x.
         final List<String> spelledNames = new ArrayList<>();
@@ -27585,21 +28510,27 @@ public class QueryExecutor implements ImportLocalizer {
                 && !("FLATTEN".equals(functionName) && writtenCount != argumentTexts.size())) {
             TableFunctionArguments.validateArity(functionName, nameToken, argumentTexts);
         }
+        final int positionalCount = positional == null ? 0 : positional.size();
+        Set<String> correlated = null;
+        RowFreeValues values = null;
+        if (named != null && !named.isEmpty()) {
+            // The relations in scope that the query around the call's own holds are the row around it.
+            correlated = GeneratorBounds.correlatedQualifiers(lateralArgumentTypes.aliases(), named.get(0));
+            values = rowFreeValues(lateralArgumentTypes.aliases(), correlated);
+        }
         for (final Integer judged : TableFunctionArguments.judgingOrder(functionName, namesInOrder)) {
             final int i = judged.intValue();
             final String written = namesInOrder.get(i);
+            if (written != null && i >= positionalCount && values != null) {
+                // A GENERATOR bound is judged for its constancy before its type (see GeneratorBounds).
+                GeneratorBounds.requireConstant(functionName, named, i - positionalCount,
+                    lateralArgumentTypes.aliases(), lateralArgumentTypes.tables(), correlated, values);
+            }
             validateTableFunctionArgumentType(
                 written == null ? TableFunctionArguments.kindOfPositional(functionName, i)
                     : TableFunctionArguments.kindOfNamed(functionName, written),
                 written == null ? TableFunctionArguments.nameOfPositional(functionName, i) : spelledNames.get(i),
                 argumentTexts.get(i));
-        }
-        if (named != null) {
-            // The relations in scope that the query around the call's own holds are the row around it.
-            final Set<String> correlated = GeneratorBounds.correlatedQualifiers(lateralArgumentTypes.aliases(),
-                named.isEmpty() ? null : named.get(0));
-            GeneratorBounds.requireConstants(functionName, named, lateralArgumentTypes.aliases(),
-                lateralArgumentTypes.tables(), correlated, rowFreeValues(lateralArgumentTypes.aliases(), correlated));
         }
     }
 
@@ -27764,7 +28695,7 @@ public class QueryExecutor implements ImportLocalizer {
             }
             refuseTrailingArguments(mixCtx);
             final Map<String, Object> namedArgs = new HashMap<>();
-            validateTableFunctionCall(functionName.toUpperCase(Locale.ROOT), schemaQualifierOf(mixCtx.functionName()),
+            validateTableFunctionCall(functionName.toUpperCase(Locale.ROOT), ParseTreeText.functionNameParts(mixCtx.functionName()),
                 mixCtx.functionName().getStart(),
                 mixCtx.expression(), mixCtx.namedArgument());
             final PlannedTableFunction unreadMixed = unreadCall(functionName, callText, tableFunc);
@@ -27835,7 +28766,7 @@ public class QueryExecutor implements ImportLocalizer {
             final Map<String, Object> namedArgs = new HashMap<>();
             if (funcCtx.namedArgumentList() != null) {
                 validateTableFunctionCall(functionName.toUpperCase(Locale.ROOT),
-                    schemaQualifierOf(funcCtx.functionName()),
+                    ParseTreeText.functionNameParts(funcCtx.functionName()),
                     funcCtx.functionName().getStart(), null,
                     funcCtx.namedArgumentList().namedArgument());
                 final PlannedTableFunction unreadNamed = unreadCall(functionName, callText, tableFunc);
@@ -27941,7 +28872,7 @@ public class QueryExecutor implements ImportLocalizer {
                         new ExpressionEvaluator(null, functionRegistry, catalog, this));
                 }
                 validateTableFunctionCall(functionName.toUpperCase(Locale.ROOT),
-                    schemaQualifierOf(funcCtx.functionName()),
+                    ParseTreeText.functionNameParts(funcCtx.functionName()),
                     funcCtx.functionName().getStart(), funcArgExprs(funcCtx), null, funcArgTexts(funcCtx).size());
                 if (!funcArgTexts(funcCtx).isEmpty()) {
                     // Positional args, e.g. SPLIT_TO_TABLE('a,b', ',') or FLATTEN(col) — evaluate and pass through.
@@ -30831,6 +31762,7 @@ public class QueryExecutor implements ImportLocalizer {
         column.setUncheckedConstant(source.isUncheckedConstant());
         column.setLiteralConstant(source.isLiteralConstant());
         column.setFoldedDouble(source.isFoldedDouble());
+        column.setFoldedText(source.isFoldedText());
         column.setNullText(source.isNullText());
         column.setStoredRead(source.getStoredRead());
         // So does what the projection judged of its item's NULLs, which a range refusal over the column spells.
@@ -30937,8 +31869,10 @@ public class QueryExecutor implements ImportLocalizer {
             ? column.withUncheckedConstant() : column;
         final ResultSetColumn folded = staticType != null && projectsFoldedDouble(expressionText, projectionTypes)
             ? checked.withFoldedDouble() : checked;
+        final ResultSetColumn foldedText = projectsFoldedText(expressionText, projectionTypes)
+            ? folded.withFoldedText() : folded;
         final ResultSetColumn texted = staticType != null && projectsNullText(expressionText, projectionTypes)
-            ? folded.withNullText() : folded;
+            ? foldedText.withNullText() : foldedText;
         return staticType != null && projectsLiteralConstant(expressionText, projectionTypes)
             ? texted.withLiteralConstant() : texted;
     }
@@ -30974,6 +31908,19 @@ public class QueryExecutor implements ImportLocalizer {
         }
         try {
             return projectionTypes.projectsNullText(ExpressionEvaluator.parse(expressionText));
+        } catch (final RuntimeException undetermined) {
+            return false;
+        }
+    }
+
+    /** Whether a select item projects a text the plan folds to a constant; see TableColumn#isFoldedText. */
+    private static boolean projectsFoldedText(final String expressionText,
+                                              final ExpressionEvaluator projectionTypes) {
+        if (expressionText == null || projectionTypes == null || expressionText.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            return projectionTypes.projectsFoldedText(ExpressionEvaluator.parse(expressionText));
         } catch (final RuntimeException undetermined) {
             return false;
         }
@@ -31207,6 +32154,7 @@ public class QueryExecutor implements ImportLocalizer {
             newCol.setUncheckedConstant(originalCol.isUncheckedConstant());
             newCol.setLiteralConstant(originalCol.isLiteralConstant());
             newCol.setFoldedDouble(originalCol.isFoldedDouble());
+            newCol.setFoldedText(originalCol.isFoldedText());
             newCol.setNullText(originalCol.isNullText());
             // …and a stored table's column it reads, so an element of it converts as the element of the column does.
             newCol.setStoredRead(table.residentSource() != null ? StoredRead.COLUMN : originalCol.getStoredRead());

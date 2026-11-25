@@ -146,8 +146,18 @@ final class MergeCompilation {
             judged.addAll(setValues);
             judged.addAll(matchedConditions);
             judged.addAll(notMatchedConditions);
-            subqueryRefusal = unsupportedSubquery(judged, target, relationName(target, targetAlias), source,
+            subqueryRefusal = unsupportedSubquery(ctx, judged, target, relationName(target, targetAlias), source,
                 relationName(source, sourceAlias));
+        }
+        if (subqueryRefusal == null) {
+            // The ON is the join's filter; every other expression is a value an anti-join cannot be (live-verified).
+            final List<ParserRuleContext> values = new ArrayList<>();
+            values.addAll(insertValues);
+            values.addAll(setValues);
+            values.addAll(matchedConditions);
+            values.addAll(notMatchedConditions);
+            subqueryRefusal = antiJoinRefusal(values, target, relationName(target, targetAlias), source,
+                relationName(source, sourceAlias), setValues);
         }
         rejectUnknownTargets(ctx, target);
 
@@ -197,11 +207,13 @@ final class MergeCompilation {
      * statement compiles whether or not a row reaches it, and placed at its SELECT. The expressions are judged in
      * live's order: the ON condition, the INSERT values, the SET values, the WHEN MATCHED conditions and the WHEN NOT
      * MATCHED conditions. A name the statistics of its relation pin to one value correlates nothing: a column of a
-     * table of at most one row, or one whose rows hold one value (live-verified).
+     * table of at most one row, or one whose rows hold one value or only NULLs, and a derived source's or a view's
+     * column the query computing it pins (see {@link DerivedRelationPins#forOuterNames}) (live-verified).
      *
      * @return the refusal, or null where every such subquery is evaluable
      */
-    private RuntimeException unsupportedSubquery(final List<ParserRuleContext> judged, final Table target,
+    private RuntimeException unsupportedSubquery(final FrostlakeParser.MergeStatementContext ctx,
+                                                 final List<ParserRuleContext> judged, final Table target,
                                                  final String targetName, final Table source,
                                                  final String sourceName) {
         final List<FrostlakeParser.ScalarSubqueryExprContext> subqueries = new ArrayList<>();
@@ -217,17 +229,35 @@ final class MergeCompilation {
         final Map<String, Table> relations = new HashMap<>();
         relations.put(targetName, target);
         relations.put(sourceName, source);
+        final DerivedRelationPins pins = DerivedRelationPins.forOuterNames(executor);
+        final FrostlakeParser.SelectStatementContext sourceBody = sourceBody(ctx, pins);
+        final boolean renamed = ctx.identifierList() != null;
         final OuterNameConstancy constancy = new OuterNameConstancy() {
             @Override
             public boolean holdsOneValue(final String qualifier, final String column) {
                 final Table owner = qualifier == null
                     ? (target.hasColumn(column) ? target : source.hasColumn(column) ? source : null)
                     : relations.get(qualifier);
-                if (owner == null || !owner.isCatalogResident() || !owner.hasColumn(column)) {
+                if (owner == null || !owner.hasColumn(column)) {
                     return false;
                 }
-                final long rows = executor.storedRowCount(owner.getQualifiedName());
-                return rows >= 0 && rows <= 1 || new StoredColumnValues(executor).holdsOneValue(owner, column);
+                try {
+                    if (owner == source && sourceBody != null) {
+                        final String declared = owner.getColumn(column).getName();
+                        return renamed ? pins.pinsRenamedColumn(sourceBody, declared, columnIndex(source, declared))
+                            : pins.pinsColumn(sourceBody, declared);
+                    }
+                    if (!owner.isCatalogResident()) {
+                        return false;
+                    }
+                    final long rows = executor.storedRowCount(owner.getQualifiedName());
+                    final StoredColumnValues values = new StoredColumnValues(executor);
+                    final String declared = owner.getColumn(column).getName();
+                    return rows >= 0 && rows <= 1 || values.holdsOneValue(owner, declared)
+                        || values.holdsOnlyNulls(owner, declared);
+                } catch (final RuntimeException unreadable) {
+                    return false;
+                }
             }
         };
         final CorrelatedSubqueryRule rule = new CorrelatedSubqueryRule(executor, outerNames, relations, constancy);
@@ -240,6 +270,52 @@ final class MergeCompilation {
             }
         }
         return null;
+    }
+
+    /**
+     * The first anti-join the expressions hold that the account cannot evaluate (see {@link NullableAntiJoins}): a
+     * {@code WHEN MATCHED AND src.k NOT IN (SELECT k FROM i)} over a column holding a NULL is refused at the query's
+     * SELECT, and a {@code <> ALL} at its quantifier, whether or not a row reaches it; a SET value is refused for a
+     * keyed one as well (see {@link NullableAntiJoins#keyedValueRefusal}) (live-verified).
+     */
+    private RuntimeException antiJoinRefusal(final List<ParserRuleContext> values, final Table target,
+                                             final String targetName, final Table source, final String sourceName,
+                                             final List<ParserRuleContext> setValues) {
+        final Set<String> outerNames = new HashSet<>();
+        addOuterNames(outerNames, target, targetName);
+        addOuterNames(outerNames, source, sourceName);
+        final Map<String, Table> relations = new HashMap<>();
+        relations.put(targetName, target);
+        relations.put(sourceName, source);
+        final NullableAntiJoins judged =
+            new NullableAntiJoins(executor, new CorrelatedSubqueryRule(executor, outerNames, relations, null), relations);
+        final RuntimeException refused = judged.refusal(values);
+        return refused != null ? refused : judged.keyedValueRefusal(setValues);
+    }
+
+    /** The query a derived source computes: a subquery's, or a view's body; null for a stored table. */
+    private FrostlakeParser.SelectStatementContext sourceBody(final FrostlakeParser.MergeStatementContext ctx,
+                                                              final DerivedRelationPins pins) {
+        if (ctx.mergeSource() instanceof FrostlakeParser.MergeSourceSubqueryContext) {
+            return ((FrostlakeParser.MergeSourceSubqueryContext) ctx.mergeSource()).selectStatement();
+        }
+        if (ctx.mergeSource() instanceof FrostlakeParser.MergeSourceTableContext
+                && ((FrostlakeParser.MergeSourceTableContext) ctx.mergeSource()).objectName() != null) {
+            return pins.viewBody(executor.searchPathQualified(executor.resolveObjectName(
+                ((FrostlakeParser.MergeSourceTableContext) ctx.mergeSource()).objectName())));
+        }
+        return null;
+    }
+
+    /** The place of a relation's column of a name. */
+    private static int columnIndex(final Table relation, final String column) {
+        final List<TableColumn> columns = relation.getColumns();
+        for (int i = 0; i < columns.size(); i++) {
+            if (columns.get(i).getName().equalsIgnoreCase(column)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** The scalar subqueries an expression holds outside any other query, in the order written. */

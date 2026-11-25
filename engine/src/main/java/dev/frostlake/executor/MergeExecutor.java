@@ -220,9 +220,13 @@ final class MergeExecutor {
                 final FrostlakeParser.MergeSourceTableContext tableCtx = (FrostlakeParser.MergeSourceTableContext) mergeSource;
                 final String sourceTableName =
                     executor.searchPathQualified(executor.resolveObjectName(tableCtx.objectName()));
+                // USING s AT(…) / BEFORE(…) / CHANGES(…) reads the source as a FROM item with the clause reads it.
+                final TableData travelSource = tableCtx.timeTravelClause() == null ? null
+                    : executor.identifierSourceAtTravelPoint(sourceTableName, sourceAlias, tableCtx.timeTravelClause());
                 // A view's body is expanded first, so a relation it may not read is told ahead of the view's own
                 // SELECT.
-                final TableData viewSource = executor.resolveViewTableData(sourceTableName, sourceAlias);
+                final TableData viewSource = travelSource != null ? travelSource
+                    : executor.resolveViewTableData(sourceTableName, sourceAlias);
                 executor.requireSelect(sourceTableName);
                 final TableData streamSource = viewSource != null ? viewSource
                     : executor.resolveStreamTableData(sourceTableName, sourceAlias);
@@ -585,8 +589,14 @@ final class MergeExecutor {
                                     mergeTargetPendingIdx.get(position), updatedRow);
                             }
                         } else {
-                            executor.getStorageEngine().getTableStorage(fullyQualifiedTargetName)
-                                .update(position, updatedRow);
+                            final TableStorage written =
+                                executor.getStorageEngine().getTableStorage(fullyQualifiedTargetName);
+                            final Row oldRow = written.getRow(position).copy();
+                            written.update(position, updatedRow);
+                            if (executor.getStreamManager() != null) {
+                                executor.getStreamManager().trackUpdate(fullyQualifiedTargetName, oldRow, updatedRow,
+                                    written.getRowId(position));
+                            }
                         }
                     }
                     // Deleted from the last position back, so the positions before each stay where they were.

@@ -125,7 +125,7 @@ public class ParseIpTest extends BaseDatabaseTest {
 
     @Test
     public void ipv6YieldsFamily6() {
-        // IPv6 support is minimal: family 6 with the host echoed and a 128-bit hex rendering.
+        // An IPv6 address answers family 6 with the host echoed and a 128-bit hex rendering.
         final String out = scalar("SELECT PARSE_IP('2001:db8::1', 'INET')");
         assertTrue(out.contains("\"family\":6"), out);
         assertTrue(out.contains("\"host\":\"2001:db8::1\""), out);

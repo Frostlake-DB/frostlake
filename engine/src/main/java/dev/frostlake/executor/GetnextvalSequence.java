@@ -16,6 +16,8 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.expressions.ExpressionSource;
+import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.functions.table.Getnextval;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.model.Schema;
@@ -100,9 +102,32 @@ final class GetnextvalSequence {
         }
         final Sequence sequence = find(executor, parts);
         if (sequence == null) {
+            refuseSequenceRead(executor, parts);
             throw invalidIdentifier(at, spelled(parts));
         }
         return sequence;
+    }
+
+    /**
+     * Refuses an argument that reads a sequence's next value, {@code seq.NEXTVAL}, where the call takes the
+     * sequence itself: live answers {@code invalid argument for function [S.NEXTVAL] unexpected argument
+     * [S.NEXTVAL] at position 0,}, placed nowhere. A {@code nosuch.NEXTVAL} stays an invalid identifier.
+     *
+     * @param executor the executor
+     * @param parts    the argument's canonical name parts
+     */
+    private static void refuseSequenceRead(final QueryExecutor executor, final String[] parts) {
+        if (parts.length < 2 || !"NEXTVAL".equals(parts[parts.length - 1])) {
+            return;
+        }
+        final String[] named = new String[parts.length - 1];
+        System.arraycopy(parts, 0, named, 0, named.length);
+        if (find(executor, named) == null) {
+            return;
+        }
+        final String argument = spelled(parts);
+        throw new RuntimeException(SqlCompilationError.at(0, -1, "invalid argument for function [" + argument
+            + "] unexpected argument [" + argument + "] at position 0,"));
     }
 
     private static Sequence find(final QueryExecutor executor, final String[] parts) {
@@ -143,8 +168,10 @@ final class GetnextvalSequence {
         return text.toString();
     }
 
+    /** The refusal of a name no sequence answers, placed in the statement - a view's CREATE for its body. */
     private static RuntimeException invalidIdentifier(final Token at, final String name) {
-        return new RuntimeException(SqlCompilationError.at(at.getLine(), at.getCharPositionInLine(),
+        final SourcePosition place = ExpressionSource.place(at.getLine(), at.getCharPositionInLine());
+        return new RuntimeException(SqlCompilationError.at(place.getLine(), place.getCharPositionInLine(),
             "invalid identifier '" + name + "'"));
     }
 }

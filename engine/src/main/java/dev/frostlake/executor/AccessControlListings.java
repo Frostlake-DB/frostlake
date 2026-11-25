@@ -283,7 +283,7 @@ public final class AccessControlListings {
     private void owned(final List<Row> rows, final Set<String> listed, final String owner, final String granteeKind,
                        final String shown, final String kind, final String name, final String objectOwner,
                        final Instant created) {
-        if (owner.equals(objectOwner)) {
+        if (owner.equals(objectOwner) && !SystemDatabase.ownedByNoRole(kind, name)) {
             add(rows, listed, granteeKind, shown, kind, GrantNames.spelled(kind, name),
                 ShowResultHelpers.createdOn(created));
         }
@@ -482,7 +482,14 @@ public final class AccessControlListings {
             }
         } else {
             for (final Role holder : catalog.getAllRoles()) {
-                if (holder.getGrantedRoles().contains(name)) {
+                if (!holder.getGrantedRoles().contains(name)) {
+                    continue;
+                }
+                if (catalog.isSystemRoleGrant(holder, name)) {
+                    // The account's own role hierarchy: with the grant option, granted by no role (live-verified).
+                    rows.add(new Row(Arrays.<Object>asList(ShowResultHelpers.createdOn(holder.getCreatedTime()),
+                        "USAGE", kind, shown, "ROLE", holder.getName(), "true", "", "")));
+                } else {
                     addUsage(rows, holder.getRoleGrantor(name), null, holder, kind, shown, "ROLE");
                 }
             }

@@ -149,7 +149,8 @@ final class FromClauseProcedureJobs {
             return ddl.getStart().getText().toUpperCase(Locale.ROOT);
         }
         if (statement.securityStatement() != null || statement.accessControlStatement() != null
-                || statement.taskStatement() != null || statement.containerServicesStatement() != null) {
+                || statement.taskStatement() != null || statement.containerServicesStatement() != null
+                || statement.backupPolicyStatement() != null || statement.codeBundleStatement() != null) {
             return statement.getStart().getText().toUpperCase(Locale.ROOT);
         }
         return null;

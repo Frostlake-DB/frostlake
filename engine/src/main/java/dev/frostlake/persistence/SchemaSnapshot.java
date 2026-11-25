@@ -61,6 +61,8 @@ public class SchemaSnapshot implements Serializable {
     public List<TagSnapshot> tags = new ArrayList<>();
     // Null on snapshots predating Cortex search services — the restore path null-checks.
     public List<CortexSearchServiceSnapshot> cortexSearchServices = new ArrayList<>();
+    // The semantic views. Null on snapshots written before they were saved.
+    public List<SemanticViewSnapshot> semanticViews = new ArrayList<>();
 
     // Null on snapshots that predate the field (deserialization bypasses field initializers): restore null-checks.
     public Integer dataRetentionTimeInDays;

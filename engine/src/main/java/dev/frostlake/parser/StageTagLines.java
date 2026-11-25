@@ -17,14 +17,16 @@ package dev.frostlake.parser;
 
 import org.antlr.v4.runtime.Token;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * The lines the account reports for an ALTER STAGE whose SET TAG or UNSET TAG does not read whole. It takes the tag
- * action only when the statement is one to its end, and otherwise reads TAG as the name of the first property the
- * stage sets or unsets, so the tag's name after it is the token named and the rest is read as properties are
- * (live-verified):
+ * The lines the account reports for an ALTER STAGE or an ALTER TASK whose SET TAG or UNSET TAG does not read whole.
+ * It takes the tag action only when the statement is one to its end, and otherwise reads TAG as the name of the first
+ * property the stage or the task sets or unsets, so the tag's name after it is the token named and the rest is read
+ * as properties are; when an '=' and a value follow the tag's name, the name is dropped and the properties read on from that
+ * '=' (live-verified):
  *
  * <pre>
  *   ALTER STAGE st1 SET TAG tg1 = 'x' COMMENT = 'c'    'tg1'
@@ -32,9 +34,13 @@ import java.util.List;
  *   ALTER STAGE st1 SET TAG tg1 'x'                    'tg1', ''x''
  *   ALTER STAGE st1 SET TAG tg1 = 'x' 'y'              'tg1', ''y''
  *   ALTER STAGE st1 UNSET TAG tg1 COMMENT              'tg1'
+ *   ALTER STAGE st1 SET COMMENT = 'c' TAG tg1 = 'x'    'TAG'
+ *   ALTER STAGE st1 SET TAG tg1 = 'x',                 'tg1', '&lt;EOF&gt;'
+ *   ALTER TASK tk1 SET TAG tg1 = 'x' x                 'tg1', '&lt;EOF&gt;'
  * </pre>
  *
- * The statement is read again with the word TAG written as a plain name of its length, every other character where it
+ * A TAG written after a property the SET already read, no comma between, is the token named when no '=' follows it.
+ * Otherwise the statement is read again with the word TAG written as a plain name of its length, every other character where it
  * was.
  */
 final class StageTagLines {
@@ -68,7 +74,13 @@ final class StageTagLines {
                 tag = i;
             }
         }
-        if (tag < 4 || !opensStageTagAction(spoken, tag)) {
+        if (tag < 4) {
+            return null;
+        }
+        if (followsStageOrTaskProperty(spoken, tag)) {
+            return Collections.singletonList(SyntaxErrorListener.sentence(spoken.get(tag)));
+        }
+        if (!opensStageTagAction(spoken, tag)) {
             return null;
         }
         final Token word = spoken.get(tag);
@@ -82,10 +94,62 @@ final class StageTagLines {
             return first == null ? null : Collections.singletonList(first);
         }
         final List<String> lines = SyntaxErrorListener.linesReportedFor(read, true);
-        return lines.isEmpty() ? null : lines;
+        if (lines.isEmpty()) {
+            return null;
+        }
+        // A word between the first property's name and its '=' is dropped and the rest read on from a value written.
+        final Token dropped = spoken.get(tag + 1);
+        if (tag + 3 < spoken.size() && spoken.get(tag + 2).getType() == FrostlakeLexer.EQ
+                && spoken.get(tag + 3).getType() != Token.EOF && spoken.get(tag + 3).getType() != FrostlakeLexer.SEMI
+                && lines.get(0).equals(SyntaxErrorListener.sentence(dropped))) {
+            final StringBuilder blank = new StringBuilder();
+            for (int i = dropped.getStartIndex(); i <= dropped.getStopIndex(); i++) {
+                blank.append(' ');
+            }
+            final List<String> readOn = new ArrayList<>();
+            readOn.add(lines.get(0));
+            readOn.addAll(SyntaxErrorListener.linesReportedFor(read.substring(0, dropped.getStartIndex()) + blank
+                + read.substring(dropped.getStopIndex() + 1), true));
+            return readOn;
+        }
+        return lines;
     }
 
-    /** Whether the TAG at {@code tag} follows a SET or an UNSET that follows ALTER STAGE [IF EXISTS] and a name. */
+    /**
+     * Whether the TAG at {@code tag} follows a property of an ALTER STAGE's or an ALTER TASK's SET, no comma between,
+     * and no '=' follows it: the TAG is then the token named, alone.
+     */
+    private static boolean followsStageOrTaskProperty(final List<Token> spoken, final int tag) {
+        final int before = spoken.get(tag - 1).getType();
+        if (before == FrostlakeLexer.SET || before == FrostlakeLexer.UNSET || before == FrostlakeLexer.COMMA
+                || spoken.get(tag + 1).getType() == FrostlakeLexer.EQ) {
+            return false;
+        }
+        int start = tag;
+        while (start > 0 && spoken.get(start - 1).getType() != FrostlakeLexer.SEMI) {
+            start--;
+        }
+        if (spoken.get(start).getType() != FrostlakeLexer.ALTER
+                || spoken.get(start + 1).getType() != FrostlakeLexer.STAGE
+                && spoken.get(start + 1).getType() != FrostlakeLexer.TASK) {
+            return false;
+        }
+        for (int i = start + 3; i < tag - 1; i++) {
+            final int type = spoken.get(i).getType();
+            if (type == FrostlakeLexer.UNSET) {
+                return false;
+            }
+            if (type == FrostlakeLexer.SET) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the TAG at {@code tag} follows a SET or an UNSET that follows ALTER STAGE or TASK [IF EXISTS] and a
+     * name.
+     */
     private static boolean opensStageTagAction(final List<Token> spoken, final int tag) {
         final int action = spoken.get(tag - 1).getType();
         if (action != FrostlakeLexer.SET && action != FrostlakeLexer.UNSET) {
@@ -104,7 +168,7 @@ final class StageTagLines {
                 && spoken.get(i - 1).getType() == FrostlakeLexer.IF) {
             i -= 2;
         }
-        return i >= 1 && spoken.get(i).getType() == FrostlakeLexer.STAGE
-            && spoken.get(i - 1).getType() == FrostlakeLexer.ALTER;
+        return i >= 1 && (spoken.get(i).getType() == FrostlakeLexer.STAGE
+            || spoken.get(i).getType() == FrostlakeLexer.TASK) && spoken.get(i - 1).getType() == FrostlakeLexer.ALTER;
     }
 }

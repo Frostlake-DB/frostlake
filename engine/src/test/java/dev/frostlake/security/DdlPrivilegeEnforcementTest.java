@@ -47,6 +47,9 @@ public class DdlPrivilegeEnforcementTest {
         engine.execute("CREATE ROLE other_role");
         engine.execute("CREATE USER app_user");
         engine.execute("GRANT ROLE app_role TO USER app_user");
+        // A role holding nothing in the session's database has no current database: USAGE on it keeps one.
+        engine.execute("GRANT USAGE ON DATABASE db TO ROLE app_role");
+        engine.execute("GRANT USAGE ON DATABASE db TO ROLE other_role");
     }
 
     @AfterEach

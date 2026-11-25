@@ -20,6 +20,9 @@ import dev.frostlake.executor.SqlStringLiterals;
 
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.TerminalNode;
+import org.antlr.v4.runtime.tree.TerminalNodeImpl;
 
 /**
  * A string written between dollar signs is a string literal wherever one may stand (live-verified): {@code ALTER
@@ -82,6 +85,60 @@ public final class DollarStringLiterals {
         final Token token = first == null ? null : firstFrom(sql, first);
         return token != null && second != null && (second[0] > token.getLine()
             || second[0] == token.getLine() && second[1] > token.getCharPositionInLine() + token.getText().length() - 1);
+    }
+
+    /**
+     * Marks the quoted string a dollar string was respelled as, in the tree read from the respelled text, with the
+     * spelling it was written in: a value refused as written names {@code $$true$$}, not {@code 'true'}
+     * (live-verified).
+     *
+     * @param tree    the tree read from the respelled text
+     * @param sql     the text as written
+     * @param refused the refusal of the text as written
+     */
+    public static void keepWritten(final ParseTree tree, final String sql, final SqlSyntaxException refused) {
+        final int[] at = faultOf(refused);
+        final Token written = at == null || sql == null ? null : firstFrom(sql, at);
+        if (written != null && tree != null) {
+            mark(tree, written);
+        }
+    }
+
+    private static boolean mark(final ParseTree node, final Token written) {
+        if (node instanceof TerminalNodeImpl) {
+            final TerminalNodeImpl terminal = (TerminalNodeImpl) node;
+            if (terminal.symbol != null && terminal.symbol.getStartIndex() == written.getStartIndex()
+                    && terminal.symbol.getType() != Token.EOF) {
+                terminal.symbol = new WrittenStringToken(terminal.symbol, written.getText());
+                return true;
+            }
+            return false;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (mark(node.getChild(i), written)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A construct's text with every string in it spelled as it was written: a dollar string read as a quoted one
+     * keeps its dollar signs.
+     *
+     * @param construct the construct
+     * @return its text as written
+     */
+    public static String asWritten(final ParseTree construct) {
+        if (construct instanceof TerminalNode) {
+            final Token symbol = ((TerminalNode) construct).getSymbol();
+            return symbol instanceof WrittenStringToken ? ((WrittenStringToken) symbol).written() : construct.getText();
+        }
+        final StringBuilder text = new StringBuilder();
+        for (int i = 0; i < construct.getChildCount(); i++) {
+            text.append(asWritten(construct.getChild(i)));
+        }
+        return text.toString();
     }
 
     /** The first dollar string of a text that stands at or after a place, or null. */

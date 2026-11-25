@@ -24,8 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A date or a timestamp before the first year, held in a VARIANT, keeps its proleptic year in the
- * VARIANT's text — {@code -1} for the second year BC, {@code 0000} for the year 0 — where the ::VARCHAR
- * of the same value stepped there by whole years prints the year of the era (live-verified).
+ * VARIANT's text — {@code -1} for the second year BC, {@code 0000} for the year 0 — as the ::VARCHAR of
+ * the value itself does (live-verified).
  */
 public class VariantPreYearOneTextTest extends BaseDatabaseTest {
 
@@ -59,8 +59,8 @@ public class VariantPreYearOneTextTest extends BaseDatabaseTest {
     }
 
     @Test
-    public void theTextOfTheValueItselfKeepsTheYearOfTheEra() {
-        assertEquals("0002-01-15 10:00:00.000", text("DATEADD(year, -2025, " + TS + ")::VARCHAR"));
-        assertEquals("0001-01-15", text("DATEADD(year, -2024, '2024-01-15'::DATE)::VARCHAR"));
+    public void theTextOfTheValueItselfReadsTheSameYear() {
+        assertEquals("-1-01-15 10:00:00.000", text("TIMESTAMP_NTZ_FROM_PARTS(-1, 1, 15, 10, 0, 0)::VARCHAR"));
+        assertEquals("0000-01-15", text("DATE_FROM_PARTS(0, 1, 15)::VARCHAR"));
     }
 }

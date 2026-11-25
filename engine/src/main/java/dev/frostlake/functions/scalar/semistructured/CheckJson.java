@@ -26,7 +26,9 @@ import java.util.List;
 /**
  * CHECK_JSON(str) — NULL when PARSE_JSON reads the text, otherwise the fault PARSE_JSON would name. It reads
  * with PARSE_JSON's own leniency: single quotes, a leading zero or plus, a trailing point or comma, an array
- * hole, NaN and Infinity, an invalid escape and an unquoted key are all valid (live-verified).
+ * hole, NaN and Infinity, an invalid escape and an unquoted key are all valid (live-verified). One thing PARSE_JSON
+ * reads is refused: a point with no digit on either side and no exponent, unless a minus sign leads it —
+ * {@code CHECK_JSON('[.]')} is {@code not a number: '.', pos 3}, where {@code '[-.]'} and {@code '[.e1]'} are valid.
  */
 public class CheckJson extends BuiltInFunction {
 
@@ -37,9 +39,14 @@ public class CheckJson extends BuiltInFunction {
         if (args.get(0) == null) return null;
         final String original = args.get(0).toString();
         final String input = original.trim();
-        // The JSON null, an empty document and a lone point read on PARSE_JSON, so they are valid here.
-        if (input.isEmpty() || input.equalsIgnoreCase("null") || input.equals(".")) {
+        // The JSON null and an empty document read on PARSE_JSON, so they are valid here.
+        if (input.isEmpty() || input.equalsIgnoreCase("null")) {
             return null;
+        }
+        // A point no digit stands beside is refused here, where PARSE_JSON reads it as zero (live-verified).
+        final String point = JsonFaultReader.pointFaultOf(original);
+        if (point != null) {
+            return point;
         }
         // The fault is positioned against the ORIGINAL text, leading whitespace included, as PARSE_JSON
         // reports it — trimming for the parse must not move the number. The sentence is PARSE_JSON's without

@@ -62,5 +62,38 @@ public final class DynamicTableProperties {
                     SqlCompilationError.of("invalid property '" + property.getText() + "' for 'DYNAMIC_TABLE'"));
             }
         }
+        for (final FrostlakeParser.DynamicTableSettingContext setting : action.dynamicTableSetting()) {
+            judgeList(setting);
+        }
+    }
+
+    /**
+     * A list a SET gives a name, judged before the table is looked up (live-verified): the comment refuses a list of
+     * constants by its first element that is no text, the target lag any list as an invalid value of the property,
+     * and a parameter of any type but text the list as an invalid value, named by the parser's word for it.
+     */
+    private static void judgeList(final FrostlakeParser.DynamicTableSettingContext setting) {
+        if (setting.parenOptionList() == null && setting.constantList() == null) {
+            return;
+        }
+        final String name = setting.dynamicTableProperty().getText().toUpperCase(Locale.ROOT);
+        final String word = setting.constantList() != null || setting.parenOptionList().parenOption().isEmpty()
+            ? ListValues.CONSTANT_LIST : ListValues.PROPERTY_LIST;
+        if ("COMMENT".equals(name)) {
+            if (setting.constantList() != null) {
+                throw CreatedObjectProperties.listedTextValue(name, setting.constantList().propertyListConstant());
+            }
+            if (setting.parenOptionList().parenOption().isEmpty()) {
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(word, name));
+            }
+            return;
+        }
+        if ("TARGET_LAG".equals(name)) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForProperty(word, name));
+        }
+        final String type = CreatedObjectProperties.accountParameterType(name);
+        if (type != null && !"STRING".equals(type)) {
+            throw new RuntimeException(SqlCompilationError.invalidValueForParameter(word, name));
+        }
     }
 }

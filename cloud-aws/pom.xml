@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>dev.frostlake</groupId>
+        <artifactId>frostlake-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>frostlake-cloud-aws</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Frostlake Cloud AWS</name>
+    <description>Optional AWS integrations, on the AWS SDK. Today the S3 reader for s3:// files, contributed to the
+        engine as an S3ObjectSource ServiceLoader
+        SPI: with stage.s3.fetch=true a routine's IMPORTS jar, a staged file or a COPY source that lives in S3 and is
+        missing below stage.s3.localRoot is downloaded into it before the engine reads it. Credentials come from the
+        SDK's default chain (environment, profile, container or IRSA web identity); stage.s3.region and
+        stage.s3.endpoint name the region and an S3-compatible endpoint. Keeps the AWS SDK out of frostlake-db.</description>
+
+    <!-- Published to Central as its own separate jar; override the parent's deploy skip. -->
+    <properties>
+        <maven.deploy.skip>false</maven.deploy.skip>
+        <awssdk.version>2.59.9</awssdk.version>
+    </properties>
+
+    <dependencies>
+        <!-- The engine: provides the S3ObjectSource SPI this module implements, discovered by ServiceLoader. -->
+        <dependency>
+            <groupId>dev.frostlake</groupId>
+            <artifactId>frostlake-db</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- The S3 client on the SDK's Apache HTTP client; the Netty client is for the async client, not used. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${awssdk.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- STS: the default credentials chain needs it to take a web identity token (IRSA in Kubernetes). -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+            <version>${awssdk.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>6.0.3</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+            <!-- License-header audit (Apache RAT): fails the build at `verify` if any owned .java file is
+                 missing the Apache-2.0 header. -->
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+                <version>${apache-rat-plugin.version}</version>
+                <configuration>
+                    <consoleOutput>true</consoleOutput>
+                    <inputExcludes>
+                        <inputExclude>/pom.xml</inputExclude>
+                        <inputExclude>/.flattened-pom.xml</inputExclude>
+                        <inputExclude>/src/main/resources/**</inputExclude>
+                        <inputExclude>/src/test/resources/**</inputExclude>
+                        <inputExclude>**/*.md</inputExclude>
+                        <inputExclude>**/*.log</inputExclude>
+                    </inputExcludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

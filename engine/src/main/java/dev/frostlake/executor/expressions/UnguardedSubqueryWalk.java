@@ -36,12 +36,64 @@ final class UnguardedSubqueryWalk extends AstPrinterVisitor {
     /** What settles a condition from the statistics, or null where only a constant does. */
     private final ExpressionEvaluatorVisitor statistics;
 
+    /** What settles a condition the statistics leave open, from the query around's own, or null. */
+    private final ExpressionEvaluatorVisitor fallback;
+
+    /** Whether an ANY or SOME comparison's body is passed by. */
+    private final boolean scalarOnly;
+
+    /** Whether the expression filters rows, so that an IN's body is passed by under {@link #scalarOnly}. */
+    private final boolean filter;
+
     /**
      * @param statistics what settles a condition from the table's statistics, or null where the input is open: empty,
      *                   or filtered by a WHERE that keeps no row
      */
     UnguardedSubqueryWalk(final ExpressionEvaluatorVisitor statistics) {
+        this(statistics, null);
+    }
+
+    /**
+     * @param statistics what settles a condition from the table's statistics, or null where the input is open
+     * @param fallback   what settles a condition the first leaves open, from the statistics of the query around, or
+     *                   null
+     */
+    UnguardedSubqueryWalk(final ExpressionEvaluatorVisitor statistics, final ExpressionEvaluatorVisitor fallback) {
+        this(statistics, fallback, false, false);
+    }
+
+    /**
+     * @param statistics what settles a condition from the table's statistics, or null where the input is open
+     * @param fallback   what settles a condition the first leaves open, from the statistics of the query around, or
+     *                   null
+     * @param scalarOnly whether the body of an ANY or SOME comparison is passed by, as no value the select plans
+     * @param filter     whether the expression filters a select's rows, where the body of an IN is a membership
+     *                   passed by too; a NOT IN's is collected wherever it stands
+     */
+    UnguardedSubqueryWalk(final ExpressionEvaluatorVisitor statistics, final ExpressionEvaluatorVisitor fallback,
+                          final boolean scalarOnly, final boolean filter) {
         this.statistics = statistics;
+        this.fallback = fallback;
+        this.scalarOnly = scalarOnly;
+        this.filter = filter;
+    }
+
+    @Override
+    public String visitQuantifiedComparison(final QuantifiedComparisonExpression expr) {
+        if (scalarOnly && expr.getQuantifier() != Quantifier.ALL) {
+            expr.getLeft().accept(this);
+            return "";
+        }
+        return super.visitQuantifiedComparison(expr);
+    }
+
+    @Override
+    public String visitIn(final InExpression expr) {
+        if (scalarOnly && filter && expr.hasSubquery() && !expr.isNot()) {
+            expr.getValue().accept(this);
+            return "";
+        }
+        return super.visitIn(expr);
     }
 
     @Override
@@ -53,6 +105,22 @@ final class UnguardedSubqueryWalk extends AstPrinterVisitor {
     @Override
     public String visitLambda(final LambdaExpression expr) {
         return "";
+    }
+
+    /**
+     * An AND one side of which is settled FALSE, or an OR one side of which is settled TRUE, is settled whatever the
+     * other side holds, and neither side is evaluated: over g holding 7 and 8, {@code g.v > 100 AND g.v = (SELECT
+     * MAX(o.i) FROM g g2)} is answered where {@code g.v > 100 OR …} is refused (live-verified).
+     */
+    @Override
+    public String visitBinaryOperation(final BinaryOperationExpression expr) {
+        if (expr.getOperator() == BinaryOperator.AND || expr.getOperator() == BinaryOperator.OR) {
+            final Boolean decisive = expr.getOperator() == BinaryOperator.AND ? Boolean.FALSE : Boolean.TRUE;
+            if (decisive.equals(settled(expr.getLeft())) || decisive.equals(settled(expr.getRight()))) {
+                return "";
+            }
+        }
+        return super.visitBinaryOperation(expr);
     }
 
     @Override
@@ -154,11 +222,20 @@ final class UnguardedSubqueryWalk extends AstPrinterVisitor {
         if (statistics == null) {
             return null;
         }
+        Boolean settled;
         try {
-            return statistics.settledCondition(condition);
+            settled = statistics.settledCondition(condition);
         } catch (final RuntimeException unsettled) {
-            return null;
+            settled = null;
         }
+        if (settled == null && fallback != null) {
+            try {
+                settled = fallback.settledCondition(condition);
+            } catch (final RuntimeException unsettled) {
+                settled = null;
+            }
+        }
+        return settled;
     }
 
     /** The subqueries found, in the order written. */

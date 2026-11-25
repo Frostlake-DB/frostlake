@@ -276,6 +276,16 @@ public final class JsonKeywords {
         return node;
     }
 
+    /**
+     * Whether a parsed string is the placeholder of a non-finite word: NaN or an infinity.
+     *
+     * @param parsed the string as the parser read it
+     * @return whether it stands for a non-finite double
+     */
+    public static boolean isNonFinite(final String parsed) {
+        return NAN.equals(parsed) || POSITIVE.equals(parsed) || NEGATIVE.equals(parsed);
+    }
+
     /** The double a placeholder stands for, or null where this node is not one. */
     private static Double valueOf(final JsonNode node) {
         if (node == null || !node.isString()) {

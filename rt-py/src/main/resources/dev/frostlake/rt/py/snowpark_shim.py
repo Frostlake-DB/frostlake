@@ -165,17 +165,32 @@ def _frostlake_install_snowpark():
     # ------------------------------------------------------------ exceptions --
 
     class SnowparkClientException(Exception):
-        def __init__(self, message, error_code=None):
+        # Snowpark's exception reads as its code in brackets, then its message: (1304): <message>.
+        def __init__(self, message, error_code=None, debug_context=None):
             super().__init__(message)
             self.message = message
             self.error_code = error_code
+            self.telemetry_message = message
+            self.debug_context = debug_context
+            self._pretty_msg = '(%s): %s' % (error_code, message) if error_code else message
+
+        def __str__(self):
+            return self._pretty_msg
 
     class SnowparkSQLException(SnowparkClientException):
-        # A failed query carries Snowpark's code for it, '1304', the failed statement's query ID and its text.
-        def __init__(self, message, error_code=None, sfqid=None, query=None):
-            super().__init__(message, error_code)
+        # A failed query carries Snowpark's code for it, '1304', the failed statement's query ID and its text, the
+        # refusal's vendor code (an int), the refusal as the connector words it as its message, <code in six
+        # digits> (<SQLSTATE>): <text>, and the refusal's own text; it reads as (1304): <query id>: <message>.
+        def __init__(self, message, error_code=None, conn_error=None, sfqid=None, query=None, sql_error_code=None,
+                     raw_message=None, debug_context=None):
+            super().__init__(message, error_code, debug_context)
+            self.conn_error = conn_error
             self.sfqid = sfqid
             self.query = query
+            self.sql_error_code = sql_error_code
+            self.raw_message = raw_message
+            self._pretty_msg = (('(%s): ' % error_code) if error_code else '') + (('%s: ' % sfqid) if sfqid else '') \
+                + message
 
     # ------------------------------------------------------- value plumbing --
 
@@ -1537,7 +1552,9 @@ def _frostlake_install_snowpark():
                 query_id = outcome.queryId()
                 if query_id is None:
                     raise SnowparkSQLException(str(outcome.refusal()))
-                raise SnowparkSQLException(str(outcome.refusal()), '1304', str(query_id), sql)
+                raise SnowparkSQLException(str(outcome.message()), '1304', sfqid=str(query_id), query=sql,
+                                           sql_error_code=int(outcome.sqlErrorCode()),
+                                           raw_message=str(outcome.rawMessage()))
             return outcome.result()
 
         def _query(self, sql, params=None):

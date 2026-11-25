@@ -17,6 +17,7 @@
 package dev.frostlake.functions.aggregate;
 
 import dev.frostlake.functions.AggregateFunction;
+import dev.frostlake.values.FloatOriginNode;
 
 /** Accumulator for {@link AnyValue}. */
 public class AnyValueAccumulator implements AggregateFunction.Accumulator {
@@ -32,7 +33,8 @@ public class AnyValueAccumulator implements AggregateFunction.Accumulator {
     }
 
     @Override
-    public Object getResult() { return value; }
+    /** The value kept; a folded FLOAT in a VARIANT leaves the aggregate as a computed double (live-verified). */
+    public Object getResult() { return FloatOriginNode.withoutOrigin(value); }
 
     @Override
     public void reset() {

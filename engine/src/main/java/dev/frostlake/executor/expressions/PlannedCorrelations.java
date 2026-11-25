@@ -60,6 +60,20 @@ public final class PlannedCorrelations {
         return "membership " + subquery;
     }
 
+    /**
+     * The key of a subquery read as a value that the plan judged answerable, which a row reaching it then runs
+     * without judging its shape again; it stands in the same record as the refused keys.
+     */
+    public static String answeredKey(final String subquery) {
+        return "answered " + valueKey(subquery);
+    }
+
+    /** Whether the running statement's plan judged the subquery under {@code key} answerable (see answeredKey). */
+    static boolean answered(final String key) {
+        final Set<String> refused = REFUSED.get();
+        return refused != null && refused.contains("answered " + key);
+    }
+
     /** Whether the running statement's plan refused the subquery under {@code key}. */
     static boolean refused(final String key) {
         final Set<String> refused = REFUSED.get();

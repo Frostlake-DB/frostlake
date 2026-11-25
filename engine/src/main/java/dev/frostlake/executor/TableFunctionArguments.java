@@ -70,7 +70,7 @@ public final class TableFunctionArguments {
             "QUERY_HISTORY_BY_WAREHOUSE", TASK_HISTORY, TAG_REFERENCES, "TAG_REFERENCES_ALL_COLUMNS",
             ALERT_HISTORY, COPY_HISTORY, "TASK_DEPENDENTS",
             "CURRENT_TASK_GRAPHS", "COMPLETE_TASK_GRAPHS", "SERVERLESS_TASK_HISTORY",
-            "DYNAMIC_TABLE_REFRESH_HISTORY"));
+            "DYNAMIC_TABLE_REFRESH_HISTORY", "POLICY_REFERENCES", DATA_METRIC_FUNCTION_REFERENCES));
 
     /**
      * How live NAMES a positional parameter, by function. Most report the 1-based position
@@ -183,19 +183,49 @@ public final class TableFunctionArguments {
     /**
      * Refuse a function that only exists under INFORMATION_SCHEMA when the call did not say so. The
      * qualifier is checked rather than discarded: Frostlake resolved these by their last name part, so
-     * a bare {@code QUERY_HISTORY(…)} ran where live answers an invalid identifier.
+     * a bare {@code QUERY_HISTORY(…)} ran where live answers an invalid identifier. A qualified call
+     * is refused with its name as written: {@code Invalid identifier S1.TAG_REFERENCES} (live-verified).
      *
-     * @param schemaQualifier the CANONICAL schema part written immediately before the function's own
-     *                        name (quoted spellings already unwrapped by the parse-tree reader), or
-     *                        empty when the call is unqualified
+     * @param functionName the function's own name, upper-cased
+     * @param written      the name's CANONICAL parts as written (quoted spellings already unwrapped by
+     *                     the parse-tree reader), or null for a keyword-named call
      */
-    public static void validateQualification(final String functionName, final String schemaQualifier) {
+    public static void validateQualification(final String functionName, final String[] written) {
         if (!INFORMATION_SCHEMA_ONLY.contains(functionName)) {
             return;
         }
+        final String schemaQualifier = written == null || written.length < 2 ? "" : written[written.length - 2];
         if (!INFORMATION_SCHEMA.equalsIgnoreCase(schemaQualifier)) {
-            throw new RuntimeException(SqlCompilationError.of("Invalid identifier " + functionName));
+            throw new RuntimeException(SqlCompilationError.of("Invalid identifier " + spelledName(functionName,
+                written)));
         }
+    }
+
+    /**
+     * @param functionName the function's own name, upper-cased
+     * @return whether it is one of the functions that exist only under INFORMATION_SCHEMA
+     */
+    public static boolean livesInInformationSchema(final String functionName) {
+        return INFORMATION_SCHEMA_ONLY.contains(functionName);
+    }
+
+    /**
+     * A table function's name as an {@code Invalid identifier} refusal spells it: each written part as its
+     * reference resolves, a quoted one in its quotes, or the function's own name for an unqualified call.
+     *
+     * @param functionName the function's own name, upper-cased
+     * @param written      the name's canonical parts as written, or null
+     * @return the spelling
+     */
+    public static String spelledName(final String functionName, final String[] written) {
+        if (written == null || written.length < 2) {
+            return functionName;
+        }
+        final StringBuilder spelled = new StringBuilder();
+        for (final String part : written) {
+            spelled.append(spelled.length() > 0 ? "." : "").append(SqlIdentifiers.spellCanonical(part));
+        }
+        return spelled.toString();
     }
 
     private TableFunctionArguments() {

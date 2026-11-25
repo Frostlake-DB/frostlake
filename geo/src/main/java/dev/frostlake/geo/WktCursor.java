@@ -25,10 +25,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A hand-rolled cursor over WKT text for {@link GeoShapes}: words, signed decimal numbers (kept as
- * BigDecimal so plain coordinates render exactly as Snowflake shows them for GEOGRAPHY), coordinate
- * pairs, and the parenthesized list shapes WKT uses. Every method returns null (or false) on
- * malformed input; the caller raises the uniform parse error.
+ * A hand-rolled cursor over WKT text for {@link GeoShapes}: words, signed decimal numbers (kept as BigDecimal so
+ * plain coordinates render exactly as Snowflake shows them for GEOGRAPHY), points of two coordinates or, in a shape
+ * tagged Z, three, and the parenthesized list shapes WKT uses. Every method returns null (or false) on malformed
+ * input; the caller raises the uniform parse error.
  */
 final class WktCursor {
 
@@ -36,6 +36,7 @@ final class WktCursor {
 
     private final String text;
     private int pos;
+    private int dims = 2;
 
     WktCursor(final String text) {
         this.text = text;
@@ -65,6 +66,21 @@ final class WktCursor {
     boolean emptyWord() {
         final int start = pos;
         if ("EMPTY".equalsIgnoreCase(word())) {
+            return true;
+        }
+        pos = start;
+        return false;
+    }
+
+    /** Sets how many numbers each point is written with from here on: 2, or 3 for a shape tagged Z. */
+    void dimensions(final int count) {
+        dims = count;
+    }
+
+    /** Consumes the word Z where it comes next, in any case, and answers whether it did. */
+    boolean zWord() {
+        final int start = pos;
+        if ("Z".equalsIgnoreCase(word())) {
             return true;
         }
         pos = start;
@@ -111,14 +127,14 @@ final class WktCursor {
     }
 
     private ArrayNode point() {
-        final JsonNode x = number();
-        final JsonNode y = number();
-        if (x == null || y == null) {
-            return null;
-        }
         final ArrayNode pt = NODES.arrayNode();
-        pt.add(x);
-        pt.add(y);
+        for (int i = 0; i < dims; i++) {
+            final JsonNode n = number();
+            if (n == null) {
+                return null;
+            }
+            pt.add(n);
+        }
         return pt;
     }
 

@@ -258,11 +258,12 @@ public final class VariantValue implements Comparable<VariantValue>, Serializabl
     }
 
     /**
-     * Whether a UUID or a DECFLOAT sits anywhere in this value, each printing as the string of its text; a value read
-     * back from its text holds neither.
+     * Whether a UUID, a DECFLOAT or a typed scalar (a DATE, TIME, timestamp or BINARY) sits anywhere in this value,
+     * each printing as the string of its text; a value read back from its text holds none of them.
      */
     private boolean holdsUuid() {
-        return node != null && (UuidTextNode.anywhereIn(node) || DecfloatTextNode.anywhereIn(node));
+        return node != null && (UuidTextNode.anywhereIn(node) || DecfloatTextNode.anywhereIn(node)
+            || TypedScalarNode.anywhereIn(node));
     }
 
     @Override
@@ -274,5 +275,16 @@ public final class VariantValue implements Comparable<VariantValue>, Serializabl
     @Override
     public int compareTo(final VariantValue other) {
         return VariantOrder.compare(node(), other.node());
+    }
+
+    /**
+     * The order a sort puts two variants in: {@link #compareTo}, made total where a double meets an exact number
+     * it rounds to — see {@link VariantOrder#sortOrder}.
+     *
+     * @param other the other variant
+     * @return negative, zero or positive
+     */
+    public int sortOrder(final VariantValue other) {
+        return VariantOrder.sortOrder(node(), other.node());
     }
 }

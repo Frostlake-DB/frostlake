@@ -1088,10 +1088,10 @@ public final class SecurityObjectCommandHandler {
      * @param comment  the comment
      * @param ifExists whether IF EXISTS forgives a missing object
      */
-    public void comment(final SecurityObjectKind kind, final FrostlakeParser.QualifiedNameContext name,
-                        final String comment, final boolean ifExists) {
-        final Schema schema = owningSchema(name);
-        final String objectName = lastPart(name);
+    public void comment(final SecurityObjectKind kind, final String[] name, final String comment,
+                        final boolean ifExists) {
+        final Schema schema = catalog.requireOwningSchema(QualifiedName.of(name));
+        final String objectName = name[name.length - 1];
         final SecurityObject target = schema.getSecurityObjects().get(kind, objectName);
         if (target == null) {
             final String otherPolicy = sharesPolicyNames(kind) ? schema.policyKindHolding(objectName) : null;
@@ -1108,6 +1108,7 @@ public final class SecurityObjectCommandHandler {
     }
 
     private Object alter(final FrostlakeParser.SecurityObjectStatementContext ctx, final SecurityObjectKind kind) {
+        RefusalsBeforeNames.refuseSecretUnset(ctx);
         final Schema schema = kind.isSchemaObject() ? owningSchema(ctx.qualifiedName(0)) : null;
         final String name = kind.isSchemaObject() ? lastPart(ctx.qualifiedName(0))
             : SqlIdentifiers.canonical(ctx.identifier(0));
@@ -1485,7 +1486,8 @@ public final class SecurityObjectCommandHandler {
     }
 
     /**
-     * The kind of object a scope names that holds no object of these kinds — a table, a view, a class — or null:
+     * The kind of object a scope names that holds no object of these kinds — a table, a view, a class, a failover or a
+     * replication group — or null:
      * {@code SHOW SECRETS IN TABLE t} is {@code Cannot show objects of type SECRET in TABLE}, with the name or
      * without it (live-verified).
      */
@@ -1495,6 +1497,9 @@ public final class SecurityObjectCommandHandler {
         }
         if (scope.scopeKind != null) {
             return scope.scopeKind.getText().toUpperCase(Locale.ROOT);
+        }
+        if (scope.groupWord != null) {
+            return scope.groupWord.getText().toUpperCase(Locale.ROOT) + " GROUP";
         }
         return scope.scopeClass != null ? "CLASS" : null;
     }

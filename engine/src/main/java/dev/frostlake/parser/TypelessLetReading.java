@@ -129,7 +129,7 @@ public final class TypelessLetReading {
         if (node instanceof FrostlakeParser.UntypedDeclarationItemContext) {
             final FrostlakeParser.UntypedDeclarationItemContext item =
                 (FrostlakeParser.UntypedDeclarationItemContext) node;
-            return item.booleanExpr() == null && item.getStart().getStartIndex() < limit ? item : null;
+            return item.booleanExpr() == null && item.anonymousCallValue() == null && item.getStart().getStartIndex() < limit ? item : null;
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             final FrostlakeParser.UntypedDeclarationItemContext found = firstNameAlone(node.getChild(i), limit);

@@ -19,6 +19,7 @@ package dev.frostlake.executor.commands;
 import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.executor.GrantedObject;
 import dev.frostlake.executor.ParseTreeText;
+import dev.frostlake.executor.PrivilegeHint;
 import dev.frostlake.executor.PrivilegeRefusal;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.RelationShapeOnly;
@@ -30,6 +31,7 @@ import dev.frostlake.executor.SqlAccessControlError;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.UserLookup;
+import dev.frostlake.executor.expressions.UnsupportedFeatureException;
 import dev.frostlake.executor.operators.ResultSetProvider;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.NoCurrentDatabaseRefusal;
@@ -516,7 +518,7 @@ public class ShowCommandHandler implements CommandHandler {
             return new ResultSet(ExternalTableListing.listing().getColumns(), ExternalTableCommandHandler.rows(
                 listingScope(ctx, ShowListing.EXTERNAL_TABLES, forced).schemas(catalog, true)));
         } else if (ctx.INTEGRATIONS() != null) {
-            return new IntegrationCommandHandler(catalog, queryExecutor).show(ctx.integrationKind());
+            return new IntegrationCommandHandler(catalog, queryExecutor).show(ctx.integrationKind(), ctx.integrationListingScope());
         } else if (ctx.VOLUMES() != null) {
             return new ExternalVolumeCommandHandler(catalog).show();
         } else if (ctx.TABLES() != null) {
@@ -846,17 +848,18 @@ public class ShowCommandHandler implements CommandHandler {
                 ? showExecutor.showAccounts(true, new ArrayList<Account>(), 0) : showExecutor.showAccounts();
             return new ResultSet(shape.getColumns(), new ArrayList<Row>());
         } else if (ctx.ACCOUNTS() != null) {
-            if (ctx.TERSE() != null) {
-                // A terse listing of the accounts parses and is refused, as a compilation's fault (live-verified).
-                throw new RuntimeException(SqlCompilationError.of("Operation not available"));
-            }
             if (ctx.showAccountsScope() != null) {
-                // The listing takes no scope: an IN with nothing after it is unfinished, any other is refused whole.
+                // The listing takes no scope: an IN with nothing after it is unfinished, any other is refused whole,
+                // a terse one pointing at the organization's listing (live-verified).
                 if (ctx.showAccountsScope().getChildCount() == 1) {
                     throw SyntaxAfter.unexpected(ctx.showAccountsScope());
                 }
-                throw new RuntimeException(SqlCompilationError.of(
-                    "Unsupported statement type. correct syntax: 'SHOW ACCOUNTS'."));
+                throw new RuntimeException(SqlCompilationError.of("Unsupported statement type. correct syntax: '"
+                    + (ctx.TERSE() != null ? "SHOW ORGANIZATION ACCOUNTS" : "SHOW ACCOUNTS") + "'."));
+            }
+            if (ctx.TERSE() != null) {
+                // A terse listing of the accounts parses and is refused, as a compilation's fault (live-verified).
+                throw new RuntimeException(SqlCompilationError.of("Operation not available"));
             }
             // What the listing answers depends on the session's roles (live-verified): the organization's
             // administrator reads every column, HISTORY included; the account's administrator five of them and no
@@ -985,6 +988,15 @@ public class ShowCommandHandler implements CommandHandler {
                 throw new RuntimeException(SqlCompilationError.of("This session does not have a current task"));
             }
             return showExecutor.showParametersInTask(schemaObject(scope.objectName()), like);
+        }
+        if (scope.SERVICE() != null) {
+            // A service's own parameters are not modelled: one that is not there is refused as a DESCRIBE refuses
+            // it (live-verified), and one that is answers no listing.
+            final SchemaObjectName service = schemaObject(scope.objectName());
+            if (service.schema().getContainerObjects().getService(service.name()) == null) {
+                throw new RuntimeException(SqlCompilationError.doesNotExist("Service", service.fullName()));
+            }
+            throw new UnsupportedFeatureException("SHOW PARAMETERS IN SERVICE");
         }
         if (scope.ALERT() != null) {
             if (scope.objectName() == null) {
@@ -1246,6 +1258,34 @@ public class ShowCommandHandler implements CommandHandler {
             : SqlCompilationError.doesNotExist(kind.noun(), name));
     }
 
+    /**
+     * DESCRIBE ROLE describes no role (live-verified): its properties are judged first, then a name of more than one
+     * part is refused as a USE of nothing is, a role that is not there as any missing role, and one that is there is
+     * an unsupported feature to a session acting as the account's administrator, primary or secondary, and a privilege
+     * refusal asking for MONITOR ROLE on the account to any other — SECURITYADMIN's MANAGE GRANTS included.
+     *
+     * @param ctx the statement
+     * @return the refusal to throw
+     */
+    private RuntimeException describeRole(final FrostlakeParser.DescribeStatementContext ctx) {
+        DescribeProperties.describesStage(ctx, queryExecutor);
+        final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
+        if (parts.length != 1) {
+            return new RuntimeException(SqlCompilationError.objectDoesNotExist());
+        }
+        final String name = parts[0];
+        if (!catalog.roleExistsExact(name)) {
+            return new RuntimeException(SqlCompilationError.doesNotExist("Role", name));
+        }
+        final SecurityManager security = queryExecutor.getSecurityManager();
+        if (security == null || !security.getSessionContext().isSecurityEnabled()
+                || security.actsAsAccountAdministrator()) {
+            return new RuntimeException("Unsupported feature 'ROLE'.");
+        }
+        return new PrivilegeRefusal(SqlAccessControlError.insufficientPrivileges("role", name)
+            + PrivilegeHint.toHoldOnAccount("MONITOR ROLE"));
+    }
+
     public ResultSet handleDescribeStatement(final FrostlakeParser.DescribeStatementContext ctx) {
         if (ctx.INTEGRATION() != null) {
             return new IntegrationCommandHandler(catalog, queryExecutor).describe(ctx.integrationKind(), ctx.identifier());
@@ -1261,6 +1301,9 @@ public class ShowCommandHandler implements CommandHandler {
                 DescribeProperties.describesStage(ctx, queryExecutor);
             }
             final String[] parts = queryExecutor.resolveObjectNameParts(ctx.objectName());
+            if (unmodelled == UnmodelledDropKind.SEMANTIC_VIEW) {
+                return new SemanticViewCommandHandler(catalog, queryExecutor).describe(parts);
+            }
             final SecurityObjectKind modelled = SecurityObjectCommandHandler.modelledKind(unmodelled);
             if (modelled != null) {
                 // The kinds read here that are modelled: a session, an authentication or a packages policy that is
@@ -1286,6 +1329,9 @@ public class ShowCommandHandler implements CommandHandler {
                 }
             }
             throw describeUnmodelled(unmodelled, parts);
+        }
+        if (ctx.ROLE() != null) {
+            throw describeRole(ctx);
         }
         if (ctx.IMAGE() != null && ctx.REPOSITORY() != null) {
             // The account describes no image repository, whatever one is named; a property's name left without

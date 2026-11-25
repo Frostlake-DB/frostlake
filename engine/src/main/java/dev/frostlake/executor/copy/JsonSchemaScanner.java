@@ -16,8 +16,11 @@
 
 package dev.frostlake.executor.copy;
 
+import dev.frostlake.functions.scalar.JsonKeywords;
+import dev.frostlake.functions.scalar.JsonTypeHelper;
 import dev.frostlake.functions.scalar.semistructured.JsonFileRecords;
 import dev.frostlake.functions.scalar.semistructured.JsonRecordFault;
+import dev.frostlake.values.VariantUndefined;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.JsonParser;
 import tools.jackson.core.JsonToken;
@@ -58,15 +61,25 @@ import java.util.TreeMap;
  * <p>Any other malformed record is refused in the words of the account's reader, {@code Error parsing JSON: unknown
  * keyword "tru"}, at the line and character that reader stops at (see {@link JsonRecordFault}); an array that is no
  * record is read to its end first, and nothing may follow a stripped outer array.
+ *
+ * <p>A record is read as PARSE_JSON reads a document (see {@link JsonTypeHelper#parserText(String)}): a keyword in
+ * any case, an invalid escape, an array hole, a hexadecimal number and a sign parted from its number are all read.
+ * NaN and an infinity are REALs; {@code undefined} is a null as a value and no record at all as a record, though it
+ * still counts as a row (live-verified).
  */
 final class JsonSchemaScanner {
 
     /**
-     * Reads what the account's reader reads past strict JSON: a trailing comma, a single-quoted string and an
-     * unquoted name (which names the account refuses never reach it, see {@link JsonFileRecords}).
+     * Reads what the account's reader reads past strict JSON: a trailing comma, a single-quoted string, an
+     * unquoted name (which names the account refuses never reach it, see {@link JsonFileRecords}) and a backslash
+     * before any character, which escapes it.
      */
     private static final ObjectMapper MAPPER = JsonMapper.builder()
         .enable(JsonReadFeature.ALLOW_TRAILING_COMMA)
+        .enable(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER)
+        .enable(JsonReadFeature.ALLOW_LEADING_PLUS_SIGN_FOR_NUMBERS)
+        .enable(JsonReadFeature.ALLOW_LEADING_DECIMAL_POINT_FOR_NUMBERS)
+        .enable(JsonReadFeature.ALLOW_TRAILING_DECIMAL_POINT_FOR_NUMBERS)
         .enable(JsonReadFeature.ALLOW_SINGLE_QUOTES)
         .enable(JsonReadFeature.ALLOW_UNQUOTED_PROPERTY_NAMES)
         .build();
@@ -131,7 +144,7 @@ final class JsonSchemaScanner {
             if (i > 0) {
                 text.append(stripOuterArray ? ",\n" : "\n");
             }
-            text.append(records.get(i) == null ? "null" : records.get(i));
+            text.append(records.get(i) == null ? "null" : JsonTypeHelper.parserText(records.get(i)));
         }
         if (stripOuterArray) {
             text.append(']');
@@ -198,6 +211,11 @@ final class JsonSchemaScanner {
 
     /** One record's keys, taken into the file's columns; the next record starts where this one ends. */
     private void readRecord(final JsonToken token) {
+        if (token == JsonToken.VALUE_STRING && VariantUndefined.isMarkerText(parser.getString())) {
+            // An undefined record gives no keys, though it is a row.
+            records++;
+            return;
+        }
         if (token == JsonToken.START_ARRAY) {
             // An array is read to its end before it is refused as no record: a fault inside it comes first.
             try {
@@ -314,6 +332,12 @@ final class JsonSchemaScanner {
             case VALUE_NUMBER_FLOAT:
                 return StagedValueKinds.ofJsonNumber(parser.getString());
             case VALUE_STRING:
+                if (VariantUndefined.isMarkerText(parser.getString())) {
+                    return null;
+                }
+                if (JsonKeywords.isNonFinite(parser.getString())) {
+                    return InferredType.of(InferredKind.REAL);
+                }
                 return StagedValueKinds.ofJsonString(parser.getString());
             case START_ARRAY:
                 return InferredType.of(InferredKind.ARRAY);
@@ -333,7 +357,8 @@ final class JsonSchemaScanner {
         final String found;
         switch (token) {
             case VALUE_STRING:
-                found = InferredKind.TEXT.internalName();
+                found = JsonKeywords.isNonFinite(parser.getString()) ? InferredKind.REAL.internalName()
+                    : InferredKind.TEXT.internalName();
                 break;
             case VALUE_NUMBER_INT:
             case VALUE_NUMBER_FLOAT:

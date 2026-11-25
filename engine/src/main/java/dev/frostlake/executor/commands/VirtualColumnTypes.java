@@ -52,6 +52,42 @@ final class VirtualColumnTypes {
         return SqlTypeNames.canonical(declared).equals(SqlTypeNames.canonical(found));
     }
 
+    /**
+     * Whether an external table's virtual column takes its expression's type (live-verified): two exact numbers of
+     * any width, two texts of any length, and otherwise one type whatever its parameters - a TIMESTAMP_NTZ(9) takes
+     * a TIMESTAMP_NTZ(3) and a BINARY(10) a BINARY(20), where a TIMESTAMP_LTZ takes no TIMESTAMP_NTZ, a DATE no
+     * timestamp and an OBJECT or an ARRAY no VARIANT.
+     *
+     * @param declared the column's type
+     * @param found    the expression's
+     * @return whether the column takes the expression
+     */
+    static boolean sameKind(final DataType declared, final DataType found) {
+        if (exact(declared) && exact(found)) {
+            return true;
+        }
+        if (declared instanceof StringType && found instanceof StringType) {
+            return true;
+        }
+        return unparameterised(SqlTypeNames.canonical(declared)).equals(
+            unparameterised(SqlTypeNames.canonical(found)));
+    }
+
+    /** A canonical type name without the width list after it: {@code TIMESTAMP_NTZ(3)} is TIMESTAMP_NTZ. */
+    private static String unparameterised(final String canonical) {
+        final int open = canonical.indexOf('(');
+        if (open < 0 || !canonical.endsWith(")")) {
+            return canonical;
+        }
+        for (int i = open + 1; i < canonical.length() - 1; i++) {
+            final char c = canonical.charAt(i);
+            if (!Character.isDigit(c) && c != ',') {
+                return canonical;
+            }
+        }
+        return canonical.substring(0, open);
+    }
+
     private static boolean exact(final DataType type) {
         return type instanceof NumericType && !NumericType.isApproximate(type) && !NumericType.isDecfloat(type);
     }

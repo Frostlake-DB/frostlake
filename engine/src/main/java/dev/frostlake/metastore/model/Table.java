@@ -17,6 +17,7 @@
 package dev.frostlake.metastore.model;
 
 import dev.frostlake.executor.ExpressionColumns;
+import dev.frostlake.executor.MissingColumnObject;
 import dev.frostlake.executor.SqlCompilationError;
 import dev.frostlake.executor.SqlIdentifiers;
 import dev.frostlake.executor.StatementClock;
@@ -1367,6 +1368,19 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
     }
 
     /**
+     * Turns change tracking on as a snapshot saved it: since where it was last turned on, and with whether a statement
+     * had written the table by then.
+     *
+     * @param since            where change tracking was last turned on (see {@link #getChangeTrackingSince()})
+     * @param writtenUntracked whether a statement had written the table by then (see {@link #wasWrittenUntracked()})
+     */
+    public void restoreChangeTracking(final long since, final boolean writtenUntracked) {
+        this.changeTracking = true;
+        this.changeTrackingSince = since;
+        this.writtenUntracked = writtenUntracked;
+    }
+
+    /**
      * Whether a statement had written the table when its change tracking was last turned on: a CREATE TABLE AS, an
      * INSERT, an UPDATE, a DELETE or a MERGE, one that changed no row too. A re-bound view stream reading the table
      * then finds the time before tracking began in every range it reads, and is refused whatever the table takes
@@ -1871,7 +1885,7 @@ public class Table extends SqlObject implements SessionScoped, ContactHolder {
     public String renameColumn(final String oldName, final String newName) {
         final Integer index = exactColumnIndex.get(oldName);
         if (index == null) {
-            throw new RuntimeException(SqlCompilationError.doesNotExistWithoutHint("Object", oldName));
+            throw new MissingColumnObject(SqlCompilationError.doesNotExistWithoutHint("Object", oldName));
         }
         if (exactColumnIndex.containsKey(newName)) {
             // The account treats the rename target as an OBJECT, spelled table.column.

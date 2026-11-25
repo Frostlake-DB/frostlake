@@ -385,9 +385,14 @@ public class BeginEndBlockHandler implements CommandHandler {
         // The DECLARE sections finish compiling next: a DECLARE item repeating a parameter's name is refused after
         // the pass above, and before an unnamed bind (live-verified).
         ScriptingNameValidator.rejectRedeclaration(ctx, parameters, true);
+        // A call, a window or a CREATE TABLE refused for its shape alone is refused while the block compiles, on a
+        // branch that never runs too, so no handler of the block catches it (see BlockCompiledShapes).
+        BlockCompiledShapes.require(ctx, queryExecutor);
         // What a SHOW statement's shape rules out, and a DESCRIBE TAG, are refused while the block compiles too, ahead
         // of an unnamed bind and of the names (see ShowShapeCompiler).
         ShowShapeCompiler.requireShapes(ctx, new ShowCommandHandler(catalog, queryExecutor));
+        // So is a multi-table INSERT whose cases stand in an order it does not take (see MultiTableInsertShape).
+        MultiTableInsertShape.requireThroughout(ctx);
         // An unnamed bind is refused while the block compiles, before any statement of it runs.
         ScriptingNameValidator.rejectUnnamedBinds(ctx);
         ScriptingNameValidator.rejectUnknownLoggingNames(ctx);

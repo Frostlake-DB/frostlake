@@ -18,6 +18,7 @@ package dev.frostlake.features;
 
 import dev.frostlake.query.MeasuredCellsTestSupport;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -27,6 +28,12 @@ import org.junit.jupiter.api.Test;
  * alteration instant in SCHEMATA (all live-verified).
  */
 public class SnowflakeDatabaseRowsTest extends MeasuredCellsTestSupport {
+
+    /** Acts as ACCOUNTADMIN, the role these answers were measured under (see {@link #actAsAccountAdministrator}). */
+    @BeforeEach
+    public void actAsTheMeasuringRole() {
+        actAsAccountAdministrator();
+    }
 
     /** The SHOW DATABASES row's cells but its creation instant, which differs from account to account. */
     @Test

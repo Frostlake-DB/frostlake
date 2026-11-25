@@ -30,7 +30,11 @@ public class StAsWkb extends BuiltInFunction {
     @Override
     public Object evaluate(final List<Object> args) {
         final GeoValue geo = GeoShapes.asGeo(args.get(0));
-        return geo == null ? null : BinaryValue.of(GeoShapes.toWkb(geo.node()));
+        if (geo == null) {
+            return null;
+        }
+        GeoShapes.requireWkbWritable(geo.node());
+        return BinaryValue.of(GeoShapes.toWkb(geo.node()));
     }
 
     @Override

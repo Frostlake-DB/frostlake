@@ -78,7 +78,8 @@ final class TableNameBracketLines {
             }
         }
         final int open = openingBracket(spoken, fault);
-        final int nameStart = open < 0 ? -1 : referenceStart(spoken, open);
+        // An IDENTIFIER() reference's word takes its bracket, and only the bracket itself is refused as a table's.
+        final int nameStart = open < 0 ? -1 : referenceStart(spoken, open, open == fault);
         if (nameStart < 0) {
             return null;
         }
@@ -150,10 +151,22 @@ final class TableNameBracketLines {
     }
 
     /**
-     * The index of the first token of the table name the bracket at {@code open} follows, when that name is a
-     * reference of a FROM list — after its FROM, a JOIN or a comma — or -1.
+     * Whether the bracket at {@code open} follows a FROM list's table name, an IDENTIFIER() reference's word included.
+     *
+     * @param spoken the default-channel tokens
+     * @param open   the index of the bracket
+     * @return whether a table name stands right before it
      */
-    private static int referenceStart(final List<Token> spoken, final int open) {
+    static boolean followsReference(final List<Token> spoken, final int open) {
+        return referenceStart(spoken, open, true) >= 0;
+    }
+
+    /**
+     * The index of the first token of the table name the bracket at {@code open} follows, when that name is a
+     * reference of a FROM list — after its FROM, a JOIN or a comma — or -1; with {@code identifierWord} the name may
+     * be IDENTIFIER's word.
+     */
+    private static int referenceStart(final List<Token> spoken, final int open, final boolean identifierWord) {
         if (open < 2) {
             return -1;
         }
@@ -161,8 +174,9 @@ final class TableNameBracketLines {
         final int last = spoken.get(start).getType();
         final boolean joinedUsing = last == FrostlakeLexer.USING && start > 0
             && spoken.get(start - 1).getType() == FrostlakeLexer.JOIN;
-        if (!joinedUsing && (!isName(last) || last == FrostlakeLexer.TABLE || last == FrostlakeLexer.LATERAL
-                || "IDENTIFIER".equalsIgnoreCase(spoken.get(start).getText()))) {
+        final boolean identifier = "IDENTIFIER".equalsIgnoreCase(spoken.get(start).getText());
+        if (identifier ? !identifierWord
+                : !joinedUsing && (!isName(last) || last == FrostlakeLexer.TABLE || last == FrostlakeLexer.LATERAL)) {
             return -1;
         }
         while (start >= 2 && spoken.get(start - 1).getType() == FrostlakeLexer.DOT

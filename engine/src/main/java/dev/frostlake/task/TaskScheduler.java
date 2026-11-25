@@ -70,6 +70,8 @@ public class TaskScheduler {
     // The task each armed task timer runs, by scheduler key: the very object, so a timer of a task since dropped
     // or replaced under the same name is told apart from the task the catalog holds now.
     private final Map<String, ArmedTask> armedTasks = new ConcurrentHashMap<>();
+    // The alert each armed alert timer evaluates, by scheduler key, likewise the very object.
+    private final Map<String, Alert> armedAlerts = new ConcurrentHashMap<>();
     private final TaskExecutor taskExecutor;
     private volatile boolean running;
 
@@ -300,16 +302,31 @@ public class TaskScheduler {
         return held;
     }
 
+    /** Every alert the catalog holds, by identity, with its scheduler key. */
+    private Map<Alert, String> heldAlerts() {
+        final Map<Alert, String> held = new IdentityHashMap<>();
+        for (final Database database : catalog.getAllDatabases()) {
+            for (final Schema schema : database.getAllSchemas()) {
+                for (final Alert alert : new ArrayList<>(schema.getAlerts())) {
+                    held.put(alert, alertKey(database.getName(), schema.getName(), alert.getName()));
+                }
+            }
+        }
+        return held;
+    }
+
     /**
-     * Brings the task timers in line with the catalog after a statement that may have dropped, replaced, moved or
-     * restored tasks: a timer whose task the catalog no longer holds where it was armed, or that is no longer started
-     * on that schedule, is cancelled, and while the scheduler runs every started task the catalog holds is armed,
-     * one an UNDROP brought back started among them. A task that keeps its place and its schedule keeps its timer.
+     * Brings the task and alert timers in line with the catalog after a statement that may have dropped, replaced,
+     * moved or restored tasks or alerts: a timer whose task or alert the catalog no longer holds where it was armed,
+     * or that is no longer started (a task: on that schedule), is cancelled, and while the scheduler runs every
+     * started task and alert the catalog holds is armed, one an UNDROP brought back started among them. A task or an
+     * alert that keeps its place keeps its timer.
      */
     public void reconcile() {
-        if (!running && armedTasks.isEmpty()) {
+        if (!running && armedTasks.isEmpty() && armedAlerts.isEmpty()) {
             return;
         }
+        reconcileAlerts();
         final Map<Task, String> held = heldTasks();
         synchronized (armLock) {
             for (final Map.Entry<String, ArmedTask> armed : new ArrayList<>(armedTasks.entrySet())) {
@@ -325,6 +342,22 @@ public class TaskScheduler {
                         scheduleTask(task.getValue(), task.getKey());
                     }
                 }
+            }
+        }
+    }
+
+    /** The alert half of {@link #reconcile}. */
+    private void reconcileAlerts() {
+        final Map<Alert, String> held = heldAlerts();
+        synchronized (armLock) {
+            for (final Map.Entry<String, Alert> armed : new ArrayList<>(armedAlerts.entrySet())) {
+                final Alert alert = armed.getValue();
+                if (!armed.getKey().equals(held.get(alert)) || alert.getState() != AlertState.STARTED) {
+                    unscheduleTask(armed.getKey());
+                }
+            }
+            if (running) {
+                armStartedAlerts();
             }
         }
     }
@@ -345,6 +378,7 @@ public class TaskScheduler {
         }
         scheduledTasks.clear();
         armedTasks.clear();
+        armedAlerts.clear();
         cronGenerations.clear();
 
         scheduler.shutdown();
@@ -422,6 +456,17 @@ public class TaskScheduler {
         }
     }
 
+    /** Cancels every timer armed for this very alert, under whichever key it was armed. */
+    private void disarmTimersOf(final Alert alert) {
+        synchronized (armLock) {
+            for (final Map.Entry<String, Alert> armed : new ArrayList<>(armedAlerts.entrySet())) {
+                if (armed.getValue() == alert) {
+                    unscheduleTask(armed.getKey());
+                }
+            }
+        }
+    }
+
     /** Cancels every timer armed for this very task, under whichever key it was armed. */
     private void disarmTimersOf(final Task task) {
         synchronized (armLock) {
@@ -438,6 +483,7 @@ public class TaskScheduler {
         synchronized (armLock) {
             cronGenerations.remove(qualifiedTaskName);
             armedTasks.remove(qualifiedTaskName);
+            armedAlerts.remove(qualifiedTaskName);
             future = scheduledTasks.remove(qualifiedTaskName);
         }
         if (future != null) {
@@ -507,14 +553,13 @@ public class TaskScheduler {
         return "ALERT " + databaseName + "." + schemaName + "." + alertName;
     }
 
-    /** Arm every STARTED alert in the catalog that is not already scheduled. */
+    /** Arm every STARTED alert in the catalog that is not already scheduled where it is. */
     private void armStartedAlerts() {
         for (final Database database : catalog.getAllDatabases()) {
             for (final Schema schema : database.getAllSchemas()) {
-                for (final Alert alert : schema.getAlerts()) {
-                    if (alert.getState() == AlertState.STARTED
-                            && !scheduledTasks.containsKey(alertKey(database.getName(), schema.getName(),
-                                alert.getName()))) {
+                for (final Alert alert : new ArrayList<>(schema.getAlerts())) {
+                    if (alert.getState() == AlertState.STARTED) {
+                        // An armed alert keeps its timer: armAlert stacks no second one.
                         armAlert(database.getName(), schema.getName(), alert);
                     }
                 }
@@ -563,6 +608,16 @@ public class TaskScheduler {
             return;
         }
         final String key = alertKey(databaseName, schemaName, alert.getName());
+        synchronized (armLock) {
+            if (armedAlerts.get(key) == alert && scheduledTasks.containsKey(key)) {
+                // RESUME of an alert already started: its timer runs on as it was, and no second one is armed.
+                return;
+            }
+            // A timer of another alert under this key - one dropped or replaced - or of this alert under the key it
+            // had before it moved, goes before this one is armed.
+            unscheduleTask(key);
+            disarmTimersOf(alert);
+        }
         final Runnable evaluation = new Runnable() {
             @Override
             public void run() {
@@ -573,6 +628,14 @@ public class TaskScheduler {
                     taskExecutor.runScheduled(new Runnable() {
                         @Override
                         public void run() {
+                            // Judged holding the engine: a timer of an alert the catalog no longer holds where it
+                            // was armed - dropped or replaced, itself or its schema or database - evaluates nothing.
+                            if (!key.equals(heldAlerts().get(alert))) {
+                                logger.info("Alert {} is no longer an alert of the catalog — its timer is cancelled",
+                                    key);
+                                disarmTimersOf(alert);
+                                return;
+                            }
                             new AlertRunner(catalog, taskExecutor).run(databaseName, schemaName, alert, "SCHEDULE");
                         }
                     });
@@ -582,17 +645,23 @@ public class TaskScheduler {
                     runningTasks.remove(key);
                 }
                 if (alert.getState() != AlertState.STARTED) {
-                    unscheduleTask(key);
+                    disarmTimersOf(alert);
                 }
             }
         };
         if (alert.getSchedule().toUpperCase(Locale.ROOT).contains("CRON")) {
             armAlertCron(key, alert, evaluation);
+            synchronized (armLock) {
+                if (scheduledTasks.containsKey(key)) {
+                    armedAlerts.put(key, alert);
+                }
+            }
             return;
         }
         final long seconds = AlertRunner.seconds(alert.getSchedule());
         synchronized (armLock) {
             scheduledTasks.put(key, scheduler.scheduleAtFixedRate(evaluation, seconds, seconds, TimeUnit.SECONDS));
+            armedAlerts.put(key, alert);
         }
         alert.setNextScheduledTime(Instant.now().plusSeconds(seconds));
     }

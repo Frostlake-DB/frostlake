@@ -25,13 +25,12 @@ import dev.frostlake.functions.scalar.conversion.TimestampFlavourConversion;
 import dev.frostlake.functions.scalar.conversion.ToUuid;
 import dev.frostlake.types.DecimalText;
 import dev.frostlake.types.NumericType;
+import dev.frostlake.values.ApproximateText;
 import dev.frostlake.values.BinaryValue;
 import dev.frostlake.values.DayTimeInterval;
 import dev.frostlake.values.DecfloatRangeException;
 import dev.frostlake.values.DecfloatTextNode;
 import dev.frostlake.values.Decfloats;
-import dev.frostlake.values.HexDoubleText;
-import dev.frostlake.values.NonFiniteDoubles;
 import dev.frostlake.values.VariantBooleans;
 import dev.frostlake.values.VariantJsonText;
 import dev.frostlake.values.VariantValue;
@@ -130,19 +129,16 @@ public final class ValueCaster {
                 if (variantBooleanNumber(value) != null) {
                     return Double.valueOf(variantBooleanNumber(value).doubleValue());
                 }
-                try {
-                    final Double nonFinite = NonFiniteDoubles.parseForCast(castSourceText(value));
-                    if (nonFinite != null) {
-                        return nonFinite;
+                if (value instanceof VariantValue) {
+                    // A text past the double's range fails the variant's cast while the statement runs (see
+                    // ApproximateText): "Failed to cast variant value "2e308" to REAL".
+                    final Double read = ApproximateText.folded(castSourceText(value));
+                    if (read == null || ApproximateText.overflows(castSourceText(value))) {
+                        throw numericCastFailure(value, "REAL");
                     }
-                    return Double.parseDouble(castSourceText(value));
-                } catch (final NumberFormatException notApproximate) {
-                    final Double hex = HexDoubleText.withoutExponent(castSourceText(value), true);
-                    if (hex != null) {
-                        return hex;
-                    }
-                    throw numericCastFailure(value, "REAL");
+                    return read;
                 }
+                return ApproximateText.read(castSourceText(value));
 
             case DECFLOAT:
                 // A decimal of 38 significant digits, a FLOAT taken at its exact binary value (see Decfloats).

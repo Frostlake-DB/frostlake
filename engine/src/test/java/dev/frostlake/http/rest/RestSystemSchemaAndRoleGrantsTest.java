@@ -18,6 +18,7 @@ package dev.frostlake.http.rest;
 import dev.frostlake.ExecutionResult;
 import dev.frostlake.http.SessionContext;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -37,6 +38,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * could not be measured, and stays as it was.
  */
 public class RestSystemSchemaAndRoleGrantsTest extends BaseRestTest {
+
+    /**
+     * Acts as ACCOUNTADMIN, the role these answers were measured under: a role below it sees only part of the
+     * SNOWFLAKE database.
+     */
+    @BeforeEach
+    public void actAsAccountAdministrator() {
+        server.getEngine().getEngine().setCurrentRole("ACCOUNTADMIN");
+    }
 
     private static final String USAGE = "/api/v2/databases/SNOWFLAKE/schemas/ACCOUNT_USAGE/";
 

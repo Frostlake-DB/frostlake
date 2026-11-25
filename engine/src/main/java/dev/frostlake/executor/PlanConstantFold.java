@@ -59,6 +59,13 @@ final class PlanConstantFold {
     /** The context function the account folds; it reads the statement's clock, which compiling fixes. */
     private static final List<String> FIXED_CONTEXT = Arrays.asList("CURRENT_DATE");
 
+    /**
+     * The built-in functions the account never computes while compiling, whatever their arguments: the random family
+     * and the row-place generators ({@code UNIFORM(1, 10, 5)} and {@code RANDOM(42)} stay as written).
+     */
+    private static final List<String> FRESH = Arrays.asList("RANDOM", "UUID_STRING", "UNIFORM", "NORMAL", "RANDSTR",
+        "ZIPF", "SEQ1", "SEQ2", "SEQ4", "SEQ8");
+
     private PlanConstantFold() {
     }
 
@@ -79,6 +86,29 @@ final class PlanConstantFold {
             return null;
         }
         return textOf(value);
+    }
+
+    /**
+     * Whether an expression computed from constants alone, by the parts the account folds, is NULL: {@code
+     * NULLIF(1, 1)}.
+     *
+     * @param executor   the executor that computes the value
+     * @param expression the expression
+     * @return whether it folds to NULL; false for one reading anything but constants or failing to compute
+     */
+    static boolean foldsToNull(final QueryExecutor executor, final Expression expression) {
+        if (expression instanceof LiteralExpression) {
+            return ((LiteralExpression) expression).getValue() == null;
+        }
+        if (!foldable(executor, expression)) {
+            return false;
+        }
+        try {
+            return new ExpressionEvaluator(null, executor.getFunctionRegistry(), executor.getCatalog(), executor)
+                .evaluate(expression, new Row(new ArrayList<Object>())) == null;
+        } catch (final RuntimeException unfolded) {
+            return false;
+        }
     }
 
     /** The plan's text of a folded value, or null for a value of a type it does not fold. */
@@ -170,6 +200,9 @@ final class PlanConstantFold {
             }
             final List<String> written = call.getNameParts();
             if (functions.hasFunction(name) && (written == null || written.size() == 1)) {
+                if (FRESH.contains(name)) {
+                    return false;
+                }
                 final BuiltInFunction builtIn = functions.getFunction(name);
                 return builtIn != null && builtIn.getClass().getPackage() != null
                     && (!builtIn.getClass().getPackage().getName().endsWith(".context")
@@ -179,6 +212,50 @@ final class PlanConstantFold {
             parts = written;
         }
         return sqlFunctions(executor, parts);
+    }
+
+    /**
+     * Whether a call is one the account computes anew wherever it stands rather than while compiling
+     * (live-verified): a built-in of the random family or a row-place generator, whatever its arguments, or a call
+     * by name of a user-defined function written in another language than SQL or whose SQL body answers anew. A
+     * query with no FROM that writes one reads an empty ValuesClause rather than a Generator of one row.
+     *
+     * @param executor the executor whose catalog holds the functions
+     * @param call     the call
+     * @return true for such a call
+     */
+    static boolean answersAnew(final QueryExecutor executor, final FunctionCallExpression call) {
+        if (call.getNameExpression() != null || call.getFunctionName() == null) {
+            return false;
+        }
+        final List<String> parts = call.getNameParts();
+        final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+        if (parts == null || parts.size() == 1) {
+            if (FRESH.contains(name)) {
+                return true;
+            }
+            if (executor.getFunctionRegistry().hasFunction(name)
+                    || executor.getFunctionRegistry().hasAggregateFunction(name)) {
+                return false;
+            }
+        }
+        try {
+            final List<Function> overloads = overloadsOf(executor, parts == null ? Arrays.asList(name) : parts);
+            if (overloads == null) {
+                return false;
+            }
+            for (final Function function : overloads) {
+                if (function.isTableFunction()) {
+                    continue;
+                }
+                if (!"SQL".equals(function.getLanguage()) || answersAnew(function.getBody())) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (final RuntimeException unresolved) {
+            return false;
+        }
     }
 
     /**

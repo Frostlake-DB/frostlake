@@ -99,6 +99,28 @@ public final class ShowScopeWords {
     }
 
     /**
+     * Whether an IDENTIFIER() reference stands right after a keyword written alone as a SHOW listing's scope, one
+     * that reads no name after it ({@link #takesInstance}): the reference is then refused at its IDENTIFIER word.
+     *
+     * @param stream    the parse's tokens
+     * @param reference the reference's IDENTIFIER token
+     * @return whether the word before it is such a scope
+     */
+    public static boolean refusesReference(final TokenStream stream, final Token reference) {
+        final Token[] before = new Token[6];
+        int index = reference.getTokenIndex();
+        for (int k = 0; k < before.length && index > 0; k++) {
+            index--;
+            while (index > 0 && stream.get(index).getChannel() != Token.DEFAULT_CHANNEL) {
+                index--;
+            }
+            before[k] = stream.get(index).getChannel() == Token.DEFAULT_CHANNEL ? stream.get(index) : null;
+        }
+        return before[1] != null && before[1].getType() == FrostlakeLexer.IN
+            && !takesInstance(before, FrostlakeLexer.IDENTIFIER);
+    }
+
+    /**
      * Whether a refused word stands where a SHOW listing's modifier wants its rest: straight after a WITH or a
      * LIMIT, after WITH PRIVILEGES, or after the IN of a grant listing. Live reads the listing whole and then refuses
      * the word, so in a block it is one line (live-verified): {@code BEGIN SHOW TABLES WITH x; END;},

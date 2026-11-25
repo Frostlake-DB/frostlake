@@ -63,12 +63,13 @@ final class RoutineDescriptionRows {
             rows.add(row("packages", plainList(environment.getPackages())));
             return;
         }
-        // A Python routine's packages come from an artifact repository, and are told with it.
-        rows.add(row("packages", "[]"));
+        // A Python routine's packages come from an artifact repository, and are told with it; the packages
+        // PACKAGES names beside ARTIFACT_REPOSITORY_PACKAGES come from elsewhere, and are told on their own.
+        rows.add(row("packages", RoutineEnvironment.listed(environment.plainPackages())));
         final String repository = environment.describedArtifactRepository();
         if (repository != null) {
             rows.add(row("artifact_repository", repository));
-            rows.add(row("artifact_repository_packages", RoutineEnvironment.listed(environment.getPackages())));
+            rows.add(row("artifact_repository_packages", RoutineEnvironment.listed(environment.repositoryPackages())));
         }
         rows.add(row("installed_packages", "[]"));
         if (aggregate != null) {

@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.functions.scalar.file.StoredStageObject;
 import dev.frostlake.metastore.model.TableColumn;
 import dev.frostlake.types.DataType;
 import dev.frostlake.types.DateTimeType;
@@ -59,14 +60,16 @@ public final class StagedFileMetadata {
      * A staged file's metadata, read once for all of its records. A file that cannot be read answers NULL for its
      * checksum and its time; its records are refused where they are read.
      *
-     * @param file the staged file
-     * @param name its name as METADATA$FILENAME reads it
+     * @param file            the staged file
+     * @param name            its name as METADATA$FILENAME reads it
+     * @param clientEncrypted whether its stage encrypts it on the client, so its checksum is its stored object's
      * @return the file's metadata
      */
-    public static StagedFileMetadata of(final Path file, final String name) {
+    public static StagedFileMetadata of(final Path file, final String name, final boolean clientEncrypted) {
         try {
-            return new StagedFileMetadata(name, StageQueryExecutor.md5Of(file), LocalDateTime.ofInstant(
-                Instant.ofEpochMilli(Files.getLastModifiedTime(file).toMillis()), ZoneOffset.UTC));
+            return new StagedFileMetadata(name, StoredStageObject.digest(file, clientEncrypted),
+                LocalDateTime.ofInstant(Instant.ofEpochMilli(Files.getLastModifiedTime(file).toMillis()),
+                    ZoneOffset.UTC));
         } catch (final IOException unreadable) {
             return new StagedFileMetadata(name, null, null);
         }

@@ -195,6 +195,8 @@ public class ProceduralExecutor {
      * still holds that very answer.
      */
     private final Map<String, Object> callAnswers = new HashMap<>();
+    /** The type each CALL answer of {@link #callAnswers} was handed back with, where the CALL reported one. */
+    private final Map<String, DataType> callAnswerTypes = new HashMap<>();
     /**
      * The FOR-loop counters in flight, by name. A counter binds as NUMBER(9,0) — the type a
      * {@code :i} carries into a statement and a column derived from it declares — but it is no
@@ -717,6 +719,7 @@ public class ProceduralExecutor {
         }
         setVariable(stmt.getVariableName(), value);
         callAnswers.remove(VariableKey.of(stmt.getVariableName()));
+        callAnswerTypes.remove(VariableKey.of(stmt.getVariableName()));
     }
 
     /**
@@ -1179,7 +1182,7 @@ public class ProceduralExecutor {
                 // A bare RETURN of a CALL's answer held unconverted hands it back as the CALL did: DECLARE x DATE …
                 // x := (CALL pv('abc')); RETURN x answers abc (live-verified).
                 returnValue = answer;
-                returnedStaticType = literalValueType(answer);
+                returnedStaticType = heldAnswerType(expression, answer);
                 returnFlag = true;
                 return;
             }
@@ -2366,6 +2369,18 @@ public class ProceduralExecutor {
     }
 
     /**
+     * Runs the CALL a variable's value is written as, {@code (WITH p AS PROCEDURE … CALL p())}, its binds read from
+     * the block as a CALL statement's are.
+     *
+     * @param call the CALL statement's text
+     * @return what the CALL answered
+     */
+    public List<ResultSet> issueCallValue(final String call) {
+        substituteStatementBinds(call);
+        return issue(call);
+    }
+
+    /**
      * Runs a statement, or a query one of its expressions reads, that the running body issues — which a body past
      * the depth bodies run to may not (see {@link CallDepth}).
      */
@@ -3388,17 +3403,28 @@ public class ProceduralExecutor {
      * {@code RETURN TO_VARCHAR(x)} is refused, {@code Date 'abc' is not recognized} (live-verified). A text given to an
      * OBJECT, an ARRAY or a VARIANT is held so too, and read as JSON where an expression reads it (see
      * {@link #readHeld}). A variable of a structured type, one holding a result set or a cursor, and one declared
-     * without a type take the answer as any assignment converts it.
+     * without a type take the answer as any assignment converts it. A VARCHAR variable holds the answer's text as the
+     * assignment writes it, whatever the session's output formats (see {@link BlockReturnText#answerText}): a
+     * TIMESTAMP_NTZ is {@code 2024-01-02 03:04:05.000000000}, a FLOAT {@code 1e+20}, a BOOLEAN {@code true} and a
+     * VARIANT its JSON laid out at the JSON_INDENT in force then (live-verified).
      *
-     * @param name   the variable
-     * @param answer the CALL's answer
+     * @param name       the variable
+     * @param answer     the CALL's answer
+     * @param answerType the type the CALL answered with, or null where it reports none
      */
-    public void assignCallAnswer(final String name, final Object answer) {
+    public void assignCallAnswer(final String name, final Object answer, final DataType answerType) {
         final String key = VariableKey.of(name);
         final DataType declared = variableTypes.get(key);
+        if (declared instanceof StringType && answer != null && !(answer instanceof String)) {
+            assignCallAnswer(name, BlockReturnText.answerText(answer, answerType), null);
+            return;
+        }
         final Object current = getVariable(name);
         final boolean heldText = answer instanceof String && !StructuredTypes.isStructured(declared);
-        if (answer == null || declared == null || VariantJsonText.isSemiStructured(declared) && !heldText
+        // A VARIANT holds any answer as it came too: a RETURN of it answers a DATE's 2024-01-02, not its JSON, and an
+        // ARRAY answer as the ARRAY it is.
+        if (answer == null || declared == null
+                || VariantJsonText.isSemiStructured(declared) && !heldText && !(declared instanceof VariantType)
                 || current instanceof ResultSetVariable || current instanceof ResultSet || current instanceof Cursor) {
             final SetStatement held = new SetStatement(name, new LiteralExpression(answer));
             held.markHeldAnswer();
@@ -3409,6 +3435,11 @@ public class ProceduralExecutor {
         conversionTypes.remove(key);
         setVariable(name, answer);
         callAnswers.put(key, answer);
+        if (answerType == null) {
+            callAnswerTypes.remove(key);
+        } else {
+            callAnswerTypes.put(key, answerType);
+        }
     }
 
     /**
@@ -3481,6 +3512,16 @@ public class ProceduralExecutor {
             throw new RuntimeException(SqlCompilationError.of("Invalid bind value (" + value + ") for type ("
                 + SqlTypeNames.canonical(declared) + ")."), unconverted);
         }
+    }
+
+    /**
+     * The type a bare {@code RETURN x} reports for the CALL's answer x holds unconverted: the type the CALL answered
+     * with, so a TIMESTAMP held by a NUMBER name answers as the TIMESTAMP it is (live-verified); a literal's own type
+     * where the CALL reported none.
+     */
+    private DataType heldAnswerType(final BaseExpression expression, final Object answer) {
+        final DataType answered = callAnswerTypes.get(VariableKey.of(((VariableExpression) expression).getName()));
+        return answered != null ? answered : literalValueType(answer);
     }
 
     /** The CALL's answer a bare {@code RETURN x} hands back unconverted, or null where it reads no such answer. */

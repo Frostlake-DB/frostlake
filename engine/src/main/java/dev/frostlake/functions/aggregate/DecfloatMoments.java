@@ -25,21 +25,20 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The variance and the standard deviation of DECFLOAT values, each a DECFLOAT of 38 significant digits computed
- * exactly and rounded once: STDDEV over 1, 2 and 4 is 1.527525231651946668862682397909336163 and VAR_POP over them
- * 1.5555555555555555555555555555555555556 (live-verified).
- *
- * <p>The skewness and the kurtosis are computed as the account computes them: from the power sums, in DECFLOAT
- * arithmetic held to 38 digits at every step, around the correctly rounded mean, with the small-sample coefficients
- * {@code n / ((n - 1)(n - 2))} and {@code n(n + 1) / ((n - 1)(n - 2)(n - 3))} rounded to twelve fractional digits and
- * the kurtosis's {@code 3(n - 1)² / ((n - 2)(n - 3))} to six: SKEW over 1, 2, 4 and 8 is
- * 1.1376243669582576648487648196737920811 and KURTOSIS 0.757655954629954196597353497164461248, which the
- * exact statistics 1.13762436695768885… and 0.75765595463137996… differ from after the twelfth digit
- * (live-verified). A series that does not vary divides by its zero deviation.
+ * The DECFLOAT variance, standard deviation, skewness and kurtosis, each the formula the account plans over the sums
+ * of {@link DecfloatPowerSums}, every step held to 38 digits. The variance is {@code (n·Σx² - Σx·Σx) / (n(n - 1))}
+ * (over {@code n²} for a population) and the deviation its held root: STDDEV over 1, 2 and 4 is
+ * 1.527525231651946668862682397909336163. The skewness is {@code k · centered cubes / ((s · s) · s)} and the
+ * kurtosis {@code k · centered fourth powers / (v · v) - c}, with the small-sample coefficients
+ * {@code n / ((n - 1)(n - 2))} and {@code n(n + 1) / ((n - 1)(n - 2)(n - 3))} rounded to twelve fractional digits
+ * and {@code c = 3(n - 1)² / ((n - 2)(n - 3))} to six: SKEW over 1, 2, 4 and 8 is
+ * 1.1376243669582576648487648196737920811 and KURTOSIS 0.757655954629954196597353497164461248, and SKEW over 1, 3,
+ * 4, 6, 7, 9 and 10 is -0.091437453209622087109061711274049517062 (live-verified). A series that does not vary
+ * divides by its zero deviation.
  */
 final class DecfloatMoments {
 
-    /** The digits the moments are computed to before the one rounding to 38. */
+    /** The digits a root is computed to before its one rounding to 38. */
     private static final MathContext WORKING = new MathContext(Decfloats.DIGITS + 22, RoundingMode.HALF_EVEN);
 
     private final List<BigDecimal> values = new ArrayList<>();
@@ -59,39 +58,24 @@ final class DecfloatMoments {
         values.clear();
     }
 
-    /**
-     * The variance: the squared deviations from the mean over n - 1 for a sample, over n for a population.
-     *
-     * @param sample whether the sample variance is asked
-     * @return the variance to the working digits, or null for too few values
-     */
-    private BigDecimal variance(final boolean sample) {
-        final int n = values.size();
-        if (n == 0 || sample && n < 2) {
-            return null;
-        }
-        BigDecimal sum = BigDecimal.ZERO;
-        for (final BigDecimal value : values) {
-            sum = sum.add(value, WORKING);
-        }
-        final BigDecimal mean = sum.divide(BigDecimal.valueOf(n), WORKING);
-        BigDecimal squares = BigDecimal.ZERO;
-        for (final BigDecimal value : values) {
-            final BigDecimal deviation = value.subtract(mean, WORKING);
-            squares = squares.add(deviation.multiply(deviation, WORKING), WORKING);
-        }
-        return squares.divide(BigDecimal.valueOf(sample ? n - 1 : n), WORKING);
+    private BigDecimal variance(final DecfloatPowerSums sums, final boolean sample) {
+        final long n = values.size();
+        return Decfloats.divide(sums.spread(), BigDecimal.valueOf(sample ? n * (n - 1) : n * n));
     }
 
     /**
-     * The variance, held as a DECFLOAT.
+     * The variance, held as a DECFLOAT: the spread of the sums over {@code n(n - 1)} for a sample, over {@code n²}
+     * for a population.
      *
      * @param sample whether the sample variance is asked
      * @return the variance, or null for too few values
      */
     BigDecimal heldVariance(final boolean sample) {
-        final BigDecimal variance = variance(sample);
-        return variance == null ? null : Decfloats.held(variance);
+        final long n = values.size();
+        if (n == 0 || sample && n < 2) {
+            return null;
+        }
+        return variance(new DecfloatPowerSums(values), sample);
     }
 
     /**
@@ -105,7 +89,7 @@ final class DecfloatMoments {
             return null;
         }
         final DecfloatPowerSums sums = new DecfloatPowerSums(values);
-        final BigDecimal deviation = Decfloats.held(sampleVariance(sums).sqrt(WORKING));
+        final BigDecimal deviation = root(variance(sums, true));
         final BigDecimal cubed = Decfloats.multiply(Decfloats.multiply(deviation, deviation), deviation);
         return Decfloats.divide(Decfloats.multiply(coefficient(n, (long) (n - 1) * (n - 2), 12),
             sums.centeredCubes()), cubed);
@@ -122,20 +106,11 @@ final class DecfloatMoments {
             return null;
         }
         final DecfloatPowerSums sums = new DecfloatPowerSums(values);
-        final BigDecimal variance = sampleVariance(sums);
+        final BigDecimal variance = variance(sums, true);
         final BigDecimal scaled = Decfloats.divide(Decfloats.multiply(
             coefficient((long) n * (n + 1), (long) (n - 1) * (n - 2) * (n - 3), 12), sums.centeredFourthPowers()),
             Decfloats.multiply(variance, variance));
         return Decfloats.subtract(scaled, coefficient(3L * (n - 1) * (n - 1), (long) (n - 2) * (n - 3), 6));
-    }
-
-    /** {@code (Σx² - n·mean²) / (n - 1)}, each step held to 38 digits. */
-    private BigDecimal sampleVariance(final DecfloatPowerSums sums) {
-        final BigDecimal count = BigDecimal.valueOf(values.size());
-        final BigDecimal squares = Decfloats.subtract(sums.squares(),
-            Decfloats.multiply(count, Decfloats.multiply(sums.mean(), sums.mean())));
-        return Decfloats.divide(squares.signum() < 0 ? BigDecimal.ZERO : squares,
-            BigDecimal.valueOf(values.size() - 1L));
     }
 
     /** A small-sample coefficient, a ratio of whole numbers rounded half up to its fractional digits. */
@@ -150,7 +125,12 @@ final class DecfloatMoments {
      * @return the deviation, or null for too few values
      */
     BigDecimal heldDeviation(final boolean sample) {
-        final BigDecimal variance = variance(sample);
-        return variance == null ? null : Decfloats.held(variance.sqrt(WORKING));
+        final BigDecimal variance = heldVariance(sample);
+        return variance == null ? null : root(variance);
+    }
+
+    /** The square root of a held DECFLOAT, correctly rounded to 38 digits. */
+    private static BigDecimal root(final BigDecimal value) {
+        return Decfloats.held(value.sqrt(WORKING));
     }
 }

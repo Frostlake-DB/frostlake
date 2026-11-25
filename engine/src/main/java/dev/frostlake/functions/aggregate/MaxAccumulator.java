@@ -18,6 +18,7 @@ package dev.frostlake.functions.aggregate;
 
 import dev.frostlake.executor.ValueComparisons;
 import dev.frostlake.functions.AggregateFunction;
+import dev.frostlake.values.FloatOriginNode;
 
 /** Accumulator for {@link Max}. */
 public class MaxAccumulator implements AggregateFunction.Accumulator {
@@ -34,7 +35,8 @@ public class MaxAccumulator implements AggregateFunction.Accumulator {
     }
 
     @Override
-    public Object getResult() { return max; }
+    /** The value kept; a folded FLOAT in a VARIANT leaves the aggregate as a computed double (live-verified). */
+    public Object getResult() { return FloatOriginNode.withoutOrigin(max); }
 
     @Override
     public void reset() { max = null; }

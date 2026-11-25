@@ -21,6 +21,7 @@ import dev.frostlake.executor.AccountParameters;
 import dev.frostlake.executor.ReadOnlyBodies;
 import dev.frostlake.executor.ReadOnlyRequest;
 import dev.frostlake.executor.RelationShapeOnly;
+import dev.frostlake.executor.RequestQueryCancels;
 import dev.frostlake.executor.RequestSessionAborts;
 import dev.frostlake.functions.scalar.file.NamedStage;
 import dev.frostlake.http.ExpiredSessionListener;
@@ -41,6 +42,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -232,46 +234,57 @@ public class ConcurrentDatabaseEngine {
                 // from the parse tree, and from the bodies its names reach before it runs (the unlock below must
                 // mirror the decision).
                 boolean readOnly = isReadOnlyQuery(sql);
-                if (!readOnly) {
+                final boolean carriesOut = !readOnly;
+                Set<String> canceledBefore = null;
+                if (carriesOut) {
                     // An abort of another session is carried out as the request is read, before it waits for the
                     // engine: that session ends what it runs now rather than running on to its end and committing.
                     RequestSessionAborts.carryOut(sql, session.getSettings().getSessionNumber(),
                         engine.getSessionDirectory());
-                }
-                if (sharesMonitor) {
-                    // On an engine shared with in-process connections every request runs alone on its monitor.
-                    synchronized (engine) {
-                        try {
-                            return runLocked(sql, session, false, ending);
-                        } finally {
-                            // A direct statement waiting for a lock this request may have let go looks again at once.
-                            engine.notifyAll();
-                        }
-                    }
-                }
-                if (readOnly) {
-                    engineLock.readLock().lock();
-                    // Judged under the shared lock, which holds the catalog still: a body one of the request's names
-                    // stands for may write, and then the request runs alone, before anything of it has run.
-                    // So does a read of a stream inside an open transaction, which may wait for another session's
-                    // transaction that holds the stream (see TableLockGate#requireStreamFree).
-                    if (ReadOnlyBodies.reachWrite(engine.getCatalog(), sql, session.getSettings())
-                            || session.isInTransaction()
-                                && ReadOnlyBodies.namesStream(engine.getCatalog(), sql, session.getSettings())) {
-                        engineLock.readLock().unlock();
-                        engineLock.writeLock().lock();
-                        readOnly = false;
-                    }
-                } else {
-                    engineLock.writeLock().lock();
+                    // So is a cancel of a running statement, which holds the engine until it ends.
+                    canceledBefore = RequestQueryCancels.carryOut(sql);
                 }
                 try {
-                    return runLocked(sql, session, readOnly, ending);
-                } finally {
+                    if (sharesMonitor) {
+                        // On an engine shared with in-process connections every request runs alone on its monitor.
+                        synchronized (engine) {
+                            try {
+                                return runLocked(sql, session, false, ending);
+                            } finally {
+                                // A direct statement waiting for a lock this request may have let go looks again
+                                // at once.
+                                engine.notifyAll();
+                            }
+                        }
+                    }
                     if (readOnly) {
-                        engineLock.readLock().unlock();
+                        engineLock.readLock().lock();
+                        // Judged under the shared lock, which holds the catalog still: a body one of the request's
+                        // names stands for may write, and then the request runs alone, before anything of it has
+                        // run. So does a read of a stream inside an open transaction, which may wait for another
+                        // session's transaction that holds the stream (see TableLockGate#requireStreamFree).
+                        if (ReadOnlyBodies.reachWrite(engine.getCatalog(), sql, session.getSettings())
+                                || session.isInTransaction()
+                                    && ReadOnlyBodies.namesStream(engine.getCatalog(), sql, session.getSettings())) {
+                            engineLock.readLock().unlock();
+                            engineLock.writeLock().lock();
+                            readOnly = false;
+                        }
                     } else {
-                        engineLock.writeLock().unlock();
+                        engineLock.writeLock().lock();
+                    }
+                    try {
+                        return runLocked(sql, session, readOnly, ending);
+                    } finally {
+                        if (readOnly) {
+                            engineLock.readLock().unlock();
+                        } else {
+                            engineLock.writeLock().unlock();
+                        }
+                    }
+                } finally {
+                    if (carriesOut) {
+                        RequestQueryCancels.end(canceledBefore);
                     }
                 }
             } catch (final Exception e) {
@@ -642,7 +655,7 @@ public class ConcurrentDatabaseEngine {
      */
     private void captureSessionContext(final SessionContext session) {
         try {
-            session.setCurrentDatabase(engine.getCurrentDatabase());
+            session.setCurrentDatabase(engine.getCatalog().heldDatabaseName());
             session.setCurrentSchema(engine.getCatalog().heldSchemaName());
             session.setCurrentWarehouse(engine.getCatalog().getCurrentWarehouse());
             session.setAutoCommit(engine.isAutoCommit());

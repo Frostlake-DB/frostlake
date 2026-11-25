@@ -48,6 +48,9 @@ final class WindowComputationState {
      */
     WhereAliasValues aliasValues;
 
+    /** The outer row a correlated query's windows are computed for, which an item may read beside them; or null. */
+    Map<String, Object> outerRow;
+
     /** The rows the computation was handed, each by its place among them, which a SEQ call reads. */
     Map<Row, Long> windowRowOrdinals = new IdentityHashMap<>();
 

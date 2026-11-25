@@ -112,6 +112,8 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
     private boolean castsAsWritten;
     /** Whether what the plan folds early prints as its value — see {@link #foldingConstants()}. */
     private boolean foldingConstants;
+    /** Whether a literal prints as {@code redacted_argument}: inside a cryptographic call's arity echo. */
+    private boolean redactingLiterals;
     /** Whether a literal's planned conversion prints as the value it folds to — see {@link #foldingConversions()}. */
     private boolean foldingConversions;
     /** Whether DATE_PART and EXTRACT print as EXTRACT(part from …) — see {@link #extractingParts()}. */
@@ -125,6 +127,8 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
     /** A division's scale grows by this much over the dividend's, to a cap of {@link #DIVISION_SCALE_CAP}. */
     private static final int DIVISION_EXTRA_SCALE = 6;
     private static final int DIVISION_SCALE_CAP = 12;
+    /** A product's scale is the sum of its operands' until that passes the wider one's or this, whichever is more. */
+    private static final int MULTIPLICATION_SCALE_FLOOR = 12;
     /** The precision a NUMBER declared without one carries. */
     private static final int WIDEST_NUMBER = 38;
 
@@ -313,6 +317,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      * DATE), 'YYYY-MM-DD', 1)}) while everything inside it is re-printed from the plan.
      */
     String calledAsWritten(final FunctionCallExpression call) {
+        if (isDivCall(call)) {
+            return divOperands(call);
+        }
         if (isVariableRead(call) && call.getArguments().size() != 1) {
             return infixVariableRead(call.getArguments());
         }
@@ -335,6 +342,72 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         // The account knows GROUPING as GROUPING_ID wherever it echoes the call (live-verified).
         return call.getNameExpression() == null && "GROUPING".equalsIgnoreCase(call.getFunctionName())
             && written.regionMatches(true, 0, "GROUPING(", 0, 9) ? "GROUPING_ID(" + written.substring(9) : written;
+    }
+
+    /**
+     * A not-enough-arguments sentence's echo of a cryptographic call, its literals redacted: live echoes
+     * {@code ENCRYPT('a')} as {@code ENCRYPT(redacted_argument)}, {@code ENCRYPT_RAW(TO_BINARY('00', 'HEX'))} as
+     * {@code ENCRYPT_RAW(TO_BINARY(redacted_argument, redacted_argument))} and {@code ENCRYPT('a' || m)} as
+     * {@code ENCRYPT((redacted_argument) || T.M)}, while a NULL and a column print as they are (live-verified).
+     * Any other call is {@link #calledAsWritten}.
+     *
+     * @param call the refused call
+     * @return the echo
+     */
+    String calledRedacted(final FunctionCallExpression call) {
+        if (call.getNameExpression() != null || call.getFunctionName() == null
+                || !REDACTING_FUNCTIONS.contains(call.getFunctionName().toUpperCase(Locale.ROOT))) {
+            return calledAsWritten(call);
+        }
+        final boolean outer = redactingLiterals;
+        redactingLiterals = true;
+        try {
+            return calledAsWritten(call);
+        } finally {
+            redactingLiterals = outer;
+        }
+    }
+
+    /** Whether a call is of DIV, named by one word. */
+    private static boolean isDivCall(final FunctionCallExpression call) {
+        return call.getNameExpression() == null && "DIV".equalsIgnoreCase(call.getFunctionName())
+            && (call.getNameParts() == null || call.getNameParts().size() == 1);
+    }
+
+    /**
+     * DIV is the name of an operator, and a call of it is echoed as the operator over its operands: {@code DIV(1)}
+     * is {@code [1]} and {@code DIV()} is {@code []} (live-verified).
+     */
+    private String divOperands(final FunctionCallExpression call) {
+        final StringBuilder operands = new StringBuilder();
+        for (final Expression argument : call.getArguments()) {
+            operands.append(operands.length() > 0 ? " DIV " : "").append(argument.accept(this));
+        }
+        return operands.toString();
+    }
+
+    /** The calls whose literals an arity sentence redacts (live-verified). */
+    private static final Set<String> REDACTING_FUNCTIONS = Set.of(
+        "ENCRYPT", "ENCRYPT_RAW", "DECRYPT", "DECRYPT_RAW", "TRY_DECRYPT", "TRY_DECRYPT_RAW");
+
+    /** What a redacted literal prints as. */
+    private static final String REDACTED = "redacted_argument";
+
+    /** Whether an operand prints redacted: a literal other than NULL, or a sign or a cast over one. */
+    private boolean redactedConstant(final Expression operand) {
+        if (!redactingLiterals) {
+            return false;
+        }
+        if (operand instanceof LiteralExpression) {
+            return ((LiteralExpression) operand).getType() != LiteralType.NULL;
+        }
+        if (operand instanceof UnaryOperationExpression) {
+            final UnaryOperator sign = ((UnaryOperationExpression) operand).getOperator();
+            return (sign == UnaryOperator.NEGATE || sign == UnaryOperator.PLUS)
+                && redactedConstant(((UnaryOperationExpression) operand).getOperand());
+        }
+        return operand instanceof CastExpression && !((CastExpression) operand).isTryMode()
+            && redactedConstant(((CastExpression) operand).getExpression());
     }
 
     /** The shifts whose unit an arity sentence echoes as a quoted, upper-cased text (live-verified). */
@@ -570,6 +643,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
 
     @Override
     public String visitLiteral(final LiteralExpression expr) {
+        if (redactedConstant(expr)) {
+            return REDACTED;
+        }
         if (expr instanceof FoldedConstantExpression) {
             return ((FoldedConstantExpression) expr).printedValue();
         }
@@ -651,12 +727,23 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
                 operator == BinaryOperator.NOT_LIKE ? BinaryOperator.LIKE : BinaryOperator.ILIKE, right,
                 expr.getEscape()).accept(this) + ")";
         }
+        if (operator != BinaryOperator.CONCAT && (redactedConstant(left) || redactedConstant(right))) {
+            // A redacted literal is an operand in parentheses: ENCRYPT((LENGTH(T.M)) + (redacted_argument)).
+            return (redactedConstant(left) ? "(" + REDACTED + ")" : operand(left)) + " " + symbol(operator) + " "
+                + (redactedConstant(right) ? "(" + REDACTED + ")" : operand(right));
+        }
         final DataType leftType = argumentType(left);
         final DataType rightType = argumentType(right);
         final String typedNulls = planShaped() || conversionShaped()
             ? withTypedNullOperands(operator, left, leftType, right, rightType) : null;
         if (typedNulls != null) {
             return typedNulls;
+        }
+        if (!conversionShaped() && !tellingColumnDefault && (isArithmetic(operator) || isComparison(operator))) {
+            final String decfloat = decfloatOperation(operator, left, leftType, right, rightType);
+            if (decfloat != null) {
+                return decfloat;
+            }
         }
         if (mode != StrictPrintMode.WRITTEN) {
             final String intervalOperation = intervalOperation(operator, left, leftType, right, rightType);
@@ -684,9 +771,10 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             if (foldingConstants && isEmptyText(left)) {
                 return right.accept(this);
             }
-            return asText(left, leftType) + " || " + asText(right, rightType);
+            return (redactedConstant(left) ? "(" + REDACTED + ")" : asText(left, leftType)) + " || "
+                + (redactedConstant(right) ? "(" + REDACTED + ")" : asText(right, rightType));
         }
-        if (planShaped() && (isArithmetic(operator) || isComparison(operator))) {
+        if ((planShaped() || conversionShaped()) && (isArithmetic(operator) || isComparison(operator))) {
             final String met = textOperandMeeting(operator, left, leftType, right, rightType);
             if (met != null) {
                 return met;
@@ -707,19 +795,31 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
                     + (rightApproximate ? operand(right) : asFloat(right));
             }
             if (!leftApproximate) {
+                final String beside = operator == BinaryOperator.DIVIDE
+                    ? tellingColumnDefault ? null : blockDivision(left, l, right, r)
+                    : besideBlockBinding(operator, left, l, right, r);
+                if (beside != null) {
+                    return beside;
+                }
+                final boolean bothWritten = toldConstantValue(left) != null && toldConstantValue(right) != null;
                 if (operator == BinaryOperator.DIVIDE) {
-                    return exactDivision(left.accept(this), l, right.accept(this), operand(right), r);
+                    return tellingColumnDefault
+                        ? toldDivision(toldPlain(left, l), toldPlain(right, r), bothWritten, false)
+                        : exactDivision(left.accept(this), l, right.accept(this), operand(right), r);
                 }
                 if (operator != BinaryOperator.MULTIPLY && l.getScale() != r.getScale()) {
                     final boolean leftLower = l.getScale() < r.getScale();
                     final boolean arithmetic = isArithmetic(operator);
-                    final String beside = arithmetic ? besideBlockBinding(operator, left, l, right, r, leftLower)
-                        : null;
-                    if (beside != null) {
-                        return beside;
+                    if (tellingColumnDefault) {
+                        return toldInfix(operator,
+                            leftLower ? toldRescaled(left, l, r, arithmetic) : toldPlain(left, l),
+                            leftLower ? toldPlain(right, r) : toldRescaled(right, r, l, arithmetic), bothWritten);
                     }
                     return (leftLower ? rescaled(left, l, r, arithmetic) : operand(left)) + " " + symbol(operator)
                         + " " + (leftLower ? operand(right) : rescaled(right, r, l, arithmetic));
+                }
+                if (tellingColumnDefault) {
+                    return toldInfix(operator, toldPlain(left, l), toldPlain(right, r), bothWritten);
                 }
             }
         }
@@ -727,6 +827,41 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             return comparedOperand(left) + " " + symbol(operator) + " " + comparedOperand(right);
         }
         return operand(left) + " " + symbol(operator) + " " + operand(right);
+    }
+
+    /**
+     * Arithmetic or a comparison beside a DECFLOAT as the plan holds it: the other operand, a number of any kind or a
+     * text, is moved to DECFLOAT first, and a division of DECFLOATs is the plain one (live-verified):
+     *
+     * <pre>
+     *   d + 1          FZ.D + (CAST(1 AS DECFLOAT(38)))
+     *   id + d         (CAST(FZ.ID AS DECFLOAT(38))) + FZ.D
+     *   d - f          FZ.D - (CAST(FZ.F AS DECFLOAT(38)))       a FLOAT is moved too
+     *   d / 2          FZ.D / (CAST(2 AS DECFLOAT(38)))
+     *   d / d          FZ.D / FZ.D
+     *   d &gt; 1          FZ.D &gt; (CAST(1 AS DECFLOAT(38)))
+     * </pre>
+     *
+     * <p>Null where neither operand is a DECFLOAT, where both are and the operator is no division, and beside any
+     * other family.
+     */
+    private String decfloatOperation(final BinaryOperator operator, final Expression left, final DataType leftType,
+                                     final Expression right, final DataType rightType) {
+        final boolean leftDecfloat = leftType instanceof NumericType && NumericType.isDecfloat(leftType);
+        final boolean rightDecfloat = rightType instanceof NumericType && NumericType.isDecfloat(rightType);
+        if (leftDecfloat && rightDecfloat) {
+            return operator == BinaryOperator.DIVIDE ? operand(left) + " / " + operand(right) : null;
+        }
+        if (leftDecfloat == rightDecfloat) {
+            return null;
+        }
+        final DataType otherType = leftDecfloat ? rightType : leftType;
+        if (!(otherType instanceof NumericType) && !(otherType instanceof StringType)) {
+            return null;
+        }
+        final String moved = "(CAST(" + (leftDecfloat ? right : left).accept(this) + " AS " + DECFLOAT_TARGET + "))";
+        return (leftDecfloat ? operand(left) : moved) + " " + symbol(operator) + " "
+            + (leftDecfloat ? moved : operand(right));
     }
 
     /**
@@ -887,6 +1022,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
     /** The precision every TIMESTAMP the plan converts to carries. */
     private static final String PLAN_TIMESTAMP_PRECISION = "(9)";
 
+    /** The DECFLOAT target the plan converts a value to, a DECFLOAT operation's other operand among them. */
+    private static final String DECFLOAT_TARGET = "DECFLOAT(38)";
+
     /** The text target the plan converts a value to when a text is what it needs. */
     private static final String TEXT_TARGET = "VARCHAR(" + DataTypeParser.CAST_STRING_DEFAULT + ")";
 
@@ -1011,7 +1149,8 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             if (leftNull && leftFamily == null || rightNull && rightFamily == null) {
                 return null;
             }
-            if (operator == BinaryOperator.DIVIDE && !"REAL".equals(leftFamily) && !"REAL".equals(rightFamily)) {
+            if (operator == BinaryOperator.DIVIDE && !"REAL".equals(leftFamily) && !"REAL".equals(rightFamily)
+                    && !"DECFLOAT".equals(leftFamily) && !"DECFLOAT".equals(rightFamily)) {
                 // An exact division rescales its dividend whatever typed it: (CAST(SYSTEM$NULL_TO_FIXED(null) AS
                 // NUMBER(24,6))) / 2, and past 38 digits SCALED_ROUND_INT_DIVIDE(RT.N, SYSTEM$NULL_TO_FIXED(null));
                 // the invalid-type sentence spells the rescaling FIXED_TO_FIXED (live-verified).
@@ -1047,7 +1186,7 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      */
     private static String operandFamily(final DataType type) {
         if (type instanceof NumericType) {
-            return NumericType.isApproximate(type) ? "REAL" : "FIXED";
+            return NumericType.isApproximate(type) ? "REAL" : NumericType.isDecfloat(type) ? "DECFLOAT" : "FIXED";
         }
         return null;
     }
@@ -1182,33 +1321,165 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
     }
 
     /**
-     * A sum, a difference or a remainder whose higher-scale side a block's exact NUMBER variable gives its scale -
-     * the variable, or arithmetic or a call over it - beside a number written out: the written number is printed as
-     * it is written, unrescaled and without its own cast, so {@code n + 1} over a NUMBER(10,2) holding 2 is
-     * {@code 2 + 1} and {@code n + 1::NUMBER(4,1)} too; the variable itself is printed at its declared type where the
-     * written number has more whole digits than the type takes, {@code CAST(2 AS NUMBER(4,2)) + 1000}
-     * (live-verified). Null for any other operation.
+     * A sum, a difference, a remainder, a product or a comparison over a block's exact NUMBER variable - the variable,
+     * or arithmetic or a call over it - as the plan types its constants (see {@link BlockConstantTyping}; all
+     * live-verified). A number written out beside it of a lower scale is printed as written, unrescaled and without
+     * its own cast ({@code n + 1}, {@code n + 1::NUMBER(4,1)} and {@code n > 1} over a NUMBER(10,2) holding 2 are
+     * {@code 2 + 1}, {@code 2 + 1} and {@code 2 > 1}); any other operand of a lower scale is rescaled as elsewhere.
+     * The operation computes at the larger scale over the larger whole digits - one more for a sum or a difference -
+     * and a product at the sum of both widths; an operand holding the variable or folded to a typed constant keeps
+     * the cast to its own type, inside its rescale, where that type is stored at another width:
+     * {@code (CAST(2 AS NUMBER(10,2))) + (CAST(5 AS NUMBER(38,2)))} for {@code n + i} over an INT {@code i},
+     * {@code (CAST(CAST(5 AS NUMBER(9,2)) AS NUMBER(9,2))) - (CAST(2 AS NUMBER(9,2)))} for {@code i - n} over a
+     * NUMBER(5,0) {@code i} and a NUMBER(9,2) {@code n}, {@code (CAST(ABS(2) AS NUMBER(9,2))) + 1}. An equality
+     * of two constants printed bare is the BOOLEAN it answers, {@code FALSE} for {@code n = 1}. Null where neither
+     * operand holds a variable.
      */
     private String besideBlockBinding(final BinaryOperator operator, final Expression left, final NumericType l,
-                                      final Expression right, final NumericType r, final boolean leftLower) {
-        final Expression higher = leftLower ? right : left;
-        final Expression written = writtenNumber(leftLower ? left : right);
-        if (written == null || !holdsBlockBinding(higher)) {
+                                      final Expression right, final NumericType r) {
+        if (!BlockConstantTyping.holdsBinding(left) && !BlockConstantTyping.holdsBinding(right)
+                || !isArithmetic(operator) && !isComparison(operator)) {
             return null;
         }
-        final NumericType writtenType = leftLower ? l : r;
-        String higherText = operand(higher);
-        if (higher instanceof FoldedConstantExpression
-                && ((FoldedConstantExpression) higher).getDeclaredType() instanceof NumericType) {
-            final NumericType declared = (NumericType) ((FoldedConstantExpression) higher).getDeclaredType();
-            if (writtenType.getPrecision() - writtenType.getScale() > declared.getPrecision() - declared.getScale()) {
-                higherText = "(CAST(" + higher.accept(this) + " AS NUMBER(" + declared.getPrecision() + ","
-                    + declared.getScale() + ")))";
+        final boolean arithmetic = isArithmetic(operator);
+        final boolean rescaling = operator != BinaryOperator.MULTIPLY && l.getScale() != r.getScale();
+        final boolean leftLower = rescaling && l.getScale() < r.getScale();
+        final boolean rightLower = rescaling && !leftLower;
+        final Expression leftWritten = leftLower ? writtenNumber(left) : null;
+        final Expression rightWritten = rightLower ? writtenNumber(right) : null;
+        final boolean leftRescaled = leftLower && leftWritten == null;
+        final boolean rightRescaled = rightLower && rightWritten == null;
+        final NumericType leftType = leftRescaled ? rescaledType(l, spelledWidth(right, r), arithmetic) : l;
+        final NumericType rightType = rightRescaled ? rescaledType(r, spelledWidth(left, l), arithmetic) : r;
+        final int computed = computedPrecision(operator, leftType, rightType);
+        final boolean leftCast = typedConstant(left)
+            && !BlockConstantTyping.sameStorage(leftType.getPrecision(), computed);
+        final boolean rightCast = typedConstant(right)
+            && !BlockConstantTyping.sameStorage(rightType.getPrecision(), computed);
+        if (operator == BinaryOperator.EQUAL && !leftRescaled && !rightRescaled && !leftCast && !rightCast) {
+            final BigDecimal leftValue = constantValue(leftWritten != null ? leftWritten : left);
+            final BigDecimal rightValue = constantValue(rightWritten != null ? rightWritten : right);
+            if (leftValue != null && rightValue != null) {
+                return leftValue.compareTo(rightValue) == 0 ? "TRUE" : "FALSE";
             }
         }
-        final String writtenText = operand(written);
-        return leftLower ? writtenText + " " + symbol(operator) + " " + higherText
-            : higherText + " " + symbol(operator) + " " + writtenText;
+        return typedOperand(left, leftWritten, leftRescaled, leftType, leftCast) + " " + symbol(operator) + " "
+            + typedOperand(right, rightWritten, rightRescaled, rightType, rightCast);
+    }
+
+    /**
+     * The width a term of a smaller scale is raised from beside this one: a text term's own spelled width, where the
+     * text reads wider - {@code n + '1.5'} over a NUMBER(10,0) raises the 2 to NUMBER(11,1), not to the text's
+     * NUMBER(18,1) - and the term's type for anything else.
+     */
+    private static NumericType spelledWidth(final Expression expression, final NumericType type) {
+        if (expression instanceof FoldedConstantExpression
+                && ((FoldedConstantExpression) expression).getSpelledType() instanceof NumericType) {
+            return (NumericType) ((FoldedConstantExpression) expression).getSpelledType();
+        }
+        return type;
+    }
+
+    /**
+     * A quotient over a block's exact NUMBER variable as the plan types its constants (all live-verified): the
+     * dividend rescaled as any exact division's ({@link #dividendScale}), unless it is a number written out, which
+     * stays as written; past 38 digits {@code SCALED_ROUND_INT_DIVIDE} over both operands. The operation computes
+     * in the storage of the wider of the rescaled dividend, the divisor and the quotient, and an operand holding a
+     * variable or a folded constant keeps the cast to its own type where that is stored narrower:
+     * {@code (CAST(CAST(2 AS NUMBER(16,8)) AS NUMBER(16,8))) / 5} for {@code n / i} over a NUMBER(10,2) {@code n}
+     * and an INT {@code i}, {@code (CAST(2 AS NUMBER(16,8))) / (CAST(5 AS NUMBER(5,0)))} over a NUMBER(5,0)
+     * {@code i}, {@code 5 / 2} for {@code 5 / n} and {@code SCALED_ROUND_INT_DIVIDE(5, CAST(2 AS NUMBER(10,2)))}
+     * for {@code i / n}. Null where neither operand holds a variable.
+     */
+    private String blockDivision(final Expression left, final NumericType l, final Expression right,
+                                 final NumericType r) {
+        if (!BlockConstantTyping.holdsBinding(left) && !BlockConstantTyping.holdsBinding(right)) {
+            return null;
+        }
+        final Expression leftWritten = writtenNumber(left);
+        final Expression rightWritten = writtenNumber(right);
+        final int scale = dividendScale(l.getScale(), r.getScale());
+        final int precision = l.getPrecision() - l.getScale() + r.getScale() + scale;
+        final String divisorSpelled = "NUMBER(" + r.getPrecision() + "," + r.getScale() + ")";
+        if (precision > MAX_PRECISION) {
+            return "SCALED_ROUND_INT_DIVIDE(" + divisionArgument(left, leftWritten, l) + ", "
+                + divisionArgument(right, rightWritten, r) + ")";
+        }
+        final int common = Math.max(Math.max(storageOf(precision), storageOf(r.getPrecision())),
+            storageOf(precision - r.getScale()));
+        final String dividend;
+        if (leftWritten != null) {
+            dividend = operand(leftWritten);
+        } else {
+            final String spelled = "NUMBER(" + precision + "," + scale + ")";
+            final String rescaled = fixedToFixed(left.accept(this), spelled);
+            dividend = typedConstant(left) && storageOf(precision) < common
+                ? "(CAST(" + rescaled + " AS " + spelled + "))" : "(" + rescaled + ")";
+        }
+        final String divisor = rightWritten != null ? operand(rightWritten)
+            : typedConstant(right) && storageOf(r.getPrecision()) < common
+                ? "(CAST(" + right.accept(this) + " AS " + divisorSpelled + "))" : operand(right);
+        return dividend + " / " + divisor;
+    }
+
+    /** An operand of {@link #blockDivision}'s SCALED_ROUND_INT_DIVIDE, cast to its own type where stored narrower. */
+    private String divisionArgument(final Expression expression, final Expression written, final NumericType type) {
+        if (written != null) {
+            return written.accept(this);
+        }
+        return typedConstant(expression) && storageOf(type.getPrecision()) < ToldOperand.WIDEST_STORAGE
+            ? "CAST(" + expression.accept(this) + " AS NUMBER(" + type.getPrecision() + "," + type.getScale() + "))"
+            : expression.accept(this);
+    }
+
+    private static int storageOf(final int precision) {
+        return ToldOperand.storageBytes(Math.min(MAX_PRECISION, precision));
+    }
+
+    /** One operand of {@link #besideBlockBinding}: as written, rescaled, or cast to its own type within either. */
+    private String typedOperand(final Expression expression, final Expression written, final boolean rescaled,
+                                final NumericType type, final boolean cast) {
+        if (written != null) {
+            return operand(written);
+        }
+        final String spelled = "NUMBER(" + type.getPrecision() + "," + type.getScale() + ")";
+        if (rescaled) {
+            final String value = fixedToFixed(expression.accept(this), spelled);
+            return cast ? "(CAST(" + value + " AS " + spelled + "))" : "(" + value + ")";
+        }
+        return cast ? "(CAST(" + expression.accept(this) + " AS " + spelled + "))" : operand(expression);
+    }
+
+    /** Whether an operand is typed as a constant the plan carries: one holding a variable or a folded constant. */
+    private static boolean typedConstant(final Expression expression) {
+        return BlockConstantTyping.holdsTypedConstant(expression);
+    }
+
+    /** The value of a folded exact constant or of a number written out, or null for anything else. */
+    private static BigDecimal constantValue(final Expression expression) {
+        if (expression instanceof FoldedConstantExpression) {
+            return ((FoldedConstantExpression) expression).exactValue();
+        }
+        if (expression instanceof LiteralExpression && ((LiteralExpression) expression).getValue() != null
+                && writtenNumber(expression) != null) {
+            return new BigDecimal(String.valueOf(((LiteralExpression) expression).getValue()));
+        }
+        return null;
+    }
+
+    /**
+     * The precision an operation over two exact numbers computes at: the larger scale over the larger whole digits,
+     * one more of them for a sum or a difference, and for a product the sum of both precisions.
+     */
+    private static int computedPrecision(final BinaryOperator operator, final NumericType left,
+                                         final NumericType right) {
+        if (operator == BinaryOperator.MULTIPLY) {
+            return Math.min(MAX_PRECISION, left.getPrecision() + right.getPrecision());
+        }
+        final int scale = Math.max(left.getScale(), right.getScale());
+        final int whole = Math.max(left.getPrecision() - left.getScale(), right.getPrecision() - right.getScale())
+            + (operator == BinaryOperator.ADD || operator == BinaryOperator.SUBTRACT ? 1 : 0);
+        return Math.min(MAX_PRECISION, whole + scale);
     }
 
     /** A number written out - a literal, or one cast to another NUMBER - as the literal, or null for anything else. */
@@ -1216,47 +1487,188 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         final Expression literal = expression instanceof CastExpression
             && !((CastExpression) expression).isBlockBinding() ? ((CastExpression) expression).getExpression()
             : expression;
-        if (!(literal instanceof LiteralExpression) || literal instanceof FoldedConstantExpression) {
+        if (literal instanceof FoldedConstantExpression) {
+            return ((FoldedConstantExpression) literal).isWritten() ? literal : null;
+        }
+        if (!(literal instanceof LiteralExpression)) {
             return null;
         }
         final LiteralType type = ((LiteralExpression) literal).getType();
         return type == LiteralType.INTEGER || type == LiteralType.DECIMAL ? literal : null;
     }
 
-    /** Whether an expression holds a block's folded exact NUMBER variable, under operators, casts and calls. */
-    private static boolean holdsBlockBinding(final Expression expression) {
-        if (expression instanceof FoldedConstantExpression) {
-            return ((FoldedConstantExpression) expression).isBlockBinding();
-        }
-        if (expression instanceof BinaryOperationExpression) {
-            return holdsBlockBinding(((BinaryOperationExpression) expression).getLeft())
-                || holdsBlockBinding(((BinaryOperationExpression) expression).getRight());
-        }
-        if (expression instanceof UnaryOperationExpression) {
-            return holdsBlockBinding(((UnaryOperationExpression) expression).getOperand());
-        }
-        if (expression instanceof CastExpression) {
-            return holdsBlockBinding(((CastExpression) expression).getExpression());
-        }
-        if (expression instanceof FunctionCallExpression) {
-            for (final Expression argument : ((FunctionCallExpression) expression).getArguments()) {
-                if (holdsBlockBinding(argument)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     /** {@link #rescaled} unbracketed, as an argument is printed. */
     private String rescaledValue(final Expression lower, final NumericType lowType, final NumericType highType,
                                  final boolean arithmetic) {
+        final NumericType rescaled = rescaledType(lowType, highType, arithmetic);
+        return fixedToFixed(lower.accept(this),
+            "NUMBER(" + rescaled.getPrecision() + "," + rescaled.getScale() + ")");
+    }
+
+    /** The type {@link #rescaledValue} raises the lower-scale operand to. */
+    private static NumericType rescaledType(final NumericType lowType, final NumericType highType,
+                                            final boolean arithmetic) {
         final int growth = highType.getScale() - lowType.getScale();
         final int widened = Math.max(lowType.getPrecision() + growth, highType.getPrecision());
         final int precision = arithmetic
             ? Math.max(widened, ARITHMETIC_INTEGER_DIGITS + highType.getScale()) : widened;
-        return fixedToFixed(lower.accept(this),
-            "NUMBER(" + Math.min(MAX_PRECISION, precision) + "," + highType.getScale() + ")");
+        return new NumericType("NUMBER", Math.min(MAX_PRECISION, precision), highType.getScale());
+    }
+
+    /** An exact operand of a told column default as it is printed unconverted ({@link ToldOperand}). */
+    private ToldOperand toldPlain(final Expression expression, final NumericType type) {
+        return new ToldOperand(expression.accept(this), operand(expression), type.getPrecision(), type.getScale(),
+            toldConstantValue(expression), writtenValue(expression) != null, false);
+    }
+
+    /** The lower-scale operand of a told column default rescaled as {@link #rescaled} prints it. */
+    private ToldOperand toldRescaled(final Expression lower, final NumericType lowType, final NumericType highType,
+                                     final boolean arithmetic) {
+        return toldPlain(lower, lowType).rescaledTo(rescaledValue(lower, lowType, highType, arithmetic),
+            rescaledType(lowType, highType, arithmetic).getPrecision(), highType.getScale());
+    }
+
+    /**
+     * An infix operation of a told column default, each operand widened to the common storage
+     * ({@link ToldOperand}): that of the widest operand and, for {@code +}, {@code -} and {@code *}, of the
+     * result. An operation over two numbers written out is widened nowhere: {@code (CAST(1 AS NUMBER(3,1))) + 2.5}
+     * (all live-verified).
+     */
+    private String toldInfix(final BinaryOperator operator, final ToldOperand left, final ToldOperand right,
+                             final boolean bothWritten) {
+        int common = bothWritten ? 0 : Math.max(left.storage(), right.storage());
+        if (!bothWritten && (operator == BinaryOperator.ADD || operator == BinaryOperator.SUBTRACT
+                || operator == BinaryOperator.MULTIPLY)) {
+            common = Math.max(common, ToldOperand.storageBytes(toldResultPrecision(operator, left, right)));
+        }
+        return left.asOperand(common) + " " + symbol(operator) + " " + right.asOperand(common);
+    }
+
+    /**
+     * The precision of a sum, a difference or a product of two exact operands: a sum keeps the more integer
+     * digits plus one, a product adds them, its scale as {@link BinaryOperationTypes} types it; 38 at most.
+     */
+    private static int toldResultPrecision(final BinaryOperator operator, final ToldOperand left,
+                                           final ToldOperand right) {
+        final int leftDigits = left.precision() - left.scale();
+        final int rightDigits = right.precision() - right.scale();
+        if (operator == BinaryOperator.MULTIPLY) {
+            final int scale = Math.min(left.scale() + right.scale(),
+                Math.max(Math.max(left.scale(), right.scale()), MULTIPLICATION_SCALE_FLOOR));
+            return Math.min(MAX_PRECISION, leftDigits + rightDigits + scale);
+        }
+        return Math.min(MAX_PRECISION, Math.max(leftDigits, rightDigits) + Math.max(left.scale(), right.scale()) + 1);
+    }
+
+    /**
+     * An exact division of a told column default ({@link #exactDivision}, or DIV0 as {@link #div0AsPlanned} spells
+     * it), the rescaled dividend and the divisor widened to the storage of the wider and of the quotient, which
+     * is the rescaled dividend's width less the divisor's scale: over a NUMBER(2,1) {@code z}, {@code 100 / z} is
+     * {@code (CAST(CAST(100 AS NUMBER(11,7)) AS NUMBER(11,7))) / (CAST(T.Z AS NUMBER(2,1)))} where {@code 10 / z}
+     * is {@code (CAST(10 AS NUMBER(10,7))) / (CAST(T.Z AS NUMBER(2,1)))}; past 38 digits both are
+     * widened to the widest storage inside {@code SCALED_ROUND_INT_DIVIDE}: {@code (CAST(CAST(T.B AS
+     * NUMBER(16,8)) AS NUMBER(16,8))) / T.A}, {@code SCALED_ROUND_INT_DIVIDE(T.A, CAST(T.B AS NUMBER(10,2)))}
+     * (live-verified).
+     */
+    private String toldDivision(final ToldOperand dividend, final ToldOperand divisor, final boolean bothWritten,
+                                final boolean div0) {
+        final int scale = dividendScale(dividend.scale(), divisor.scale());
+        final int precision = dividend.precision() - dividend.scale() + divisor.scale() + scale;
+        if (precision > MAX_PRECISION) {
+            final int common = bothWritten ? 0 : ToldOperand.WIDEST_STORAGE;
+            return (div0 ? "SCALED_ROUND_INT_DIV0(" : "SCALED_ROUND_INT_DIVIDE(") + dividend.asArgument(common)
+                + ", " + divisor.asArgument(common) + ")";
+        }
+        final ToldOperand rescaled = dividend.rescaledTo(
+            fixedToFixed(dividend.inner(), "NUMBER(" + precision + "," + scale + ")"), precision, scale);
+        final int common = bothWritten ? 0 : Math.max(Math.max(rescaled.storage(), divisor.storage()),
+            ToldOperand.storageBytes(precision - divisor.scale()));
+        return div0 ? "DIV0(" + rescaled.asArgument(common) + ", " + divisor.asArgument(common) + ")"
+            : rescaled.asOperand(common) + " / " + divisor.asOperand(common);
+    }
+
+    /**
+     * The scale an exact division rescales its dividend to: the quotient's — the dividend's scale grown by six,
+     * to a cap of twelve and never narrowing — plus the divisor's: NUMBER(10,2) / NUMBER(12,4) rescales the
+     * dividend to scale 12, NUMBER(12,4) / NUMBER(12,4) to 14, NUMBER(20,15) / NUMBER(5,2) to 17 (live-verified).
+     */
+    private static int dividendScale(final int dividendScale, final int divisorScale) {
+        return Math.max(dividendScale, Math.min(dividendScale + DIVISION_EXTRA_SCALE, DIVISION_SCALE_CAP))
+            + divisorScale;
+    }
+
+    /**
+     * The value of a constant exact operand — a number written out, or operators, casts and calls over constants
+     * only, valued as the plan folds it; null for anything else, or a constant that cannot be valued.
+     */
+    private BigDecimal toldConstantValue(final Expression expression) {
+        final BigDecimal written = writtenValue(expression);
+        if (written != null || !isConstant(expression)) {
+            return written;
+        }
+        final Object value;
+        try {
+            value = expression.accept(context);
+        } catch (final RuntimeException unvalued) {
+            return null;
+        }
+        if (!(value instanceof Number)) {
+            return null;
+        }
+        try {
+            return new BigDecimal(value.toString());
+        } catch (final NumberFormatException notDecimal) {
+            return null;
+        }
+    }
+
+    /** Whether an expression reads nothing but numbers written out, through operators, casts and calls. */
+    private static boolean isConstant(final Expression expression) {
+        if (expression instanceof LiteralExpression) {
+            return isNumericLiteral(expression);
+        }
+        if (expression instanceof UnaryOperationExpression) {
+            final UnaryOperator operator = ((UnaryOperationExpression) expression).getOperator();
+            return (operator == UnaryOperator.NEGATE || operator == UnaryOperator.PLUS)
+                && isConstant(((UnaryOperationExpression) expression).getOperand());
+        }
+        if (expression instanceof BinaryOperationExpression) {
+            return isArithmetic(((BinaryOperationExpression) expression).getOperator())
+                && isConstant(((BinaryOperationExpression) expression).getLeft())
+                && isConstant(((BinaryOperationExpression) expression).getRight());
+        }
+        if (expression instanceof CastExpression) {
+            return !((CastExpression) expression).isBlockBinding()
+                && isConstant(((CastExpression) expression).getExpression());
+        }
+        if (expression instanceof FunctionCallExpression) {
+            final FunctionCallExpression call = (FunctionCallExpression) expression;
+            if (call.getNameExpression() != null || call.isStar() || call.getArguments().isEmpty()) {
+                return false;
+            }
+            for (final Expression argument : call.getArguments()) {
+                if (!isConstant(argument)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** The value of a number written out, a minus before it included; null for any other operand. */
+    private static BigDecimal writtenValue(final Expression expression) {
+        final boolean negated = isNegatedNumber(expression);
+        final Expression literal = negated ? ((UnaryOperationExpression) expression).getOperand() : expression;
+        if (!isNumericLiteral(literal)) {
+            return null;
+        }
+        try {
+            final BigDecimal value = new BigDecimal(String.valueOf(((LiteralExpression) literal).getValue()).trim());
+            return negated ? value.negate() : value;
+        } catch (final NumberFormatException notDecimal) {
+            return null;
+        }
     }
 
     /**
@@ -1275,12 +1687,23 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         final DataType rightType = argumentType(right);
         if (!(leftType instanceof NumericType) || !(rightType instanceof NumericType)
                 || NumericType.isApproximate(leftType) || NumericType.isApproximate(rightType)
-                || ((NumericType) leftType).getScale() == ((NumericType) rightType).getScale()) {
+                || !tellingColumnDefault
+                    && ((NumericType) leftType).getScale() == ((NumericType) rightType).getScale()) {
             return null;
         }
         final NumericType l = (NumericType) leftType;
         final NumericType r = (NumericType) rightType;
         final boolean leftLower = l.getScale() < r.getScale();
+        if (tellingColumnDefault) {
+            // The arguments widened as the remainder operator's operands are: MOD(CAST(T.H2 AS NUMBER(2,0)), T.H9)
+            // (live-verified).
+            final boolean rescales = l.getScale() != r.getScale();
+            final ToldOperand first = rescales && leftLower ? toldRescaled(left, l, r, true) : toldPlain(left, l);
+            final ToldOperand second = rescales && !leftLower ? toldRescaled(right, r, l, true) : toldPlain(right, r);
+            final int common = toldConstantValue(left) != null && toldConstantValue(right) != null ? 0
+                : Math.max(first.storage(), second.storage());
+            return "MOD(" + first.asArgument(common) + ", " + second.asArgument(common) + ")";
+        }
         return "MOD(" + (leftLower ? rescaledValue(left, l, r, true) : left.accept(this)) + ", "
             + (leftLower ? right.accept(this) : rescaledValue(right, r, l, true)) + ")";
     }
@@ -1386,6 +1809,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      * number reads as a text value does, {@code RT.N * (TO_NUMBER(' 1 ', 18, 5))}.
      * A product converts the text alone to the number it reads as, {@code (TO_NUMBER(RT.G, 18, 5)) * RT.N}, and
      * a quotient is the exact division of that number, {@code (CAST(TO_NUMBER(RT.G, 18, 5) AS NUMBER(24,11))) / 2}.
+     * An invalid-type sentence quotes the same conversions in its own spellings: {@code (s / c)::DATE} is
+     * {@code CAST((FIXED_TO_FIXED(TO_NUMBER(U.S, 18, 5) AS NUMBER(24,11)[UNKNOWN])) / U.C AS DATE)} and a text
+     * beside a FLOAT {@code (TO_DOUBLE(U.S)) / U.F}.
      * Null for any other shape, a comparison of two texts among them.
      */
     private String textOperandMeeting(final BinaryOperator operator, final Expression left, final DataType leftType,
@@ -1413,6 +1839,15 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         final String textValue = text.accept(this);
         if (operator == BinaryOperator.MULTIPLY || operator == BinaryOperator.DIVIDE) {
             final String asNumber = textToNumber(textValue, textType.getPrecision(), textType.getScale());
+            if (tellingColumnDefault) {
+                final ToldOperand textOperand = new ToldOperand(asNumber, "(" + asNumber + ")",
+                    textType.getPrecision(), textType.getScale(), null, false, false);
+                final ToldOperand numberOperand = toldPlain(other, number);
+                final ToldOperand leftOperand = leftText ? textOperand : numberOperand;
+                final ToldOperand rightOperand = leftText ? numberOperand : textOperand;
+                return operator == BinaryOperator.MULTIPLY ? toldInfix(operator, leftOperand, rightOperand, false)
+                    : toldDivision(leftOperand, rightOperand, false, false);
+            }
             if (operator == BinaryOperator.MULTIPLY) {
                 return leftText ? "(" + asNumber + ") * " + operand(right) : operand(left) + " * (" + asNumber + ")";
             }
@@ -1424,6 +1859,16 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             ? Math.min(MAX_PRECISION, Math.max(number.getPrecision(), textType.getPrecision()))
             : Math.min(MAX_PRECISION, Math.max(number.getPrecision() - number.getScale(),
                 textType.getPrecision() - textType.getScale()) + scale);
+        if (tellingColumnDefault) {
+            final String converted = textToNumber(textValue, precision, scale);
+            final ToldOperand textOperand = new ToldOperand(converted, "(" + converted + ")", precision, scale, null,
+                false, false);
+            final ToldOperand numberOperand = number.getScale() == scale ? toldPlain(other, number)
+                : toldPlain(other, number).rescaledTo(
+                    fixedToFixed(other.accept(this), "NUMBER(" + precision + "," + scale + ")"), precision, scale);
+            return toldInfix(operator, leftText ? textOperand : numberOperand, leftText ? numberOperand : textOperand,
+                false);
+        }
         final String textSide = "(" + textToNumber(textValue, precision, scale) + ")";
         final String numberSide = number.getScale() == scale ? operand(other)
             : "(" + fixedToFixed(other.accept(this), "NUMBER(" + precision + "," + scale + ")") + ")";
@@ -1433,15 +1878,14 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
 
     /**
      * An exact division as the plan holds it: the dividend rescaled to the quotient's width — the
-     * scale grows by six, to a cap of twelve and never narrowing, and the precision keeps the
-     * dividend's integer digits plus the divisor's scale plus that — or, once that width passes 38
+     * scale is the quotient's plus the divisor's ({@link #dividendScale}), and the precision keeps the
+     * dividend's integer digits plus that — or, once that width passes 38
      * digits, live's internal {@code SCALED_ROUND_INT_DIVIDE(x, y)} with both operands bare. The
      * plain AVG is this very division of SUM by COUNT, which is why one rule serves both.
      */
     private String exactDivision(final String dividend, final NumericType l, final String divisor,
                                  final String divisorOperand, final NumericType r) {
-        final int scale = Math.max(l.getScale(),
-            Math.min(l.getScale() + r.getScale() + DIVISION_EXTRA_SCALE, DIVISION_SCALE_CAP));
+        final int scale = dividendScale(l.getScale(), r.getScale());
         final int precision = l.getPrecision() - l.getScale() + r.getScale() + scale;
         if (precision > MAX_PRECISION) {
             return "SCALED_ROUND_INT_DIVIDE(" + dividend + ", " + divisor + ")";
@@ -1462,6 +1906,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      */
     @Override
     public String visitUnaryOperation(final UnaryOperationExpression expr) {
+        if (redactedConstant(expr)) {
+            return REDACTED;
+        }
         switch (expr.getOperator()) {
             case NEGATE:
             case PLUS: {
@@ -2109,6 +2556,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      */
     @Override
     public String visitCast(final CastExpression expr) {
+        if (redactedConstant(expr)) {
+            return REDACTED;
+        }
         if (mode == StrictPrintMode.WRITTEN) {
             return super.visitCast(expr);
         }
@@ -2173,6 +2623,10 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
                 // A cast to DECFLOAT is the conversion it names: TO_DATE(TO_DECFLOAT(1.5)) (live-verified).
                 return "TO_DECFLOAT(" + source.accept(this) + ")";
             }
+            if (NumericType.isDecfloat(sourceType) && isExactNumber(targetType)) {
+                // A DECFLOAT moved to a fixed number is TO_NUMBER: TO_DATE(TO_NUMBER(FZ.X)) (live-verified).
+                return "TO_NUMBER(" + source.accept(this) + ")";
+            }
             if (isExactNumber(sourceType) && isExactNumber(targetType)) {
                 return fixedToFixed(source.accept(this), targetText);
             }
@@ -2213,6 +2667,14 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         if (booleanNumber && !expr.isTryMode()) {
             final String declared = typeText(expr);
             return booleanNumber(source, declared != null ? declared : expr.getTargetType());
+        }
+        if (!expr.isTryMode() && targetType instanceof BooleanType && isExactNumber(sourceType)
+                && !NumericType.isDecfloat(sourceType)) {
+            // An exact number cast to BOOLEAN is compared with zero, as TO_BOOLEAN of it is:
+            // CAST((FZ.ID + 1) <> 0 AS BOOLEAN), CAST(FZ.D <> (CAST(0 AS NUMBER(10,2))) AS BOOLEAN) (live-verified).
+            final String zero = ((NumericType) sourceType).getScale() == 0 ? "0"
+                : "(CAST(0 AS " + typeText(source) + "))";
+            return "CAST(" + operand(source) + " <> " + zero + " AS BOOLEAN)";
         }
         if (isNoOpCast(argumentType(source), targetType)) {
             return source.accept(this);
@@ -2384,7 +2846,7 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             return "DATE";
         }
         if (target instanceof NumericType) {
-            return NumericType.isApproximate(target) ? "REAL" : "FIXED";
+            return NumericType.isApproximate(target) ? "REAL" : NumericType.isDecfloat(target) ? "DECFLOAT" : "FIXED";
         }
         if (target instanceof BooleanType) {
             return "BOOLEAN";
@@ -2409,6 +2871,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             final boolean targetApproximate = NumericType.isApproximate(target);
             if (sourceApproximate || targetApproximate) {
                 return sourceApproximate && targetApproximate;
+            }
+            if (NumericType.isDecfloat(source) != NumericType.isDecfloat(target)) {
+                return false;
             }
             final NumericType from = (NumericType) source;
             final NumericType to = (NumericType) target;
@@ -2530,6 +2995,9 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         }
         if (mode == StrictPrintMode.WRITTEN) {
             return super.visitFunctionCall(expr);
+        }
+        if (isDivCall(expr)) {
+            return divOperands(expr);
         }
         if (foldingConversions && expr.getNameExpression() == null) {
             final String folded = foldedConversionCall(expr);
@@ -3231,8 +3699,17 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             return "DIV0(" + (leftApproximate ? printed[0] : "CAST(" + printed[0] + " AS FLOAT)") + ", "
                 + (rightApproximate ? printed[1] : "CAST(" + printed[1] + " AS FLOAT)") + ")";
         }
-        final int scale = Math.max(types[0].getScale(),
-            Math.min(types[0].getScale() + types[1].getScale() + DIVISION_EXTRA_SCALE, DIVISION_SCALE_CAP));
+        if (tellingColumnDefault && types[0] != TYPED_NULL_FIXED && types[1] != TYPED_NULL_FIXED) {
+            final BigDecimal[] constants = {types[0] == TEXT_AS_NUMBER ? null : toldConstantValue(dividend),
+                types[1] == TEXT_AS_NUMBER || nullToZero ? null : toldConstantValue(divisor)};
+            return toldDivision(
+                new ToldOperand(printed[0], "(" + printed[0] + ")", types[0].getPrecision(), types[0].getScale(),
+                    constants[0], writtenValue(dividend) != null, false),
+                new ToldOperand(printed[1], "(" + printed[1] + ")", types[1].getPrecision(), types[1].getScale(),
+                    constants[1], !nullToZero && writtenValue(divisor) != null, false),
+                constants[0] != null && constants[1] != null, true);
+        }
+        final int scale = dividendScale(types[0].getScale(), types[1].getScale());
         final int precision = types[0].getPrecision() - types[0].getScale() + types[1].getScale() + scale;
         if (precision > MAX_PRECISION) {
             return "SCALED_ROUND_INT_DIV0(" + printed[0] + ", " + printed[1] + ")";
@@ -3495,6 +3972,10 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             return null;
         }
         final DataType type = argumentType(first);
+        if (VARIANT_ARGUMENT_FUNCTIONS.contains(name) && args.size() == 1 || name.equals("ARRAY_CONTAINS")
+                && args.size() == 2) {
+            return variantArguments(expr, name, first, type);
+        }
         if (ROUNDING_FAMILY.contains(name) && (type instanceof StringType || type instanceof VariantType)) {
             final int most = name.equals("ABS") || name.equals("SIGN") ? 1 : 2;
             if (args.size() > most) {
@@ -3507,6 +3988,85 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
             return withFirstArgument(expr, textOf(first));
         }
         return null;
+    }
+
+    /**
+     * A call that reads a VARIANT as the plan holds it: a number, a BOOLEAN, an ARRAY or an OBJECT is cast to VARIANT
+     * first, and ARRAY_CONTAINS reads its second argument as an ARRAY (live-verified):
+     *
+     * <pre>
+     *   TYPEOF(id)                   TYPEOF(CAST(FZ.ID AS VARIANT))
+     *   ARRAY_SIZE(id)               ARRAY_SIZE(CAST(FZ.ID AS VARIANT))     an ARRAY is read as it is
+     *   IS_INTEGER(b)                IS_INTEGER(CAST(FZ.B AS VARIANT))      every IS_ test alike
+     *   ARRAY_CONTAINS(id, v)        ARRAY_CONTAINS(CAST(FZ.ID AS VARIANT), CAST(FZ.V AS ARRAY))
+     * </pre>
+     *
+     * <p>Null where an argument's type is unknown or of a family the call refuses, which prints as written.
+     */
+    private String variantArguments(final FunctionCallExpression expr, final String name, final Expression first,
+                                    final DataType type) {
+        final String value = asVariant(first, type, name.equals("ARRAY_SIZE"));
+        if (value == null) {
+            return null;
+        }
+        if (!name.equals("ARRAY_CONTAINS")) {
+            return withFirstArgument(expr, value);
+        }
+        final Expression array = expr.getArguments().get(1);
+        final DataType arrayType = argumentType(array);
+        final String held;
+        if (arrayType instanceof VariantType) {
+            held = "CAST(" + array.accept(this) + " AS ARRAY)";
+        } else if (arrayType instanceof ArrayType && !StructuredTypes.isStructured(arrayType)) {
+            held = array.accept(this);
+        } else {
+            return null;
+        }
+        return expr.getFunctionName() + "(" + value + ", " + held + ")";
+    }
+
+    /** A value read as a VARIANT: itself when it is one (or an ARRAY that an ARRAY is taken as), cast otherwise. */
+    private String asVariant(final Expression value, final DataType type, final boolean arrayTaken) {
+        if (type instanceof VariantType || arrayTaken && isPlainContainer(type) && type instanceof ArrayType) {
+            return value.accept(this);
+        }
+        return type instanceof NumericType || type instanceof BooleanType || isPlainContainer(type)
+            ? "CAST(" + value.accept(this) + " AS VARIANT)" : null;
+    }
+
+    /** The one-argument calls that read a VARIANT, any other value cast to one in the plan. */
+    private static final Set<String> VARIANT_ARGUMENT_FUNCTIONS = new HashSet<>(Arrays.asList(
+        "TYPEOF", "ARRAY_SIZE", "STRIP_NULL_VALUE", "IS_ARRAY", "IS_OBJECT", "IS_INTEGER", "IS_DECIMAL", "IS_DOUBLE",
+        "IS_REAL", "IS_BOOLEAN", "IS_VARCHAR", "IS_CHAR", "IS_BINARY", "IS_NULL_VALUE", "IS_DATE", "IS_DATE_VALUE",
+        "IS_TIME", "IS_TIMESTAMP_NTZ", "IS_TIMESTAMP_LTZ", "IS_TIMESTAMP_TZ"));
+
+    /** The calls that test a VARIANT and answer a BOOLEAN, which a window's argument or key holds cast to one. */
+    private static boolean isVariantTest(final Expression expression) {
+        if (!(expression instanceof FunctionCallExpression)) {
+            return false;
+        }
+        final FunctionCallExpression call = (FunctionCallExpression) expression;
+        if (call.getNameExpression() != null || call.getFunctionName() == null) {
+            return false;
+        }
+        final String name = call.getFunctionName().toUpperCase(Locale.ROOT);
+        return name.equals("ARRAY_CONTAINS") || name.startsWith("IS_") && VARIANT_ARGUMENT_FUNCTIONS.contains(name);
+    }
+
+    /**
+     * A window call's argument or key as the plan holds it: {@link #plannedCondition a predicate} cast to the BOOLEAN
+     * it yields, {@code CAST(FZ.ID > 1 AS BOOLEAN)}, {@code CAST((FZ.ID > 1) AND (CAST(FZ.B AS BOOLEAN)) AS BOOLEAN)},
+     * {@code CAST(IS_ARRAY(FZ.V) AS BOOLEAN)}; a BOOLEAN column and NOT / AND / OR over them alone, {@code NOT(FZ.B)},
+     * stay as they are, and so does anything else (live-verified).
+     *
+     * @param expr the argument or key
+     * @return its plan text
+     */
+    String plannedValue(final Expression expr) {
+        if (isVariantTest(expr)) {
+            return "CAST(" + expr.accept(this) + " AS BOOLEAN)";
+        }
+        return holdsPredicate(expr) ? "CAST(" + plannedCondition(expr) + " AS BOOLEAN)" : expr.accept(this);
     }
 
     /** An argument of a FLOAT function as the plan holds it: an exact number, a text or a VARIANT cast to FLOAT. */
@@ -4172,6 +4732,7 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
      *   TO_TIMESTAMP(d)             CAST(FT.D AS TIMESTAMP_NTZ(9))     _LTZ and _TZ keep theirs
      *   TO_TIMESTAMP(1.5)           CAST(1.5 AS TIMESTAMP_NTZ(1))      a number's scale is the precision
      *   TO_DOUBLE(g)                CAST(FT.G AS FLOAT)
+     *   TO_DECFLOAT(n)              CAST(FZ.N AS DECFLOAT(38))         a text, a FLOAT, a BOOLEAN, a VARIANT too
      *   TO_BOOLEAN('true')          CAST('true' AS BOOLEAN)
      *   TO_BOOLEAN(a)               CAST(RE.A &lt;&gt; (CAST(0 AS NUMBER(10,2))) AS BOOLEAN)   a number is compared with zero
      *   TO_VARCHAR(n)               CAST(RT.N AS VARCHAR(134217728))   TO_CHAR too
@@ -4222,6 +4783,10 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
         }
         if (!tryForm && sourceType instanceof NumericType) {
             final NumericType number = (NumericType) sourceType;
+            if (conversion.equals("TO_BOOLEAN") && NumericType.isDecfloat(number)) {
+                // A DECFLOAT is cast as it stands: CAST(FZ.X AS BOOLEAN) (live-verified).
+                return "CAST(" + source.accept(this) + " AS BOOLEAN)";
+            }
             if (conversion.equals("TO_BOOLEAN") && !NumericType.isApproximate(number)) {
                 final String zero = number.getScale() == 0 ? "0" : "(CAST(0 AS " + typeText(source) + "))";
                 return "CAST(" + operand(source) + " <> " + zero + " AS BOOLEAN)";
@@ -4251,6 +4816,8 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
                 return "TIMESTAMP_NTZ(9)";
             case "TO_DOUBLE":
                 return "FLOAT";
+            case "TO_DECFLOAT":
+                return DECFLOAT_TARGET;
             case "TO_BOOLEAN":
                 return "BOOLEAN";
             default:
@@ -4312,6 +4879,8 @@ final class StrictMessagePrinter extends AstPrinterVisitor {
                 return text || variant || source instanceof DateTimeType;
             case "TO_DOUBLE":
                 return text || variant || source instanceof NumericType;
+            case "TO_DECFLOAT":
+                return text || variant || source instanceof NumericType || source instanceof BooleanType;
             case "TO_BOOLEAN":
                 return text || variant;
             case "TO_VARCHAR":

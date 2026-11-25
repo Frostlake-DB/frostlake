@@ -107,6 +107,21 @@ final class CorrelatedFilterFold {
     }
 
     /**
+     * Whether the statistics prove a written filter keeps no row: FALSE or NULL on every row, which a NULL in a
+     * column does not stop, since a NULL satisfies no comparison (see {@link ExpressionEvaluator#filtersEveryRow}).
+     *
+     * @param conditionText the condition as written
+     * @return whether no row satisfies it; false where the condition does not parse or read here
+     */
+    boolean filtersEveryRow(final String conditionText) {
+        try {
+            return scope.filtersEveryRow(ExpressionEvaluator.parse(conditionText));
+        } catch (final RuntimeException unreadable) {
+            return false;
+        }
+    }
+
+    /**
      * The interval an expression's values lie in over the relations' statistics.
      *
      * @param expressionText the expression as written

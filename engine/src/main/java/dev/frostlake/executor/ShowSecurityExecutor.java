@@ -19,6 +19,7 @@ package dev.frostlake.executor;
 import dev.frostlake.config.AccountIdentity;
 import dev.frostlake.metastore.Catalog;
 import dev.frostlake.metastore.GrantNames;
+import dev.frostlake.metastore.SystemDatabase;
 import dev.frostlake.metastore.model.Database;
 import dev.frostlake.metastore.model.DatabaseRole;
 import dev.frostlake.metastore.model.Privilege;
@@ -393,7 +394,8 @@ final class ShowSecurityExecutor {
                             role.getName(),
                             ownership || role.hasGrantOption(grantedOn, spelling, priv, grantor) ? "true" : "false",
                             ownership ? role.getName() : grantor,
-                            ShowResultHelpers.OWNER_ROLE_TYPE
+                            // A grant made by no role, as the system roles' own ones are, names no grantor type.
+                            !ownership && grantor.isEmpty() ? "" : ShowResultHelpers.OWNER_ROLE_TYPE
                         )));
                         if (ownership) {
                             break;
@@ -402,7 +404,8 @@ final class ShowSecurityExecutor {
                 }
             }
         }
-        if (!ownershipGranted && granted != null && granted.getOwner() != null && !granted.getOwner().isEmpty()) {
+        if (!ownershipGranted && granted != null && granted.getOwner() != null && !granted.getOwner().isEmpty()
+            && !SystemDatabase.ownedByNoRole(granted.getKind(), granted.getName())) {
             // A database role owns under its qualified name and is named bare as the grantee, as its other rows
             // name it.
             final DatabaseRole ownerRole = new AccessControlListings(catalog).databaseRoleNamed(granted.getOwner());
@@ -637,11 +640,12 @@ final class ShowSecurityExecutor {
         } else if ("ROLE".equals(targetType)) {
             final Role role = catalog.getRoleExact(targetName);
             for (final String grantedRoleName : role.getGrantedRoles()) {
+                final boolean hierarchy = catalog.isSystemRoleGrant(role, grantedRoleName);
                 rows.add(new Row(Arrays.asList(
                     roleGrantedOn(role.getRoleGrantTime(grantedRoleName), role.getCreatedTime()),
                     "USAGE", "ROLE", grantedRoleName,
                     "ROLE", role.getName(),
-                    "false", role.getRoleGrantor(grantedRoleName)
+                    hierarchy ? "true" : "false", hierarchy ? "" : role.getRoleGrantor(grantedRoleName)
                 )));
             }
             rows.addAll(new AccessControlListings(catalog).grantsTo(role, "ROLE", role.getName()).getRows());
