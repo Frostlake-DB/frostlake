@@ -628,7 +628,8 @@ public final class StatementSeparation {
         return statements != null && !statements.isEmpty()
             && UnseparatedStatementOpener.readsWordAsProperty(statements.get(statements.size() - 1))
             && UnseparatedStatementOpener.namesProperty(word) && word.getType() != FrostlakeLexer.IDENTIFIER
-            && word.getType() != FrostlakeLexer.QUOTED_IDENTIFIER;
+            && word.getType() != FrostlakeLexer.QUOTED_IDENTIFIER && !(word.getType() == FrostlakeLexer.TAG
+            && UnseparatedStatementOpener.altersTable(statements.get(statements.size() - 1)));
     }
 
     /**

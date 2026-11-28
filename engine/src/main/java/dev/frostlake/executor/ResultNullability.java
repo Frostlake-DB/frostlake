@@ -75,8 +75,13 @@ import java.util.Set;
  * </pre>
  *
  * A name no column answers to is a word of the call it is written in, such as a date part, and no value.
+ *
+ * <p>The same judgement spells a range refusal's type, {@code {nullable}} or {@code {not null}}: a cast of a
+ * VALUES column holding no NULL, of {@code ABS(1234567.1234)} or of a literal operand is {@code {not null}}, one of
+ * {@code NULLIF(…)}, a scalar subquery or an aggregate {@code {nullable}} (live-verified); see
+ * {@link #judgingReferences}.
  */
-final class ResultNullability {
+public final class ResultNullability {
 
     /**
      * The functions that can answer NULL whatever their arguments are, a lookup that finds nothing among them:
@@ -112,6 +117,9 @@ final class ResultNullability {
     // The executor that parses a scalar subquery item, set where the judge tells what a result's metadata tells (see
     // reporting); null for a judge of the values themselves.
     private final QueryExecutor reporter;
+    // How a column reference is judged when the evaluator resolves the names (see judgingReferences); null where the
+    // select list's relations do.
+    private final ReferenceNullability references;
 
     /**
      * @param table        the relation the select list reads
@@ -132,10 +140,27 @@ final class ResultNullability {
 
     private ResultNullability(final Table table, final Map<String, Table> aliasToTable, final RolledKeys rolled,
                               final QueryExecutor reporter) {
+        this(table, aliasToTable, rolled, reporter, null);
+    }
+
+    private ResultNullability(final Table table, final Map<String, Table> aliasToTable, final RolledKeys rolled,
+                              final QueryExecutor reporter, final ReferenceNullability references) {
         this.table = table;
         this.aliasToTable = aliasToTable;
         this.rolled = rolled;
         this.reporter = reporter;
+        this.references = references;
+    }
+
+    /**
+     * A judge of the values an expression evaluated row by row can take, for the refusals that spell the type of a
+     * value they could not hold: every rule above, with a column reference judged as the evaluator resolves it.
+     *
+     * @param references how a column reference is judged
+     * @return the judge
+     */
+    public static ResultNullability judgingReferences(final ReferenceNullability references) {
+        return new ResultNullability(null, null, RolledKeys.NONE, null, references);
     }
 
     /**
@@ -176,7 +201,7 @@ final class ResultNullability {
      * @param expression the select item
      * @return whether it can
      */
-    boolean of(final Expression expression) {
+    public boolean of(final Expression expression) {
         if (rolled.holds(expression)) {
             return true;
         }
@@ -321,6 +346,9 @@ final class ResultNullability {
 
     /** A column's own NOT NULL, and the NULLs an outer join extends its relation with. */
     private boolean column(final ColumnReferenceExpression reference) {
+        if (references != null) {
+            return references.nullable(reference);
+        }
         final String name = reference.getColumnName();
         if (reference.isQualified() && aliasToTable != null) {
             final Table relation = relationNamed(aliasToTable, reference.getTableName());
@@ -331,8 +359,14 @@ final class ResultNullability {
             }
         }
         // A name no column answers to is a word of the call it stands in — DATEADD(day, …) — and no value.
-        return table != null && table.hasColumn(name)
-            && nullable(ownerOf(name), table.getColumns().get(table.getColumnIndex(name)));
+        if (table == null || !table.hasColumn(name)) {
+            return false;
+        }
+        final TableColumn column = table.getColumns().get(table.getColumnIndex(name));
+        // A column judged unable to hold NULL, a derived relation's or a VALUES clause's, still may on a side an
+        // outer join extends.
+        return nullable(ownerOf(name), column) || table.getJoinedRelations() != null
+            && table.getJoinedRelations().isNullExtendedColumn(column);
     }
 
     /**

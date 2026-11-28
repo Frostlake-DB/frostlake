@@ -1105,7 +1105,8 @@ public class CreateInfrastructureHandler implements CommandHandler {
                     + " administrator for details."));
             }
             StageEndpoint.require(endpoint, url);
-            refuseLocalUrlUnlessEnabled(url);
+            CloudStageUrls.requireLocation(url, queryExecutor.getEngineConfig() == null
+                || queryExecutor.getEngineConfig().isStageFileUrlEnabled(), true);
             // A replacement drops the stage it replaces once the new one is judged whole, so a refused statement
             // leaves that stage as it was (live-verified).
             final boolean temporary = ctx.TEMPORARY() != null || ctx.TEMP() != null;
@@ -1521,30 +1522,5 @@ public class CreateInfrastructureHandler implements CommandHandler {
             scratch.setOption(option.getKey(), option.getValue());
         }
         return scratch;
-    }
-
-    /**
-     * The refusal a local stage URL earns unless {@code stage.file.urlEnabled} opts in — matching a
-     * real account (live-verified, three shapes): a well-formed URL with a local scheme
-     * ({@code file:///dir}) answers {@code invalid URL prefix found in: '<url>'}, the quoted form;
-     * a malformed {@code file://host} spelling and a bare path with no scheme both answer the
-     * unquoted {@code invalid URL: <url>}. Cloud spellings ({@code s3://}, …) and URL-less internal
-     * stages pass untouched.
-     */
-    private void refuseLocalUrlUnlessEnabled(final String url) {
-        if (url == null || queryExecutor.getEngineConfig() == null
-                || queryExecutor.getEngineConfig().isStageFileUrlEnabled()) {
-            return;
-        }
-        if (!url.contains("://")) {
-            throw new RuntimeException(SqlCompilationError.of("invalid URL: " + url));
-        }
-        if (url.startsWith("file:///")) {
-            throw new RuntimeException(SqlCompilationError.of(
-                "invalid URL prefix found in: '" + url + "'"));
-        }
-        if (url.startsWith("file://")) {
-            throw new RuntimeException(SqlCompilationError.of("invalid URL: " + url));
-        }
     }
 }

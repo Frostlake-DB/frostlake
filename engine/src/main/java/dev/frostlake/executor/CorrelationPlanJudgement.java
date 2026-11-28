@@ -16,8 +16,10 @@
 package dev.frostlake.executor;
 
 import dev.frostlake.executor.expressions.BinaryOperationExpression;
+import dev.frostlake.executor.expressions.BinaryOperator;
 import dev.frostlake.executor.expressions.CaseExpression;
 import dev.frostlake.executor.expressions.CastExpression;
+import dev.frostlake.executor.expressions.ColumnReferenceExpression;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
@@ -30,6 +32,7 @@ import dev.frostlake.executor.expressions.SubqueryExpression;
 import dev.frostlake.executor.expressions.UnaryOperationExpression;
 import dev.frostlake.executor.expressions.UnsupportedSubqueryException;
 import dev.frostlake.executor.expressions.WhenClause;
+import dev.frostlake.executor.expressions.WindowFunctionExpression;
 import dev.frostlake.metastore.model.Function;
 import dev.frostlake.metastore.model.Table;
 import dev.frostlake.metastore.model.TableColumn;
@@ -37,7 +40,13 @@ import dev.frostlake.metastore.model.View;
 import dev.frostlake.parser.FrostlakeLexer;
 import dev.frostlake.parser.FrostlakeParser;
 import dev.frostlake.storage.Row;
+import dev.frostlake.types.ArrayType;
+import dev.frostlake.types.DataType;
+import dev.frostlake.types.MapType;
+import dev.frostlake.types.ObjectType;
+import dev.frostlake.types.VariantType;
 import dev.frostlake.values.RelationStatistics;
+import dev.frostlake.values.ValueRange;
 
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
@@ -442,6 +451,10 @@ public final class CorrelationPlanJudgement {
         final boolean pruned = pruned();
         final boolean spared = pruned || readRowByRow();
         final Set<String> outerNames = outerNames();
+        final RuntimeException conditioned = conditionedFeedRefusal(outerNames);
+        if (conditioned != null) {
+            return conditioned;
+        }
         RuntimeException earlyInSelectList = null;
         RuntimeException earlyElsewhere = null;
         RuntimeException lateInWhere = null;
@@ -457,7 +470,8 @@ public final class CorrelationPlanJudgement {
                 && !(judged instanceof FrostlakeParser.OrderByClauseContext);
             for (final ParseTree subquery : subqueries(judged)) {
                 final boolean kept = spared && (keptThroughTableFunction(subquery, outerNames)
-                    || !pruned && refusedOverAnyOuter(subquery, outerNames));
+                    || !pruned && (refusedOverAnyOuter(subquery, outerNames)
+                        || refusedBesideLateralQuery(subquery, outerNames)));
                 if (spared && !kept) {
                     continue;
                 }
@@ -689,6 +703,10 @@ public final class CorrelationPlanJudgement {
         if (reads.isEmpty()) {
             return false;
         }
+        // A NOT IN and an ALL so fed are computed for every outer row, one row or many: their own rules judge them.
+        if (universal(node)) {
+            return true;
+        }
         // Over a derived relation only what prunes the relation itself counts: the statement's own WHERE and
         // LIMIT fold the subquery away with it.
         if (body == null ? pruned() : bodyPruned()) {
@@ -696,8 +714,205 @@ public final class CorrelationPlanJudgement {
         }
         for (final FrostlakeParser.QualifiedNameExprContext read : reads) {
             final Table owner = ownerOf(read.qualifiedName(), relations);
-            if (owner == null || executor.storedRowCount(owner.getQualifiedName()) != 1) {
+            if (owner == null || executor.storedRowCount(owner.getQualifiedName()) != 1
+                    || !boundedByStatistics(owner, read.qualifiedName())) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    /** The calls that answer a value for every row: a count and a place among the rows. */
+    private static final Set<String> NEVER_NULL_CALLS = new HashSet<>(Arrays.asList(
+        "COUNT", "COUNT_IF", "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE", "PERCENT_RANK", "CUME_DIST"));
+
+    /** The calls that answer their last argument where the ones before it are NULL. */
+    private static final Set<String> NULL_REPLACING_CALLS = new HashSet<>(Arrays.asList("COALESCE", "NVL", "IFNULL"));
+
+    /**
+     * Whether the statistics of the statement's relations tell a NOT IN's or an ALL's subject is NULL on no row:
+     * a column holding no NULL, {@code COALESCE(n, 0)}, a constant. Over such a subject a fed query whose item
+     * is never NULL either is refused, where a subject or an item that may be NULL is computed for every row:
+     * over an {@code n} holding no NULL, {@code n NOT IN (SELECT ROW_NUMBER() OVER (ORDER BY f.index) FROM
+     * TABLE(FLATTEN(o.arr)) f)} and {@code (SELECT COUNT(*) …)} are refused and {@code (SELECT MAX(f.value)
+     * OVER () …)} is answered; over an {@code n} holding a NULL all three are answered (live-verified).
+     */
+    private boolean neverNull(final FrostlakeParser.ExpressionContext subject) {
+        if (relations == null || relations.isEmpty()) {
+            return false;
+        }
+        try {
+            final ValueRange range =
+                new CorrelatedFilterFold(executor, relations).rangeOf(ParseTreeText.getOriginalText(subject));
+            return range != null && !range.isNullable();
+        } catch (final RuntimeException unread) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether a query's one item is never NULL by what it is: a count or a rank, a value replacing NULL by one,
+     * a sum, difference or product of such, or a derived table's item of that kind. A literal is one value and
+     * is compared as that value, so it is not such an item.
+     */
+    private boolean itemNeverNull(final FrostlakeParser.SelectStatementContext query, final int depth) {
+        final FrostlakeParser.SelectClauseContext clause = CorrelatedSubqueryRule.mainClause(query);
+        if (clause == null || clause.selectList().selectItem().size() != 1) {
+            return false;
+        }
+        final FrostlakeParser.ExpressionContext value =
+            SelectItemAccessors.getItemValueExpr(clause.selectList().selectItem(0));
+        if (value == null) {
+            return false;
+        }
+        final Expression item;
+        try {
+            item = ExpressionEvaluator.parse(ParseTreeText.getOriginalText(value));
+        } catch (final RuntimeException unparsed) {
+            return false;
+        }
+        return !(item instanceof LiteralExpression) && neverNull(item, clause, depth);
+    }
+
+    private boolean neverNull(final Expression item, final FrostlakeParser.SelectClauseContext clause,
+                              final int depth) {
+        if (item instanceof LiteralExpression) {
+            return ((LiteralExpression) item).getValue() != null;
+        }
+        if (item instanceof WindowFunctionExpression) {
+            final String name = ((WindowFunctionExpression) item).getFunctionName();
+            return name != null && NEVER_NULL_CALLS.contains(name.toUpperCase(Locale.ROOT));
+        }
+        if (item instanceof FunctionCallExpression) {
+            final FunctionCallExpression call = (FunctionCallExpression) item;
+            final String name = call.getFunctionName() == null ? "" : call.getFunctionName().toUpperCase(Locale.ROOT);
+            if (NEVER_NULL_CALLS.contains(name)) {
+                return true;
+            }
+            if (NULL_REPLACING_CALLS.contains(name)) {
+                for (final Expression argument : call.getArguments()) {
+                    if (neverNull(argument, clause, depth)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        if (item instanceof BinaryOperationExpression) {
+            final BinaryOperationExpression operation = (BinaryOperationExpression) item;
+            final BinaryOperator operator = operation.getOperator();
+            return (operator == BinaryOperator.ADD || operator == BinaryOperator.SUBTRACT
+                    || operator == BinaryOperator.MULTIPLY)
+                && neverNull(operation.getLeft(), clause, depth) && neverNull(operation.getRight(), clause, depth);
+        }
+        if (item instanceof ColumnReferenceExpression && depth < 3 && clause.tableExpression() != null) {
+            return derivedItemNeverNull(((ColumnReferenceExpression) item).getColumnName(), clause, depth);
+        }
+        return false;
+    }
+
+    /** Whether a name is the alias of a derived table's item that is never NULL (see {@link #itemNeverNull}). */
+    private boolean derivedItemNeverNull(final String name, final FrostlakeParser.SelectClauseContext clause,
+                                         final int depth) {
+        final List<FrostlakeParser.TableReferenceContext> references = new ArrayList<>();
+        collectDerivedTables(clause.tableExpression(), references);
+        for (final FrostlakeParser.TableReferenceContext reference : references) {
+            final FrostlakeParser.SelectClauseContext body =
+                CorrelatedSubqueryRule.mainClause(reference.tableSource().selectStatement());
+            if (body == null) {
+                continue;
+            }
+            for (final FrostlakeParser.SelectItemContext candidate : body.selectList().selectItem()) {
+                if (!(candidate instanceof FrostlakeParser.ExprItemContext)) {
+                    continue;
+                }
+                final FrostlakeParser.ExprItemContext named = (FrostlakeParser.ExprItemContext) candidate;
+                final String alias = named.aliasName() != null ? ParseTreeText.getIdentifier(named.aliasName())
+                    : named.identifier() != null ? ParseTreeText.getIdentifier(named.identifier()) : null;
+                final FrostlakeParser.ExpressionContext value = SelectItemAccessors.getItemValueExpr(candidate);
+                if (alias == null || value == null || !alias.equalsIgnoreCase(name)) {
+                    continue;
+                }
+                try {
+                    return neverNull(ExpressionEvaluator.parse(ParseTreeText.getOriginalText(value)), body, depth + 1);
+                } catch (final RuntimeException unparsed) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The derived tables of a FROM, but not those of a query nested in it. */
+    private static void collectDerivedTables(final ParseTree node,
+                                             final List<FrostlakeParser.TableReferenceContext> into) {
+        if (node instanceof FrostlakeParser.SelectStatementContext) {
+            return;
+        }
+        if (node instanceof FrostlakeParser.TableReferenceContext
+                && ((FrostlakeParser.TableReferenceContext) node).tableSource() != null
+                && ((FrostlakeParser.TableReferenceContext) node).tableSource().selectStatement() != null) {
+            into.add((FrostlakeParser.TableReferenceContext) node);
+            return;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            collectDerivedTables(node.getChild(i), into);
+        }
+    }
+
+    /**
+     * The refusal of a subquery whose table function reads the outer row as the right side of a join written
+     * with an ON (see {@link CorrelatedSubqueryRule#fedThroughConditionedJoin}); null for none. The join is
+     * refused while the statement compiles: over an outer relation of no row, and in a WHERE the plan prunes.
+     */
+    private RuntimeException conditionedFeedRefusal(final Set<String> outerNames) {
+        final List<ParseTree> clauses = new ArrayList<>();
+        clauses.addAll(clause.selectList().selectItem());
+        final FrostlakeParser.WhereClauseContext where = ParseTreeText.getWhereClause(clause);
+        for (final ParseTree held : new ParseTree[] {where, clause.havingClause(), clause.qualifyClause(),
+            statement.orderByClause()}) {
+            if (held != null) {
+                clauses.add(held);
+            }
+        }
+        final CorrelatedSubqueryRule rule = new CorrelatedSubqueryRule(executor, outerNames, relations);
+        for (final ParseTree held : clauses) {
+            for (final ParseTree subquery : subqueries(held)) {
+                if (rule.fedThroughConditionedJoin(selectOf(subquery))) {
+                    return new RuntimeException("Unsupported feature 'lateral table function called with "
+                        + "OUTER JOIN syntax or a join predicate (ON clause)'.");
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Whether a subquery stands under NOT IN or ALL, which every row of its query must pass. */
+    private static boolean universal(final ParseTree node) {
+        if (node instanceof FrostlakeParser.InSubqueryExprContext) {
+            return ((FrostlakeParser.InSubqueryExprContext) node).NOT() != null;
+        }
+        if (node instanceof FrostlakeParser.TupleInSubqueryExprContext) {
+            return ((FrostlakeParser.TupleInSubqueryExprContext) node).NOT() != null;
+        }
+        return node instanceof FrostlakeParser.QuantifiedComparisonExprContext
+            && ((FrostlakeParser.QuantifiedComparisonExprContext) node).quantifier().ALL() != null;
+    }
+
+    /**
+     * Whether the statistics of a one-row table hold a column's one value, which the plan then reads as a
+     * constant: they keep the least and the greatest of a number, a text or a date, and nothing of an ARRAY, an
+     * OBJECT or a VARIANT, so {@code FLATTEN(E.arr)} is refused over one row where
+     * {@code FLATTEN(ARRAY_CONSTRUCT(E.a))} is answered (live-verified).
+     */
+    private static boolean boundedByStatistics(final Table owner, final FrostlakeParser.QualifiedNameContext name) {
+        final String[] parts = ParseTreeText.qualifiedNameParts(name);
+        final String column = parts[parts.length - 1];
+        for (final TableColumn candidate : owner.getColumns()) {
+            if (candidate.getName().equalsIgnoreCase(column)) {
+                final DataType type = candidate.getDataType();
+                return !(type instanceof ArrayType || type instanceof ObjectType || type instanceof VariantType
+                    || type instanceof MapType);
             }
         }
         return false;
@@ -736,6 +951,15 @@ public final class CorrelationPlanJudgement {
                 ((FrostlakeParser.InSubqueryExprContext) node).selectStatement());
     }
 
+    /**
+     * Whether a subquery is refused for the lateral query its FROM joins over relations read row by row too (see
+     * {@link CorrelatedSubqueryRule#refusesBesideLateralQuery}).
+     */
+    private boolean refusedBesideLateralQuery(final ParseTree node, final Set<String> outerNames) {
+        return new CorrelatedSubqueryRule(executor, outerNames, relations, null)
+            .refusesBesideLateralQuery((ParserRuleContext) node, selectOf(node), true);
+    }
+
     /** The select a judged subquery node runs. */
     private static FrostlakeParser.SelectStatementContext selectOf(final ParseTree node) {
         if (node instanceof FrostlakeParser.ScalarSubqueryExprContext) {
@@ -761,6 +985,9 @@ public final class CorrelationPlanJudgement {
 
     /** Where the subquery the last judgement refused with no place stands, or null when it gave one. */
     private Token unplacedAt;
+
+    /** The subqueries under an unsettled conditional, judged for a lateral query's join alone. */
+    private final Set<ParseTree> judgedForLateralOnly = new HashSet<>();
 
     /** The subqueries {@link #refusal()} refused, keyed as {@link PlannedCorrelations} records them. */
     public Set<String> refusedKeys() {
@@ -822,6 +1049,18 @@ public final class CorrelationPlanJudgement {
         // An outer join may extend a relation with NULLs its statistics do not see, so beside one no name is constant.
         final CorrelatedSubqueryRule rule = new CorrelatedSubqueryRule(executor, outerNames, relations,
             outerJoined || unpinned ? null : new CatalogRelationConstancy(executor, relations));
+        if (rule.refusesBesideLateralQuery((ParserRuleContext) node, subquery, unpinned)) {
+            // A lateral query joined in the subquery's FROM is planned only where the subquery is a join.
+            final String refusedText = ParseTreeText.getOriginalText(subquery);
+            refusedKeys.add(scalar ? PlannedCorrelations.valueKey(refusedText)
+                : PlannedCorrelations.membershipKey(refusedText));
+            judgedForItsAggregate = false;
+            return rule.lateralRefusalUnplaced() ? new UnsupportedSubqueryException(
+                SqlCompilationError.of("Unsupported subquery type cannot be evaluated")) : placedRefusal(at);
+        }
+        if (judgedForLateralOnly.contains(node)) {
+            return null;
+        }
         final FrostlakeParser.FunctionCallExprContext havingAggregate =
             node instanceof FrostlakeParser.ScalarSubqueryExprContext
                 ? HavingAggregateSubqueries.enclosingAggregate(node, executor) : null;
@@ -917,7 +1156,19 @@ public final class CorrelationPlanJudgement {
         if (!(scalar ? rule.refusesScalar(subquery)
                 : rule.refusesMembership(subquery, in != null || rowIn != null || quantified != null, semiJoin,
                     subject, in != null && in.NOT() != null || rowIn != null && rowIn.NOT() != null))
-                && !new NullableAntiJoins(executor, rule, relations).within(this).refuses(node)) {
+                && (!scalar && rule.fedMembership()
+                    || !new NullableAntiJoins(executor, rule, relations).within(this).refuses(node))) {
+            if (!scalar && rule.fedMembership()) {
+                final FrostlakeParser.ExpressionContext probe = in != null ? in.expression()
+                    : quantified != null ? quantified.expression(0) : null;
+                if (probe != null && neverNull(probe) && itemNeverNull(subquery, 0)) {
+                    // Neither side can be NULL: the plan is the plain anti-join, which reads no fed query.
+                    refusedKeys.add(PlannedCorrelations.membershipKey(ParseTreeText.getOriginalText(subquery)));
+                    judgedForItsAggregate = true;
+                    return placedRefusal(at);
+                }
+                refusedKeys.add(PlannedCorrelations.fedKey(ParseTreeText.getOriginalText(subquery)));
+            }
             return null;
         }
         // A membership test keeps the order the aggregate shape has: of several the last is reported.
@@ -928,6 +1179,10 @@ public final class CorrelationPlanJudgement {
         if (called != null) {
             // Inside a SQL function's arguments the refusal names the function and gives no place.
             return UnsupportedSubqueryException.inside(called);
+        }
+        if (!scalar && rule.refusedForItsFeed()) {
+            // A NOT IN or an ALL fed the outer row is refused where it stands, whatever it nests.
+            return placedRefusal(at);
         }
         final Token antiJoin = !scalar && standsInWhere(node) ? NestedSubqueryRefusalPlace.antiJoinOf(subquery, rule)
             : null;
@@ -1109,6 +1364,36 @@ public final class CorrelationPlanJudgement {
         return found;
     }
 
+    /**
+     * The subqueries below a conditional no branch of which is settled that join a lateral query in their FROM:
+     * read row by row as the others there are, they are still refused for that join (see
+     * {@link CorrelatedSubqueryRule#refusesBesideLateralQuery}).
+     */
+    private void collectLateralHolders(final ParseTree node, final List<ParseTree> into) {
+        if (node instanceof FrostlakeParser.SelectStatementContext
+                || node instanceof FrostlakeParser.LambdaFunctionContext) {
+            return;
+        }
+        final List<ParseTree> here = new ArrayList<>();
+        for (int i = 0; i < node.getChildCount(); i++) {
+            final ParseTree child = node.getChild(i);
+            if (child instanceof FrostlakeParser.ScalarSubqueryExprContext
+                    || child instanceof FrostlakeParser.ExistsExprContext
+                    || child instanceof FrostlakeParser.InSubqueryExprContext
+                    || child instanceof FrostlakeParser.TupleInSubqueryExprContext
+                    || child instanceof FrostlakeParser.QuantifiedComparisonExprContext
+                        && ((FrostlakeParser.QuantifiedComparisonExprContext) child).selectStatement() != null) {
+                here.add(child);
+            } else {
+                collectLateralHolders(child, into);
+            }
+        }
+        for (final ParseTree holder : here) {
+            judgedForLateralOnly.add(holder);
+            into.add(holder);
+        }
+    }
+
     private void collectSubqueries(final ParseTree node, final List<ParseTree> into) {
         if (node instanceof FrostlakeParser.ScalarSubqueryExprContext || node instanceof FrostlakeParser.ExistsExprContext
                 || node instanceof FrostlakeParser.InSubqueryExprContext
@@ -1130,6 +1415,8 @@ public final class CorrelationPlanJudgement {
                 for (final ParseTree operand : taken) {
                     collectSubqueries(operand, into);
                 }
+            } else {
+                collectLateralHolders(node, into);
             }
             return;
         }

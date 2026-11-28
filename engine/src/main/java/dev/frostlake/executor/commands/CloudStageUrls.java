@@ -47,11 +47,59 @@ final class CloudStageUrls {
     }
 
     /**
+     * Refuse a location no stage can stand on, as CREATE STAGE judges it and as ALTER STAGE ... SET URL judges it
+     * before the stage is looked up (live-verified): the empty text and a scheme the account knows no storage of are
+     * {@code invalid URL prefix found in: '<url>'}, a text without {@code ://} is {@code invalid URL: <url>}, and a
+     * cloud location is then judged by {@link #require}, an Azure endpoint only when asked: ALTER judges the endpoint
+     * once the stage is found. A local location ({@code file://}) is the engine's own
+     * opt-in: without it {@code file:///dir} is an unknown prefix and {@code file://host} no URL.
+     *
+     * @param url        the location as the statement writes it, or null for none
+     * @param localFiles whether the engine takes local locations ({@code stage.file.urlEnabled})
+     * @param endpoint   whether an Azure location's endpoint is judged too
+     */
+    static void requireLocation(final String url, final boolean localFiles, final boolean endpoint) {
+        if (url == null) {
+            return;
+        }
+        final int separator = url.indexOf("://");
+        final int colon = url.indexOf(':');
+        final String scheme = colon > 0 ? url.substring(0, colon) : "";
+        final boolean cloud = "azure".equalsIgnoreCase(scheme) || isBucketScheme(scheme);
+        if (!localFiles) {
+            if (url.isEmpty()) {
+                throw invalidPrefix(url);
+            }
+            if (separator < 0) {
+                throw new RuntimeException(SqlCompilationError.of("invalid URL: " + url));
+            }
+            if (url.startsWith("file:///")) {
+                throw invalidPrefix(url);
+            }
+            if (url.startsWith("file://")) {
+                throw new RuntimeException(SqlCompilationError.of("invalid URL: " + url));
+            }
+        }
+        if (separator >= 0 && !cloud && !"file".equalsIgnoreCase(scheme)) {
+            throw invalidPrefix(url);
+        }
+        judge(url, endpoint);
+    }
+
+    private static RuntimeException invalidPrefix(final String url) {
+        return new RuntimeException(SqlCompilationError.of("invalid URL prefix found in: '" + url + "'"));
+    }
+
+    /**
      * Refuse a stage location an S3 or GCS stage cannot stand on; any other location passes untouched.
      *
      * @param url the location as the statement writes it, or null for none
      */
     static void require(final String url) {
+        judge(url, true);
+    }
+
+    private static void judge(final String url, final boolean endpoint) {
         if (url == null) {
             return;
         }
@@ -65,7 +113,7 @@ final class CloudStageUrls {
         }
         final int start = colon + 3;
         if (azure) {
-            requireAzure(url, start);
+            requireAzure(url, start, endpoint);
             return;
         }
         final int slash = url.indexOf('/', start);
@@ -83,10 +131,11 @@ final class CloudStageUrls {
      * 'dfs.core.windows.net' is currently not supported.", a Government or China cloud's blob service is refused for
      * this deployment, and any other host is named whole as an unsupported endpoint (live-verified).
      *
-     * @param url   the location as written
-     * @param start where its host starts, after the {@code //}
+     * @param url      the location as written
+     * @param start    where its host starts, after the {@code //}
+     * @param endpoint whether the endpoint is judged, or the location's format alone
      */
-    private static void requireAzure(final String url, final int start) {
+    private static void requireAzure(final String url, final int start, final boolean endpoint) {
         final int slash = url.indexOf('/', start);
         final String host = slash < 0 ? url.substring(start) : url.substring(start, slash);
         final int containerEnd = slash < 0 ? -1 : url.indexOf('/', slash + 1);
@@ -96,13 +145,16 @@ final class CloudStageUrls {
         if (dot <= 0 || dot == host.length() - 1 || container.isEmpty()) {
             throw new RuntimeException(SqlCompilationError.of("Invalid location format or value '" + url + "'."));
         }
-        final String endpoint = host.substring(dot + 1);
-        final String lower = endpoint.toLowerCase(Locale.ROOT);
+        if (!endpoint) {
+            return;
+        }
+        final String named = host.substring(dot + 1);
+        final String lower = named.toLowerCase(Locale.ROOT);
         if (AZURE_BLOB.equals(lower)) {
             return;
         }
         if (AZURE_DATA_LAKE.equals(lower)) {
-            throw new RuntimeException(SqlCompilationError.of("Provided Azure storage endpoint '" + endpoint
+            throw new RuntimeException(SqlCompilationError.of("Provided Azure storage endpoint '" + named
                 + "' is currently not supported."));
         }
         if (AZURE_GOVERNMENT_BLOB.equals(lower)) {

@@ -1971,6 +1971,38 @@ public class QuantifiedComparisonTruthTest extends MeasuredCellsTestSupport {
     }
 
     /**
+     * A VALUES clause of one row answers a column of one value, read directly, through an alias, a star, an
+     * expression or a derived table, so a NULL subject is UNKNOWN against it; one of two rows, a NOT NULL column of
+     * one row and an expression over one are FALSE (live-verified).
+     */
+    @Test
+    public void oneRowValuesColumnsAreOneValue() {
+        engine.execute("CREATE OR REPLACE TABLE p (id INT, k VARCHAR)");
+        engine.execute("INSERT INTO p VALUES (1,'a'),(2,NULL)");
+        engine.execute("CREATE OR REPLACE TABLE tn (s VARCHAR NOT NULL)");
+        engine.execute("INSERT INTO tn VALUES ('b'),('c')");
+        engine.execute("CREATE OR REPLACE TABLE pn (id INT, k INT)");
+        engine.execute("INSERT INTO pn VALUES (1,0),(2,NULL)");
+        assertAnswer("1|true ;; 2|false", "SELECT id, k < ALL (SELECT s FROM tn WHERE s = 'b') FROM p ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k < ALL (SELECT column1 FROM VALUES ('z')) FROM p ORDER BY id");
+        assertAnswer("1|false ;; 2|false", "SELECT id, k < ALL (SELECT UPPER(s) FROM tn LIMIT 1) FROM p ORDER BY id");
+        assertAnswer("1|true ;; 2|false",
+            "SELECT id, k < ALL (SELECT column1 FROM VALUES ('y'), ('z')) FROM p ORDER BY id");
+        assertAnswer("1|true ;; 2|false", "SELECT id, k < ALL (SELECT s FROM tn LIMIT 1) FROM p ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k < ALL (SELECT 7) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k < ALL (SELECT column1 FROM VALUES (7)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|false",
+            "SELECT id, k < ALL (SELECT column1 FROM VALUES (7), (8)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k < ALL (SELECT x FROM VALUES (7) t(x)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k < ALL (SELECT * FROM VALUES (7)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null",
+            "SELECT id, k < ALL (SELECT column1 + 1 FROM VALUES (7)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null", "SELECT id, k NOT IN (SELECT column1 FROM VALUES (7)) FROM pn ORDER BY id");
+        assertAnswer("1|true ;; 2|null",
+            "SELECT id, k < ALL (SELECT column1 FROM (SELECT column1 FROM VALUES (7))) FROM pn ORDER BY id");
+    }
+
+    /**
      * Where the account's answer hangs on what it knows of a table before it runs the query, or on the place a
      * membership stands, this engine keeps the rule above: a table whose column holds only NULLs answers FALSE under
      * {@code < ANY} (the account folds it to NULL), {@code = ANY} keeps its three values under a NOT in a WHERE (the account drops them to FALSE), and

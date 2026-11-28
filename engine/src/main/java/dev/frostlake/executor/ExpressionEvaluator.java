@@ -44,6 +44,7 @@ import dev.frostlake.storage.ColumnSource;
 import dev.frostlake.storage.Row;
 import dev.frostlake.types.DataType;
 import dev.frostlake.values.ValueRange;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -94,6 +95,7 @@ public class ExpressionEvaluator {
     private final SubqueryMemo subqueryMemo = new SubqueryMemo();
     // Reused across evaluate() calls (single-threaded per query) so each row doesn't allocate a visitor.
     private ExpressionEvaluatorVisitor reusableVisitor;
+    private Collection<String> fromClauseKeys;
 
     /**
      * Cache of parsed expression ASTs, keyed by (comment-stripped) expression text. An AST is
@@ -642,6 +644,15 @@ public class ExpressionEvaluator {
         this.outputAliasRanges = ranges;
     }
 
+    /**
+     * The FROM clause's keys a strict walk judges a qualifier by, where no multi-table context carries them.
+     *
+     * @param keys the keys, or null to judge none
+     */
+    public void setFromClauseKeys(final Collection<String> keys) {
+        this.fromClauseKeys = keys;
+    }
+
     /** {@link #validateStrict} for a WINDOW call re-formed without its OVER clause — the walk runs
      *  with the windowed marker set, so the bare-form desugared-name rewrites stay off (live reports
      * the WRITTEN name for windowed forms, measured). */
@@ -656,6 +667,9 @@ public class ExpressionEvaluator {
             reusableVisitor.setScopeExemptNames(scopeExemptNames);
             if (multiTableAllTables != null) {
                 reusableVisitor.setMultiTableContext(multiTableAliasToTable, multiTableAllTables);
+            }
+            if (fromClauseKeys != null) {
+                reusableVisitor.setFromClauseKeys(fromClauseKeys);
             }
             reusableVisitor.validateStrictArguments(expression);
         } finally {

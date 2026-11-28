@@ -49,6 +49,21 @@ final class UnmodelledAlteration {
 
     private static final String COMMENT = "COMMENT";
 
+    /** An application package's properties besides its comment. */
+    private static final String[] APPLICATION_PACKAGE_PROPERTIES = {"DATA_RETENTION_TIME_IN_DAYS",
+        "MAX_DATA_EXTENSION_TIME_IN_DAYS", "DEFAULT_DDL_COLLATION", "DISTRIBUTION", "MULTIPLE_INSTANCES",
+        "ENABLE_RELEASE_CHANNELS", "LISTING_AUTO_REFRESH", "AUTOMATIC_APPLICATION_MAINTENANCE"};
+
+    /** An application's properties besides its comment. */
+    private static final String[] APPLICATION_PROPERTIES = {"SHARE_EVENTS_WITH_PROVIDER", "DEBUG_MODE",
+        "AUTHORIZE_TELEMETRY_EVENT_SHARING"};
+
+    /** The properties whose value is a number of days: a text is an invalid value. */
+    private static final String[] DAY_COUNTS = {"DATA_RETENTION_TIME_IN_DAYS", "MAX_DATA_EXTENSION_TIME_IN_DAYS"};
+
+    /** The properties a dataset's new version takes. */
+    private static final String[] DATASET_VERSION_PROPERTIES = {COMMENT, "METADATA"};
+
     private final QueryExecutor queryExecutor;
 
     UnmodelledAlteration(final QueryExecutor queryExecutor) {
@@ -87,7 +102,43 @@ final class UnmodelledAlteration {
         for (final FrostlakeParser.UnmodelledPropertyContext property : action.unmodelledProperty()) {
             final FrostlakeParser.UnmodelledPropertyNameContext name = property.unmodelledPropertyName();
             judgeValue(property.unmodelledPropertyValue(), name.getText(), COMMENT.equals(canonical(name)));
+            if (isDayCount(canonical(name)) && property.unmodelledPropertyValue().stringText() != null) {
+                throw new RuntimeException(SqlCompilationError.invalidValueForParameter(
+                    ParseTreeText.getOriginalText(property.unmodelledPropertyValue()), name.getText()));
+            }
         }
+    }
+
+    /**
+     * A dataset's ADD VERSION or DROP VERSION: a property the new version does not take is refused, and the dataset is
+     * then missing, as no dataset is modelled, IF EXISTS or not and whatever its schema; the sentence names it by its
+     * last part (live-verified).
+     *
+     * @param action the action
+     * @param parts  the dataset's name, its canonical parts
+     * @return the refusal
+     */
+    RuntimeException missingDataset(final FrostlakeParser.UnmodelledAlterActionContext action, final String[] parts) {
+        for (final FrostlakeParser.DatasetVersionPropertyContext property : action.datasetVersionProperty()) {
+            final String written = canonical(property.unmodelledPropertyName());
+            boolean known = false;
+            for (final String name : DATASET_VERSION_PROPERTIES) {
+                known = known || name.equals(written);
+            }
+            if (!known) {
+                return new RuntimeException("Invalid dataset property " + written + ".");
+            }
+        }
+        return new RuntimeException("Dataset " + parts[parts.length - 1] + " does not exist.");
+    }
+
+    private static boolean isDayCount(final String written) {
+        for (final String name : DAY_COUNTS) {
+            if (name.equals(written)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -172,6 +223,15 @@ final class UnmodelledAlteration {
         }
         if (unmodelled == UnmodelledDropKind.DBT_PROJECT) {
             return "DEFAULT_TARGET".equals(written) || "EXTERNAL_ACCESS_INTEGRATIONS".equals(written);
+        }
+        if (unmodelled == UnmodelledDropKind.APPLICATION_PACKAGE || unmodelled == UnmodelledDropKind.APPLICATION) {
+            final String[] properties = unmodelled == UnmodelledDropKind.APPLICATION ? APPLICATION_PROPERTIES
+                : APPLICATION_PACKAGE_PROPERTIES;
+            for (final String property : properties) {
+                if (property.equals(written)) {
+                    return true;
+                }
+            }
         }
         return false;
     }

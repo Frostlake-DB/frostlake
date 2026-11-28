@@ -318,7 +318,10 @@ final class PlanExpressionText extends AstPrinterVisitor {
         final Expression operand = expr.getOperand();
         final boolean tokenCall = operand instanceof FunctionCallExpression
             && ((FunctionCallExpression) operand).getNameExpression() != null && !isLiteral(operand);
-        final String tested = isBareCall(operand) || tokenCall ? spell(operand) : operand(operand, false);
+        // A scalar call is tested as it stands, whatever its arguments: UNIFORM(1, 10, RANDOM()) IS NULL
+        // (live-verified).
+        final String tested = isBareCall(operand) || tokenCall || isScalarCall(operand) || isSequenceRead(operand)
+            ? spell(operand) : operand(operand, false);
         return tested + (expr.isNot() ? " IS NOT NULL" : " IS NULL");
     }
 
@@ -377,6 +380,14 @@ final class PlanExpressionText extends AstPrinterVisitor {
                 boundParameters.pop();
             }
         }
+        final ExternalFunctionCall external = constants == null ? null : constants.external(expr);
+        if (external != null) {
+            // The arguments are read all the same, their columns the scan's.
+            for (final Expression argument : expr.getArguments()) {
+                spell(argument);
+            }
+            return external.getText();
+        }
         final String name = expr.getFunctionName().toUpperCase(Locale.ROOT);
         final List<Expression> args = expr.getArguments();
         final boolean aggregate = isAggregate(expr);
@@ -420,7 +431,7 @@ final class PlanExpressionText extends AstPrinterVisitor {
                     if (names != null && names.get(i) != null) {
                         called.append(names.get(i)).append(" => ");
                     }
-                    called.append(spell(args.get(i)));
+                    called.append(floatParameter(name, i) ? floatArgument(args.get(i)) : spell(args.get(i)));
                 }
             }
             text = called.append(')').toString();
@@ -550,7 +561,9 @@ final class PlanExpressionText extends AstPrinterVisitor {
             texts.add(aligned(between.getValue(), ">=", between.getLower()));
             texts.add(aligned(between.getValue(), "<=", between.getUpper()));
         } else {
-            texts.add(spell(condition));
+            // A Filter's condition is written as it stands where it is itself a constant, HAVING 1 = 1 as 1 = 1
+            // (live-verified); its parts fold.
+            texts.add(condition.accept(this));
         }
         return texts;
     }
@@ -569,9 +582,24 @@ final class PlanExpressionText extends AstPrinterVisitor {
         if (listed != null) {
             return listed;
         }
-        final StringBuilder text = new StringBuilder();
+        // A conjunct folded to true and a disjunct folded to false are left out (live-verified).
+        final String neutral = operator == BinaryOperator.AND ? "TRUE" : "FALSE";
+        final List<String> texts = new ArrayList<>();
         for (final Expression operand : operands) {
-            text.append(text.length() == 0 ? "" : " " + operator.name() + " ").append('(').append(spell(operand))
+            final String spelled = spell(operand);
+            if (!neutral.equals(spelled)) {
+                texts.add(spelled);
+            }
+        }
+        if (texts.isEmpty()) {
+            return neutral;
+        }
+        if (texts.size() == 1) {
+            return texts.get(0);
+        }
+        final StringBuilder text = new StringBuilder();
+        for (final String spelled : texts) {
+            text.append(text.length() == 0 ? "" : " " + operator.name() + " ").append('(').append(spelled)
                 .append(')');
         }
         return text.toString();
@@ -654,8 +682,46 @@ final class PlanExpressionText extends AstPrinterVisitor {
         return "DATE".equals(type.getName()) || "TIME".equals(type.getName()) ? type.getName() : "TIMESTAMP";
     }
 
+    /**
+     * Whether a built-in's argument is a FLOAT parameter the account converts its argument to (live-verified):
+     * NORMAL's mean and deviation, ZIPF's exponent.
+     */
+    private static boolean floatParameter(final String function, final int position) {
+        return "NORMAL".equals(function) && position < 2 || "ZIPF".equals(function) && position == 0;
+    }
+
+    /**
+     * An argument converted to a FLOAT: a number as the FLOAT literal it becomes, {@code 1.0}, a FLOAT as it is, any
+     * other value through TO_DOUBLE.
+     */
+    private String floatArgument(final Expression argument) {
+        final String text = spell(argument);
+        if (isLiteral(argument)) {
+            try {
+                final BigDecimal value = new BigDecimal(text).stripTrailingZeros();
+                return value.scale() <= 0 ? value.setScale(1).toPlainString() : value.toPlainString();
+            } catch (final NumberFormatException notANumber) {
+                return text;
+            }
+        }
+        return isFloat(argument) ? text : "TO_DOUBLE(" + text + ")";
+    }
+
     /** The type an expression answers where the plan knows it: a column's and a conversion's; null otherwise. */
     private DataType typeOf(final Expression expression) {
+        if (expression instanceof FunctionCallExpression && ((FunctionCallExpression) expression).getFunctionName()
+                != null && ((FunctionCallExpression) expression).getNameExpression() == null) {
+            // NORMAL answers a FLOAT, and a JavaScript function the type it declares.
+            final FunctionCallExpression call = (FunctionCallExpression) expression;
+            if ("NORMAL".equalsIgnoreCase(call.getFunctionName()) && (call.getNameParts() == null
+                    || call.getNameParts().size() == 1)) {
+                return NumericType.FLOAT;
+            }
+            final ExternalFunctionCall external = constants == null ? null : constants.external(call);
+            if (external != null) {
+                return external.getReturnType();
+            }
+        }
         if (expression instanceof ColumnReferenceExpression) {
             final PlanColumn column = scope == null ? null : scope.resolve((ColumnReferenceExpression) expression);
             return column == null ? null : column.getType();
@@ -772,6 +838,15 @@ final class PlanExpressionText extends AstPrinterVisitor {
                 && floatLiteral(left) != null) {
             return floatLiteral(left) + " " + symbol + " " + term(right, false, symbol.charAt(0), left);
         }
+        // So is a number compared with a FLOAT call: (NORMAL(0.0, 1.0, 5)) > 0.0 (live-verified).
+        if (!"+".equals(symbol) && !"-".equals(symbol) && !"%".equals(symbol)
+                && left instanceof FunctionCallExpression && isFloat(left) && floatLiteral(right) != null) {
+            return term(left, false, symbol.charAt(0), right) + " " + symbol + " " + floatLiteral(right);
+        }
+        if (!"+".equals(symbol) && !"-".equals(symbol) && !"%".equals(symbol)
+                && right instanceof FunctionCallExpression && isFloat(right) && floatLiteral(left) != null) {
+            return floatLiteral(left) + " " + symbol + " " + term(right, false, symbol.charAt(0), left);
+        }
         final Integer leftScale = scaleOf(left);
         final Integer rightScale = scaleOf(right);
         final boolean known = leftScale != null && rightScale != null;
@@ -813,7 +888,7 @@ final class PlanExpressionText extends AstPrinterVisitor {
         }
         final boolean arithmetic = operator == '+' || operator == '-' || operator == '*';
         final boolean comparison = !arithmetic && operator != '%';
-        if (comparison && isBareCall(operand)) {
+        if (comparison && (isBareCall(operand) || isSequenceRead(operand))) {
             return spell(operand);
         }
         if (operand instanceof FunctionCallExpression && isAggregate((FunctionCallExpression) operand)
@@ -881,6 +956,10 @@ final class PlanExpressionText extends AstPrinterVisitor {
      * column of exact numbers with decimals counts as narrower than eight. Zero where the width is not known.
      */
     private int widthOf(final Expression expression) {
+        if (isSequenceRead(expression)) {
+            // A sequence's next value is a NUMBER(38, 0), sixteen bytes wide.
+            return 16;
+        }
         if (expression instanceof WindowFunctionExpression) {
             final String name = windowName((WindowFunctionExpression) expression);
             if ("SUM".equals(name) || "AVG".equals(name)) {
@@ -1071,6 +1150,29 @@ final class PlanExpressionText extends AstPrinterVisitor {
         final FunctionCallExpression call = (FunctionCallExpression) expression;
         return call.getNameExpression() == null && call.getFunctionName() != null && !call.isStar()
             && call.getArguments().isEmpty() && !isAggregate(call);
+    }
+
+    /**
+     * Whether an expression reads a sequence's next value that a Getnextval answers, which a comparison and an IS
+     * NULL hold without parentheses: {@code "getNextVal_S".NEXTVAL > 0} (live-verified).
+     */
+    private boolean isSequenceRead(final Expression expression) {
+        if (!(expression instanceof ColumnReferenceExpression)) {
+            return false;
+        }
+        final ColumnReferenceExpression reference = (ColumnReferenceExpression) expression;
+        return sequenceReads.contains(reference) || scope != null && reference.isQualified()
+            && "NEXTVAL".equalsIgnoreCase(reference.getColumnName()) && scope.resolve(reference) == null;
+    }
+
+    /** Whether an expression is a call of a scalar function by its name, with or without arguments. */
+    private boolean isScalarCall(final Expression expression) {
+        if (!(expression instanceof FunctionCallExpression) || folded(expression) != null) {
+            return false;
+        }
+        final FunctionCallExpression call = (FunctionCallExpression) expression;
+        return call.getNameExpression() == null && call.getFunctionName() != null && !call.isStar()
+            && !isAggregate(call);
     }
 
     private boolean isAggregate(final FunctionCallExpression call) {

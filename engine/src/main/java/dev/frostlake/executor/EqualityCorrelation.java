@@ -102,10 +102,11 @@ public final class EqualityCorrelation {
     }
 
     /**
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
      * @return the query of the inner keys, the residual's columns and the aggregates' arguments of each row the other
      *         conjuncts keep, the keys first
      */
-    public String residualAggregateRowsQuery() {
+    public String residualAggregateRowsQuery(final String heldKeys) {
         final StringBuilder items = new StringBuilder();
         for (int i = 0; i < residualItems.size(); i++) {
             items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
@@ -113,7 +114,7 @@ public final class EqualityCorrelation {
         for (int i = 0; i < aggregateArguments.size(); i++) {
             items.append(", ").append(aggregateArguments.get(i)).append(" AS \"$A").append(i).append('"');
         }
-        return "SELECT " + String.join(", ", innerKeys) + items + " FROM " + from + filter(null);
+        return "SELECT " + String.join(", ", innerKeys) + items + " FROM " + from + filter(heldKeys);
     }
 
     /** @return how many columns the aggregates' arguments take */
@@ -137,6 +138,29 @@ public final class EqualityCorrelation {
         return text.toString();
     }
 
+    /** @return the conjuncts {@link #getResidual} joins, each as it writes them */
+    public List<String> residualConjuncts() {
+        return new ArrayList<>(residual);
+    }
+
+    /**
+     * @param conjunct      one of the {@link #residualConjuncts}
+     * @param items         the residual's columns the conjunct reads, by their position
+     * @param outerRelation the stored relation the outer row is read from, spelled for a FROM clause with the name the
+     *                      conjunct reads it by
+     * @return the query answering a row where some row of the subquery's relations and some row of the outer relation
+     *         satisfy the conjunct together, whatever their keys and the subquery's other conjuncts
+     */
+    public String residualPairQuery(final String conjunct, final List<Integer> items, final String outerRelation) {
+        final StringBuilder columns = new StringBuilder();
+        for (final Integer item : items) {
+            columns.append(columns.length() == 0 ? "" : ", ").append(residualItems.get(item)).append(" AS \"$R")
+                .append(item).append('"');
+        }
+        return "SELECT 1 FROM (SELECT " + (columns.length() == 0 ? "1 AS \"$ONE\"" : columns) + " FROM " + from
+            + ") AS \"$INNER\" JOIN " + outerRelation + " ON " + conjunct + " LIMIT 1";
+    }
+
     /** @return how many columns the residual reads */
     public int residualItemCount() {
         return residualItems.size();
@@ -156,16 +180,17 @@ public final class EqualityCorrelation {
     }
 
     /**
-     * @return {@link #residualRowsQuery} over every row the other conjuncts keep, the select list's one member
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
+     * @return {@link #residualRowsQuery} over the rows the other conjuncts keep, the select list's one member
      *         ({@link #getMemberItem}) after the residual's columns as the column {@code "$MEMBER"}
      */
-    public String residualMembersQuery() {
+    public String residualMembersQuery(final String heldKeys) {
         final StringBuilder items = new StringBuilder();
         for (int i = 0; i < residualItems.size(); i++) {
             items.append(", ").append(residualItems.get(i)).append(" AS \"$R").append(i).append('"');
         }
         return "SELECT " + String.join(", ", innerKeys) + items + ", " + memberItem + " AS \"$MEMBER\" FROM " + from
-            + filter(null);
+            + filter(heldKeys);
     }
 
     /** @return the select list's one item an IN compares with, or null when the select list is anything else */
@@ -249,8 +274,21 @@ public final class EqualityCorrelation {
      *         the keys first
      */
     public String groupedQuery() {
+        return groupedQuery(null);
+    }
+
+    /**
+     * @param heldKeys a conjunct read ahead of the other conjuncts, or null for none
+     * @return {@link #groupedQuery()} over the rows the conjunct keeps as well
+     */
+    public String groupedQuery(final String heldKeys) {
         final String keys = String.join(", ", innerKeys);
-        return "SELECT " + keys + ", " + aggregateItem + " FROM " + from + filter(null) + " GROUP BY " + keys;
+        return "SELECT " + keys + ", " + aggregateItem + " FROM " + from + filter(heldKeys) + " GROUP BY " + keys;
+    }
+
+    /** @return the query counting the rows the subquery's other conjuncts keep */
+    public String countQuery() {
+        return "SELECT COUNT(*) FROM " + from + filter(null);
     }
 
     /** The WHERE of the other conjuncts, a conjunct read ahead of them first where one is given. */

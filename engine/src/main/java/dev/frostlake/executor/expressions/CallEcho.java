@@ -45,10 +45,10 @@ public interface CallEcho {
     }
 
     /**
-     * A cast's or an operation's text where the echo folds it to the constant it computes, or null to print it as
+     * A cast's, an operation's or a CASE's text where the echo folds it to what it computes, or null to print it as
      * parsed.
      *
-     * @param expression the cast or the operation
+     * @param expression the cast, the operation or the CASE
      * @param printer    the printer
      * @return the text, or null
      */

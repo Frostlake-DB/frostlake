@@ -66,6 +66,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.Token;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -189,7 +190,7 @@ final class InsertExecutor {
                     final List<DataType> types = new ArrayList<>();
                     for (final FrostlakeParser.BooleanExprContext expr : tuple.valueList().booleanExpr()) {
                         final String exprText = executor.getOriginalText(expr);
-                        rejectSemiStructuredValueExpression(exprText, evaluator);
+                        rejectSemiStructuredValueExpression(exprText, evaluator, expr.getStart());
                         final Expression parsed = parsedValueOrNull(exprText);
                         cells.add(parsed);
                         types.add(valueStaticType(parsed, evaluator));
@@ -777,7 +778,8 @@ final class InsertExecutor {
      * {@code Invalid expression [...] in VALUES clause}); INSERT ... SELECT is the supported route.
      * The check is on the expression AST's top-level shape.
      */
-    private void rejectSemiStructuredValueExpression(final String exprText, final ExpressionEvaluator evaluator) {
+    private void rejectSemiStructuredValueExpression(final String exprText, final ExpressionEvaluator evaluator,
+                                                     final Token start) {
         final Expression ast;
         try {
             ast = ExpressionEvaluator.parse(exprText);
@@ -834,6 +836,11 @@ final class InsertExecutor {
         // semi-structured part anywhere in it, ARRAY_SIZE([1]) (see ValuesSemiStructuredParts).
         semiStructured = semiStructured || ValuesRefusedFunctions.holdsOne(ast)
             || ValuesSemiStructuredParts.holdsOne(ast, evaluator, executor.getFunctionRegistry());
+        if (semiStructured && ValuesRefusedFunctions.holdsOne(ast)) {
+            // A refused call's argument types are judged first: VALUES (DECRYPT('a', 'key')) is refused for its
+            // VARCHAR ciphertext (live-verified).
+            ValuesRefusedFunctions.judgeArgumentTypes(evaluator, ast, start);
+        }
         if (semiStructured) {
             // The item is echoed as the statement compiled it: [1, 2] as ARRAY_CONSTRUCT(1, 2), a :: as a CAST to the
             // type spelled in full, an element appended to a structured ARRAY converted to its type (live-verified).

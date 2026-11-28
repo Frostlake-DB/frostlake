@@ -21,6 +21,7 @@ import dev.frostlake.executor.expressions.ColumnReferenceExpression;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
@@ -42,6 +43,8 @@ final class PlanScope {
 
     /** The names the plan gives the select list's sequence reads, by sequence, in the order they are read. */
     private final Map<String, Deque<String>> sequenceReads = new HashMap<>();
+    /** Whether the relations read no row, a condition being false, so that each column is read as null. */
+    private boolean nulled;
 
     /**
      * @param outer the scope of the enclosing SELECT, or null
@@ -126,7 +129,47 @@ final class PlanScope {
      * @param reference the reference
      * @return the column
      */
+    /** Reads each column of the relations as null: a condition the plan folds to false leaves them no row. */
+    void nullColumns() {
+        nulled = true;
+    }
+
+    /** Reads the columns as they stand again, once the select's own expressions are written. */
+    void readColumns() {
+        nulled = false;
+    }
+
+    boolean isNulled() {
+        return nulled;
+    }
+
     PlanColumn resolve(final ColumnReferenceExpression reference) {
+        final PlanColumn column = resolved(reference);
+        if (!nulled || column == null || reference.isQualified() && item(qualifierOf(reference)) == null
+                || !reference.isQualified() && !ownsColumn(reference.getColumnName())) {
+            return column;
+        }
+        return new PlanColumn(column.getName(), "null", column.getType(), Collections.<PlanRead>emptyList(),
+            Collections.<String>emptyList(), true);
+    }
+
+    private static String qualifierOf(final ColumnReferenceExpression reference) {
+        final String qualifier = reference.getTableName();
+        final int dot = qualifier.lastIndexOf('.');
+        return dot < 0 ? qualifier : qualifier.substring(dot + 1);
+    }
+
+    /** Whether a relation of this scope answers a column of the name. */
+    private boolean ownsColumn(final String name) {
+        for (final PlanFromItem item : items) {
+            if (item.column(name) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private PlanColumn resolved(final ColumnReferenceExpression reference) {
         final String name = reference.getColumnName();
         if (name == null) {
             return null;

@@ -1285,25 +1285,34 @@ import java.util.List;
      * (live-verified): a DATASET sets and unsets no property, refused at the name, and is renamed by no RENAME; a
      * SNAPSHOT unsets nothing and is renamed by no RENAME, refused at the word; a DBT PROJECT, a CONNECTION and a
      * SNAPSHOT take no tag, TAG being read as a property's name, refused at the name after it; ADD and DROP lead
-     * nothing a class's instance or these kinds read here, refused at what follows them, or at the word itself for a
-     * CONNECTION and a SNAPSHOT.
+     * nothing a class's instance or these kinds read here but a DATASET's VERSION, refused at what follows them, or at
+     * the word itself for a CONNECTION and a SNAPSHOT; an APPLICATION PACKAGE written with IF EXISTS sets and unsets
+     * its tags alone, any other property refused at its name.
      */
     private void refuseUnmodelledAction(final ParserRuleContext action) {
         final UnmodelledCommentKindContext kind = ((AlterStatementContext) action.getParent()).unmodelledCommentKind();
         final Token model = kind == null ? null : kind.model;
         final boolean dataset = UnmodelledKindWords.is(model, "DATASET");
+        final boolean guarded = kind != null && kind.PACKAGE() != null
+            && ((AlterStatementContext) action.getParent()).if_exists() != null;
         final boolean snapshot = UnmodelledKindWords.is(model, "SNAPSHOT");
         final boolean untagged = snapshot || UnmodelledKindWords.is(model, "CONNECTION") || kind != null
             && kind.DBT() != null;
         final int first = _input.LA(1);
         final boolean tags = _input.LA(2) == TAG;
         Token at = null;
-        if ((first == SET || first == UNSET) && tags) {
+        if (guarded && (first == SET || first == UNSET) && !tags) {
+            at = _input.LT(2);
+        } else if ((first == SET || first == UNSET) && tags) {
             at = snapshot && first == UNSET ? _input.LT(1) : untagged ? _input.LT(3) : null;
         } else if (first == SET || first == UNSET) {
             at = dataset ? _input.LT(2) : snapshot && first == UNSET ? _input.LT(1) : null;
         } else if (first == RENAME) {
             at = dataset || snapshot ? _input.LT(1) : null;
+        } else if ((first == ADD || first == DROP) && dataset && _input.LA(2) == VERSION) {
+            // A version is named by a string, and refused at anything else written in its place.
+            final int named = _input.LA(3);
+            at = named == STRING_LITERAL || named == DOLLAR_QUOTED_STRING ? null : _input.LT(3);
         } else if (first == ADD || first == DROP) {
             at = snapshot || UnmodelledKindWords.is(model, "CONNECTION") ? _input.LT(1) : _input.LT(2);
         }
@@ -3196,6 +3205,7 @@ unmodelledCommentKind
     | GIT REPOSITORY
     | SEMANTIC VIEW
     | DBT project=IDENTIFIER {refuseKindWord($ctx, $project, "PROJECT");}
+    | APPLICATION PACKAGE?
     ;
 
 // What an ALTER of an unmodelled kind or of a class's instance does: properties set or unset, tags set or unset, a
@@ -3209,12 +3219,22 @@ unmodelledAlterAction
       | SET unmodelledProperty (COMMA? unmodelledProperty)* {refuseListedTag($ctx);}
       | UNSET unmodelledPropertyName (COMMA unmodelledPropertyName)*
       | RENAME TO objectName
+      // A dataset's versions: a version's query, one partitioning expression and the version's properties.
+      | ADD VERSION stringText FROM LPAREN selectStatement RPAREN (PARTITION BY expression)?
+          (datasetVersionProperty (COMMA? datasetVersionProperty)*)?
+      | DROP VERSION stringText
       | (ADD | DROP)
       )
     ;
 
 unmodelledProperty
     : unmodelledPropertyName EQ unmodelledPropertyValue
+    ;
+
+// A dataset version's property: any word after the query is read as a property's name, and the token after it is
+// refused when it is no '=' (live-verified).
+datasetVersionProperty
+    : unmodelledPropertyName (EQ unmodelledPropertyValue | {refuseHolderTail($ctx);})
     ;
 
 unmodelledPropertyName

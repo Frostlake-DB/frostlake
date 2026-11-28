@@ -68,6 +68,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Subquery / correlated-subquery evaluation extracted from {@link ExpressionEvaluatorVisitor}: EXISTS,
@@ -90,6 +91,8 @@ final class SubqueryEvaluator {
     private Map<String, TableColumn> carriers;
     /** The subqueries whose correlation this evaluator has judged supported, keyed by use and text. */
     private final Set<String> judgedCorrelations = new HashSet<>();
+    /** Whether each membership query judged so far joins a lateral query, by its text. */
+    private final Map<String, Boolean> lateralJoins = new HashMap<>();
     /** Each EXISTS met, by its copy's key, as it is run (see {@link #countedBody}). */
     private final Map<String, SubqueryExpression> countedBodies = new HashMap<>();
     /** The subqueries left unread in each EXISTS body's select items, by the EXISTS's key. */
@@ -121,6 +124,17 @@ final class SubqueryEvaluator {
     /** Whether the quantified comparison being judged is an ALL whose operator is no inequality. */
     private boolean orderedUniversal;
 
+    /** Each residual copy's reach (see {@link #residualReach}), by its residual key, judged once. */
+    private final Map<String, String> reaches = new HashMap<>();
+    /** Whether a residual copy's residual holds for no pair of rows (see {@link #residualNeverHolds}), judged once. */
+    private final Map<String, Boolean> neverHeld = new HashMap<>();
+    /** The residual copies whose IN members have been computed for their faults. */
+    private final Set<String> membersRaised = new HashSet<>();
+    /** What a residual key is followed by in the key its IN members are computed under. */
+    private static final String MEMBERS = "\u0000members";
+
+    /** What the name of each column a residual reads begins with (see {@link EqualityCorrelation#getResidual}). */
+    private static final String RESIDUAL_COLUMN = "$R";
     /** What a copy's memo key is followed by in the keys of its residual's analysis and rows. */
     private static final String RESIDUAL = "\u0000residual";
     /** The name of the relation a residual is evaluated over. */
@@ -480,13 +494,16 @@ final class SubqueryEvaluator {
             equalityCorrelations.put(key, correlation);
         }
         final boolean negated = expr.isNegatedExistence();
-        final String rowsQuery = correlation.residualRowsQuery(negated ? heldKeysConjunct(correlation, key)
-            : transferredKeyFilter(expr, correlation, key));
+        final String reach = negated && OuterFilters.current() != null ? null
+            : reachOf(correlation, key, expr, false);
+        final String rowsQuery = reach != null ? correlation.residualRowsQuery(reach.isEmpty() ? null : reach)
+            : correlation.residualRowsQuery(negated ? heldKeysConjunct(correlation, key)
+                : transferredKeyFilter(expr, correlation, key));
         PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
         if (rows == null) {
             final int keys = correlation.keyCount();
             final ResultSet computed = computedOnce(key, rowsQuery, keys + correlation.residualItemCount(), keys,
-                !negated);
+                reach != null || !negated);
             if (computed == null || residualColumnsCollate(computed, keys)) {
                 perRowOnly.add(key);
                 return null;
@@ -556,6 +573,284 @@ final class SubqueryEvaluator {
             }
         }
         return filters.isEmpty() ? null : String.join(" AND ", filters);
+    }
+
+    /** Which rows a residual correlation's columns are computed over: every row the other conjuncts keep. */
+    private static final String EVERY_ROW = "";
+
+    /**
+     * The inner rows a residual correlation's columns and its aggregates' arguments are computed over, a fault met
+     * there refusing the statement (live-verified), as a conjunct over the inner rows: {@link #EVERY_ROW} for every
+     * row the other conjuncts keep, or null where the copy runs for each outer row instead.
+     *
+     * <p>A filter of the query's on the outer key column by constants, beside the subquery in its WHERE or in the
+     * WHERE of the query whose select item holds it, bounds the inner key the same way. A NOT IN beside in the WHERE
+     * reads the rows of the keys the outer table holds. Otherwise the rows follow the two relations' sizes: an outer
+     * table of fewer rows than the inner relation keeps the inner rows to the keys it holds, and one of more rows
+     * reads every inner row; for equal sizes an aggregate and an EXISTS in the WHERE read every row, any other
+     * subquery the rows of the held keys. A select item of a query whose WHERE does not filter the key, and an outer
+     * key read through a derived relation, run for each row. An IN's members, read where no residual stands beside
+     * the equalities, are never bounded by the WHERE of the query whose select item holds the IN: they follow the
+     * sizes.
+     *
+     * @param aggregate whether the subquery is a scalar aggregate
+     * @param members   whether the rows are an IN's members under equalities alone
+     */
+    private String residualReach(final EqualityCorrelation correlation, final String key,
+                                 final SubqueryExpression expr, final boolean aggregate, final boolean members) {
+        final Expression where = OuterFilters.current();
+        if (where != null) {
+            final List<Expression> conjuncts = new ArrayList<>();
+            filterConjuncts(where, conjuncts);
+            final Expression beside = conjunctHolding(conjuncts, expr);
+            if (beside instanceof InExpression && ((InExpression) beside).isNot()) {
+                return heldKeysConjunct(correlation, key);
+            }
+            if (beside != null) {
+                final String transferred = keyFilters(conjuncts, correlation, key);
+                if (transferred != null) {
+                    return transferred;
+                }
+            }
+            return bySize(correlation, key, !aggregate && !(beside instanceof UnaryOperationExpression));
+        }
+        final List<Expression> selected = OuterFilters.selectList();
+        if (selected == null) {
+            return null;
+        }
+        if (selected.get(0) != null && !members) {
+            final List<Expression> conjuncts = new ArrayList<>();
+            filterConjuncts(selected.get(0), conjuncts);
+            return keyFilters(conjuncts, correlation, key);
+        }
+        return bySize(correlation, key, !aggregate);
+    }
+
+    /**
+     * The WHERE conjunct holding a subquery itself: its EXISTS, its IN, or a comparison with it; null where none
+     * does.
+     */
+    private static Expression conjunctHolding(final List<Expression> conjuncts, final SubqueryExpression expr) {
+        for (final Expression conjunct : conjuncts) {
+            if (conjunct instanceof UnaryOperationExpression
+                    && ((UnaryOperationExpression) conjunct).getOperator() == UnaryOperator.EXISTS
+                    && ((UnaryOperationExpression) conjunct).getOperand() == expr
+                    || conjunct instanceof InExpression && ((InExpression) conjunct).getSubquery() == expr
+                    || conjunct instanceof BinaryOperationExpression
+                    && comparisonSymbol(((BinaryOperationExpression) conjunct).getOperator()) != null
+                    && (((BinaryOperationExpression) conjunct).getLeft() == expr
+                        || ((BinaryOperationExpression) conjunct).getRight() == expr)) {
+                return conjunct;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The conjuncts filtering an equality correlation's one outer key column by constants, written over the inner
+     * key and joined by AND; null where the correlation has more than one key, its outer key is no column, or no
+     * conjunct filters it.
+     */
+    private String keyFilters(final List<Expression> conjuncts, final EqualityCorrelation correlation,
+                              final String key) {
+        final List<Expression> outer = outerKeys.get(key);
+        if (correlation.keyCount() != 1 || outer == null || outer.size() != 1
+                || !(outer.get(0) instanceof ColumnReferenceExpression)) {
+            return null;
+        }
+        final ColumnReferenceExpression column = (ColumnReferenceExpression) outer.get(0);
+        final String inner = "(" + correlation.getInnerKeys().get(0) + ")";
+        final List<String> filters = new ArrayList<>();
+        for (final Expression conjunct : conjuncts) {
+            final String filter = keyFilterOf(conjunct, column, inner);
+            if (filter != null) {
+                filters.add(filter);
+            }
+        }
+        return filters.isEmpty() ? null : String.join(" AND ", filters);
+    }
+
+    /**
+     * The inner rows by the two relations' sizes (see {@link #residualReach}): the rows of the keys the outer table
+     * holds where it has fewer rows than the inner relation keeps, or as many and {@code tieHeld} is set; every row
+     * otherwise; null where the outer key is not a column of a stored table read directly, or a size is not read.
+     */
+    private String bySize(final EqualityCorrelation correlation, final String key, final boolean tieHeld) {
+        final String[] held = heldKeyColumn(correlation, key);
+        if (held == null || !readsStoredTable(key)) {
+            return null;
+        }
+        final long outer = countOf("SELECT COUNT(*) FROM " + held[0]);
+        final long inner = countOf(correlation.countQuery());
+        if (outer < 0 || inner < 0) {
+            return null;
+        }
+        return outer < inner || outer == inner && tieHeld ? heldKeysConjunct(correlation, key) : EVERY_ROW;
+    }
+
+    /**
+     * Whether a copy's one outer key is traced to a stored table of one row, whose IN reads only the inner rows of
+     * that row's key (live-verified).
+     */
+    private boolean readsOneRowTable(final EqualityCorrelation correlation, final String key) {
+        final String[] held = heldKeyColumn(correlation, key);
+        return held != null && countOf("SELECT COUNT(*) FROM " + held[0]) == 1;
+    }
+
+    /**
+     * Whether a copy's one outer key is a column of a stored table the outer query reads directly and alone: a join
+     * changes the outer rows the sizes are weighed by.
+     */
+    private boolean readsStoredTable(final String key) {
+        final ColumnReferenceExpression reference = (ColumnReferenceExpression) outerKeys.get(key).get(0);
+        final List<Table> relations = visitor.getMultiTableAllTables();
+        if (relations != null && relations.size() > 1) {
+            return false;
+        }
+        try {
+            final Table owner = scopeRelationCarrying(reference.getTableName(), reference.getColumnName());
+            return owner != null && owner.residentSource() != null;
+        } catch (final RuntimeException untraced) {
+            return false;
+        }
+    }
+
+    /** The one count a query answers, or -1 where it does not run or answers anything else. */
+    private long countOf(final String query) {
+        try {
+            final List<ResultSet> results = executeSubquery(query);
+            if (results.isEmpty() || results.get(0) == null || results.get(0).getRows().size() != 1) {
+                return -1;
+            }
+            final Object count = results.get(0).getRows().get(0).getValue(0);
+            return count instanceof Number ? ((Number) count).longValue() : -1;
+        } catch (final RuntimeException failed) {
+            return -1;
+        }
+    }
+
+    /**
+     * A residual correlation's rows computed once over the inner rows its reach keeps, each select item's row fault
+     * held in its cell: a fault in a column from {@code raisedFrom} to before {@code raisedTo} is raised, one in a key
+     * has the copy run for each row (null), and one in a later column waits in its cell until it is read.
+     */
+    private ResultSet computedReached(final String key, final String query, final int width, final int keys,
+                                      final int raisedFrom, final int raisedTo) {
+        final boolean outerBody = RelationBody.begin();
+        final ResultSet computed;
+        try {
+            computed = computedOnce(key, query, width, keys);
+        } finally {
+            RelationBody.end(outerBody);
+        }
+        if (computed == null) {
+            return null;
+        }
+        for (final Row row : computed.getRows()) {
+            for (int i = 0; i < keys; i++) {
+                if (row.getValue(i) instanceof DeferredFault) {
+                    perRowOnly.add(key);
+                    return null;
+                }
+            }
+        }
+        try {
+            for (final Row row : computed.getRows()) {
+                for (int i = raisedFrom; i < raisedTo; i++) {
+                    DeferredFault.read(row.getValue(i));
+                }
+            }
+        } catch (final RuntimeException fault) {
+            if (!residualNeverHolds(key)) {
+                throw fault;
+            }
+            perRowOnly.add(key);
+            return null;
+        }
+        return computed;
+    }
+
+    /**
+     * Whether some conjunct of a residual copy's residual holds for no row of the subquery's relations beside any row
+     * of the outer table, whatever their keys: the account then reads no inner row for the subquery, and meets no
+     * fault in its columns (live-verified). False where it is not settled: the copy has no residual, its outer key is
+     * not traced to a stored table, or no conjunct's pairs are read cleanly.
+     *
+     * @param key the copy's residual key, or that key followed by {@link #MEMBERS}
+     */
+    private boolean residualNeverHolds(final String key) {
+        final String copy = key.endsWith(MEMBERS) ? key.substring(0, key.length() - MEMBERS.length()) : key;
+        Boolean judged = neverHeld.get(copy);
+        if (judged == null) {
+            judged = residualPairsMissing(copy);
+            neverHeld.put(copy, judged);
+        }
+        return judged;
+    }
+
+    /** {@link #residualNeverHolds}, judged. */
+    private boolean residualPairsMissing(final String key) {
+        final EqualityCorrelation correlation = equalityCorrelations.get(key);
+        if (correlation == null || correlation.getResidual() == null) {
+            return false;
+        }
+        final String[] held = heldKeyColumn(correlation, key);
+        if (held == null) {
+            return false;
+        }
+        final String alias = ((ColumnReferenceExpression) outerKeys.get(key).get(0)).getTableName();
+        final String outerRelation = alias == null ? held[0]
+            : held[0] + " AS " + SqlIdentifiers.spellCanonicalEscaped(alias);
+        for (final String conjunct : correlation.residualConjuncts()) {
+            try {
+                final ColumnReferenceCollectWalk names = new ColumnReferenceCollectWalk();
+                ExpressionEvaluator.parse(conjunct).accept(names);
+                final Set<Integer> items = new TreeSet<>();
+                for (final ColumnReferenceExpression name : names.references()) {
+                    if (!name.isQualified() && name.getColumnName().startsWith(RESIDUAL_COLUMN)) {
+                        items.add(Integer.valueOf(name.getColumnName().substring(RESIDUAL_COLUMN.length())));
+                    }
+                }
+                final List<ResultSet> pairs = executeSubquery(correlation.residualPairQuery(conjunct,
+                    new ArrayList<>(items), outerRelation));
+                if (!pairs.isEmpty() && pairs.get(0) != null && pairs.get(0).getRows().isEmpty()) {
+                    return true;
+                }
+            } catch (final RuntimeException unread) {
+                // A conjunct whose pairs are not read cleanly settles nothing.
+            }
+        }
+        return false;
+    }
+
+    /** {@link #residualReach}, judged once for a copy. */
+    private String reachOf(final EqualityCorrelation correlation, final String key, final SubqueryExpression expr,
+                           final boolean aggregate) {
+        return reachOf(correlation, key, expr, aggregate, false);
+    }
+
+    /** As above, for an IN's members under equalities alone where {@code members} is set. */
+    private String reachOf(final EqualityCorrelation correlation, final String key, final SubqueryExpression expr,
+                           final boolean aggregate, final boolean members) {
+        if (!reaches.containsKey(key)) {
+            reaches.put(key, residualReach(correlation, key, expr, aggregate, members));
+        }
+        return reaches.get(key);
+    }
+
+    /**
+     * The filters on a subquery's outer key column by constants beside it in the WHERE being evaluated, written over
+     * the inner key (see {@link #keyFilters}); null where it is no conjunct of such a WHERE or none filters the key.
+     */
+    private String besideKeyFilter(final SubqueryExpression expr, final EqualityCorrelation correlation,
+                                   final String key) {
+        final Expression where = OuterFilters.current();
+        if (where == null) {
+            return null;
+        }
+        final List<Expression> conjuncts = new ArrayList<>();
+        filterConjuncts(where, conjuncts);
+        return conjunctHolding(conjuncts, expr) == null ? null : keyFilters(conjuncts, correlation, key);
     }
 
     /** The conjuncts of a condition, through AND. */
@@ -751,11 +1046,14 @@ final class SubqueryEvaluator {
             perRowOnly.add(key);
             return null;
         }
-        final String groupedQuery = correlation.groupedQuery();
+        // Computed over the inner rows the relations' sizes and the outer key's filters reach (see residualReach),
+        // a fault there refusing the statement; elsewhere a row's fault runs the subquery per outer row instead.
+        final String reach = reachOf(correlation, key, expr, true);
+        final String groupedQuery = correlation.groupedQuery(reach == null || reach.isEmpty() ? null : reach);
         PreparedKeyedValues values = memo.cachedKeyedValues(groupedQuery);
         if (values == null) {
             final ResultSet computed = computedOnce(key, groupedQuery, correlation.keyCount() + 1,
-                correlation.keyCount());
+                correlation.keyCount(), reach != null);
             if (computed == null) {
                 return null;
             }
@@ -861,7 +1159,7 @@ final class SubqueryEvaluator {
             results = executeSubquery(query);
         } catch (final RuntimeException failed) {
             if (raisesRowFaults && (failed.getClass() == RuntimeException.class || DeferredFault.isHeld(failed))
-                    && DmlWriteTarget.isRowTimeFailure(failed)) {
+                    && DmlWriteTarget.isRowTimeFailure(failed) && !residualNeverHolds(key)) {
                 throw failed;
             }
             perRowOnly.add(key);
@@ -982,14 +1280,24 @@ final class SubqueryEvaluator {
 
     /**
      * The conjunct keeping an equality correlation's inner rows to the keys its outer relation's table holds, or null
-     * where the key is not traced. Live computes an IN's members over the inner rows whose key some row of the outer
-     * TABLE holds, before the outer query's filters and those of a derived table over it, and over no row of another
-     * key: a member's fault in a row of a held key refuses the statement, whichever outer rows the query keeps, and one
-     * in a row of a key the table does not hold is never met (live-verified). A key traced is one stored column of the
+     * where the key is not traced. Where live reads an IN's members by the keys the outer TABLE holds (see
+     * {@link #residualReach}), it does so before the outer query's filters and those of a derived table over it: a
+     * member's fault in a row of a held key refuses the statement, whichever outer rows the query keeps, and one in a
+     * row of a key the table does not hold is never met (live-verified). A key traced is one stored column of the
      * outer row, read directly or passed through a derived relation; any other key leaves every inner row. A table a
      * row access policy guards, and a key column a masking or a projection policy reads, are not read for it.
      */
     private String heldKeysConjunct(final EqualityCorrelation correlation, final String key) {
+        final String[] held = heldKeyColumn(correlation, key);
+        return held == null ? null
+            : "(" + correlation.getInnerKeys().get(0) + ") IN (SELECT " + held[1] + " FROM " + held[0] + ")";
+    }
+
+    /**
+     * The stored table and column an equality correlation's one outer key is traced to (see
+     * {@link #heldKeysConjunct}), each spelled for a query, or null where the key is not traced.
+     */
+    private String[] heldKeyColumn(final EqualityCorrelation correlation, final String key) {
         final List<Expression> outer = outerKeys.get(key);
         if (correlation.keyCount() != 1 || outer == null || outer.size() != 1
                 || !(outer.get(0) instanceof ColumnReferenceExpression)) {
@@ -1020,9 +1328,8 @@ final class SubqueryEvaluator {
             if (keyColumn.hasMaskingPolicy() || keyColumn.hasProjectionPolicy()) {
                 return null;
             }
-            return "(" + correlation.getInnerKeys().get(0) + ") IN (SELECT "
-                + SqlIdentifiers.spellCanonical(keyColumn.getName()) + " FROM "
-                + SqlIdentifiers.spellAlreadyCanonicalPath(table) + ")";
+            return new String[] {SqlIdentifiers.spellAlreadyCanonicalPath(table),
+                SqlIdentifiers.spellCanonical(keyColumn.getName())};
         } catch (final RuntimeException untraced) {
             return null;
         }
@@ -1137,7 +1444,7 @@ final class SubqueryEvaluator {
         // correlationSettledAway).
         final boolean correlated = subqueryMemo != null && subqueryMemo.isCorrelated(subquery);
         final boolean settledAway = correlated && correlationSettledAway(expr);
-        final boolean twoValued = !not && correlated && !settledAway;
+        final boolean twoValued = !not && (correlated && !settledAway || joinsLateralQuery(expr));
         final boolean nullsPassed = not && settledAway;
         // A NULL probe that reads no column is folded with its membership, which is UNKNOWN whatever the set
         // holds: NULL IN (…) over an empty set and over a query reading the row around it (live-verified).
@@ -1230,7 +1537,9 @@ final class SubqueryEvaluator {
         if (!correlation.answersARowPerKeptRow() || correlation.getMemberItem() == null) {
             return NOT_KEYED;
         }
-        final String membersQuery = correlation.membersQuery(heldKeysConjunct(correlation, key));
+        final String reach = reachOf(correlation, key, expr, false, true);
+        final String membersQuery = correlation.membersQuery(reach == null ? heldKeysConjunct(correlation, key)
+            : reach.isEmpty() ? null : reach);
         PreparedKeyedMembers members = memo.cachedKeyedMembers(membersQuery);
         if (members == null) {
             final ResultSet computed = computedOnce(key, membersQuery, correlation.keyCount() + 1,
@@ -1294,9 +1603,9 @@ final class SubqueryEvaluator {
      * than with the whole inner relation. {@link #NOT_KEYED} where it cannot be settled that way, and the subquery
      * runs.
      *
-     * <p>The rows are computed over every inner row the subquery's other conjuncts keep. Which of those rows the
-     * account computes a fault over depends on the outer query's filters and on the membership's negation, so where
-     * the computation meets a fault the copy runs for each row instead, which raises what those rows raise.
+     * <p>The rows are computed over the inner rows {@link #residualReach} names, a fault in a residual's column there
+     * refusing the statement; a positive IN's members are computed over every inner row first (live-verified), and
+     * a NOT IN's member is read only for a row whose residual holds.
      */
     private Object residualMembership(final Object value, final SubqueryExpression expr, final boolean not,
                                       final ExpressionCollation subjectCollation, final Expression subject,
@@ -1315,13 +1624,25 @@ final class SubqueryEvaluator {
             }
             equalityCorrelations.put(key, correlation);
         }
-        final String rowsQuery = correlation.residualMembersQuery();
         final int keys = correlation.keyCount();
+        if (!not && membersRaised.add(key) && !readsOneRowTable(correlation, key)) {
+            // An IN's members are computed over every inner row the other conjuncts keep, bounded only by a filter
+            // on the key beside it in the WHERE, a fault there refusing the statement (live-verified).
+            computedOnce(key + MEMBERS, correlation.membersQuery(besideKeyFilter(expr, correlation, key)), keys + 1,
+                keys, true);
+        }
+        final String reach = reachOf(correlation, key, expr, false);
+        if (reach == null) {
+            return runsPerRow(key, memo);
+        }
+        final String rowsQuery = correlation.residualMembersQuery(reach.isEmpty() ? null : reach);
         final int memberColumn = correlation.residualItemCount();
         PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
         if (rows == null) {
-            final ResultSet computed = computedOnce(key, rowsQuery, keys + memberColumn + 1, keys);
-            if (computed == null || residualColumnsCollate(computed, keys) || holdsAFault(computed.getRows())) {
+            // A NOT IN's member is computed only for the rows of the outer row's keys whose residual holds.
+            final ResultSet computed = computedReached(key, rowsQuery, keys + memberColumn + 1, keys, keys,
+                keys + memberColumn + (not ? 0 : 1));
+            if (computed == null || residualColumnsCollate(computed, keys)) {
                 return runsPerRow(key, memo);
             }
             memo.recordComputedOnceVerdict(key, true);
@@ -1344,7 +1665,7 @@ final class SubqueryEvaluator {
                 final Expression residual = residuals.get(key);
                 for (final Row row : group) {
                     if (SqlTruth.isTrue(evaluator.evaluate(residual, row))) {
-                        held.add(row.getValue(memberColumn));
+                        held.add(DeferredFault.read(row.getValue(memberColumn)));
                     }
                 }
             }
@@ -1432,8 +1753,8 @@ final class SubqueryEvaluator {
      * relation. {@link #NOT_KEYED} where it cannot be settled that way, and the subquery runs.
      *
      * <p>The first outer row runs the subquery, whose answer tells whether its value is one the plan folds (see
-     * {@link #scalarSubqueryValue}); and where computing the rows meets a fault the copy runs for each row, which raises
-     * what those rows raise.
+     * {@link #scalarSubqueryValue}); the rows are computed over the inner rows {@link #residualReach} names, a fault
+     * there refusing the statement.
      */
     private Object residualAggregate(final SubqueryExpression expr) {
         final SubqueryMemo memo = visitor.getSubqueryMemo();
@@ -1454,14 +1775,17 @@ final class SubqueryEvaluator {
             residualAggregates.put(key, aggregate);
             equalityCorrelations.put(key, correlation);
         }
-        final String rowsQuery = correlation.residualAggregateRowsQuery();
+        final String reach = reachOf(correlation, key, expr, true);
+        if (reach == null) {
+            return runsPerRow(key, memo);
+        }
+        final String rowsQuery = correlation.residualAggregateRowsQuery(reach.isEmpty() ? null : reach);
         final int keys = correlation.keyCount();
         PreparedKeyedRows rows = memo.cachedKeyedRows(rowsQuery);
         if (rows == null) {
-            final ResultSet computed = computedOnce(key, rowsQuery,
-                keys + correlation.residualItemCount() + correlation.aggregateArgumentCount(), keys);
-            if (computed == null || residualColumnsCollate(computed, keys) || holdsAFault(computed.getRows())
-                    || readsADecfloat(computed, keys)) {
+            final int width = keys + correlation.residualItemCount() + correlation.aggregateArgumentCount();
+            final ResultSet computed = computedReached(key, rowsQuery, width, keys, keys, width);
+            if (computed == null || residualColumnsCollate(computed, keys) || readsADecfloat(computed, keys)) {
                 return runsPerRow(key, memo);
             }
             memo.recordComputedOnceVerdict(key, true);
@@ -1555,18 +1879,6 @@ final class SubqueryEvaluator {
         return false;
     }
 
-        /** Whether a computed row holds a fault waiting in its cell. */
-    private static boolean holdsAFault(final List<Row> computed) {
-        for (final Row row : computed) {
-            for (final Object cell : row.getValues()) {
-                if (cell instanceof DeferredFault) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     /** The collation a query's one column carries, as a comparison with it would read it. */
     static ExpressionCollation columnCollation(final ResultSet resultSet) {
         return columnCollation(resultSet, 0);
@@ -1645,23 +1957,45 @@ final class SubqueryEvaluator {
     }
 
     /**
+     * Whether a membership's query joins a lateral query somewhere in it (see
+     * {@link CorrelatedSubqueryRule#joinsLateralQueryAnywhere}), judged once for each query text.
+     */
+    private boolean joinsLateralQuery(final SubqueryExpression expr) {
+        Boolean joins = lateralJoins.get(expr.getSubquery());
+        if (joins == null) {
+            final QueryExecutor queryExecutor = visitor.getQueryExecutor();
+            final FrostlakeParser.SelectStatementContext parsed = queryExecutor.subqueryStatement(expr.getSubquery());
+            joins = Boolean.valueOf(parsed != null
+                && new CorrelatedSubqueryRule(queryExecutor, new HashSet<String>()).joinsLateralQueryAnywhere(parsed));
+            lateralJoins.put(expr.getSubquery(), joins);
+        }
+        return joins.booleanValue();
+    }
+
+    /**
      * Whether a one-value quantified query, or a NOT IN's, cannot answer NULL, which makes a NULL subject FALSE
      * where no row it answers is NULL (live-verified): by its projection — a NOT NULL column, an expression over one
      * that no NULL reaches as {@code COALESCE(k, 0)}, a VALUES column no row of which is NULL — or, for a query that
      * reads nothing of the outer row once the conditions the statistics settle are folded, by the statistics of the
      * tables it reads: a column whose rows hold no NULL, though declared nullable, and a number computed from such
      * columns. A NULL its WHERE or an inner join leaves out still counts, one a DELETE or an UPDATE removed does not.
-     * A column of one value, {@code SELECT 5 FROM t}, is compared as that value alone.
+     * A column of one value, {@code SELECT 5 FROM t} or a column of a VALUES clause of one row,
+     * is compared as that value alone.
      *
      * @param expr     the query
      * @param answered the rows it answered
      * @return whether it cannot answer NULL
      */
     boolean answersNoNull(final SubqueryExpression expr, final ResultSet answered) {
-        if (answered.getColumns().isEmpty()) {
+        // A query a table function feeds the outer row is computed for that row, and a NULL beside its rows is
+        // UNKNOWN as beside any list of values (live-verified).
+        if (answered.getColumns().isEmpty() || PlannedCorrelations.fed(expr.getSubquery())) {
             return false;
         }
         final ResultSetColumn own = answered.getColumns().get(0);
+        if (visitor.getQueryExecutor().readsOneValuesRow(expr.getSubquery())) {
+            return false;   // a VALUES clause of one row: its column is one value
+        }
         if (columnAnswersNoNull(own, answered.getRowCount())) {
             return true;
         }
@@ -2042,6 +2376,10 @@ final class SubqueryEvaluator {
             }
         }
         OuterNameBindings.recordColumns(names, columns);
+        // Named by their FROM aliases, the relations hold every qualifier a reference to them may carry: a
+        // table function's argument under any other names no column, and is refused as the statement compiles.
+        OuterNameBindings.recordAliasesBound(names, aliasToTable != null && !aliasToTable.isEmpty()
+            && (enclosingNames == null || OuterNameBindings.aliasesBound(enclosingNames)));
         return names;
     }
 
@@ -2144,9 +2482,11 @@ final class SubqueryEvaluator {
                                            final Map<String, Object> context) {
         final ExpressionEvaluatorVisitor enclosingScope = SubqueryCompilation.beginScope(visitor);
         final Object[] enclosingText = RunningSubqueryText.begin(subquery);
+        final Object[] enclosingFilters = OuterFilters.beginSubquery();
         try {
             return queryExecutor.executeWithLateralContext(subquery, context);
         } finally {
+            OuterFilters.endSelectList(enclosingFilters);
             RunningSubqueryText.end(enclosingText);
             SubqueryCompilation.endScope(enclosingScope);
         }
@@ -2888,6 +3228,8 @@ final class SubqueryEvaluator {
                 }
             }
         }
+        OuterNameBindings.recordAliasesBound(context,
+            aliasToTable != null && !aliasToTable.isEmpty() && allTables != null && row != null);
         OuterNameBindings.recordCollations(context, collated, bound);
     }
 

@@ -277,6 +277,25 @@ public final class JoinedRelations {
     }
 
     /**
+     * Whether the column is one of a relation an outer join extends with NULLs, found by the column itself rather
+     * than by its name: the joined relation carries each side's own column, which a judgement of the side alone
+     * holds unable to be NULL.
+     *
+     * @param column a column of the joined relation
+     * @return true when an outer join of the chain extends the relation it belongs to
+     */
+    public boolean isNullExtendedColumn(final TableColumn column) {
+        for (final Table member : nullExtended) {
+            for (final TableColumn own : member.getColumns()) {
+                if (own == column) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * The first relation no outer join extends that carries {@code columnName}: the side a USING or
      * NATURAL key written bare reads, which for a RIGHT join is its right side — live tags
      * {@code COALESCE(k, 3000.5)} over {@code a RIGHT JOIN b USING (k)} by {@code b.k}'s width alone.

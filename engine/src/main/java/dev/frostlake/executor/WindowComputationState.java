@@ -25,6 +25,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -50,6 +51,12 @@ final class WindowComputationState {
 
     /** The outer row a correlated query's windows are computed for, which an item may read beside them; or null. */
     Map<String, Object> outerRow;
+
+    /** The FROM clause's relations of a query computed for an outer row, by the keys its windows name; or null. */
+    Map<String, Table> fromRelations;
+
+    /** Those relations in combined-row order; or null. */
+    List<Table> fromTables;
 
     /** The rows the computation was handed, each by its place among them, which a SEQ call reads. */
     Map<Row, Long> windowRowOrdinals = new IdentityHashMap<>();

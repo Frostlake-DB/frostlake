@@ -693,6 +693,32 @@ final class NullableAntiJoins {
             && new StoredColumnValues(executor).holdsOneValue(table, column.getColumnName());
     }
 
+    /**
+     * Whether a query's one select reads a VALUES clause of one row alone, directly or through a derived table of such
+     * a select: its columns are each one value, as a constant is.
+     *
+     * @param query the query
+     * @return whether it reads one such row
+     */
+    boolean readsOneValuesRow(final FrostlakeParser.SelectStatementContext query) {
+        final FrostlakeParser.SelectClauseContext clause = onlyClause(query);
+        if (clause == null || clause.tableExpression() == null
+                || clause.tableExpression().tableReference().size() != 1
+                || !clause.tableExpression().joinClause().isEmpty()) {
+            return false;
+        }
+        final FrostlakeParser.TableReferenceContext reference = clause.tableExpression().tableReference(0);
+        final FrostlakeParser.TableSourceContext source = reference.tableSource();
+        if (source == null || reference.pivotClause() != null || reference.unpivotClause() != null
+                || reference.matchRecognizeClause() != null) {
+            return false;
+        }
+        if (source.valueTupleList() != null) {
+            return source.valueTupleList().valueTuple().size() == 1;
+        }
+        return source.selectStatement() != null && readsOneValuesRow(source.selectStatement());
+    }
+
     /** The select's one catalog table, read without a join; null for any other FROM. */
     private Table onlyCatalogTable(final FrostlakeParser.SelectClauseContext clause) {
         if (clause.tableExpression() == null || clause.tableExpression().tableReference().size() != 1

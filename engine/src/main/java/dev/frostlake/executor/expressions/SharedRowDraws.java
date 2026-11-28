@@ -70,4 +70,15 @@ final class SharedRowDraws {
         draws.put(key, drawn);
         return drawn;
     }
+
+    /**
+     * Offer a value drawn elsewhere for the row's equal calls to read, where none drew one for the row before.
+     *
+     * @param current the row being evaluated, or null
+     * @param key     what tells the call from one written otherwise
+     * @param drawn   the value
+     */
+    void offer(final Object current, final String key, final Object drawn) {
+        shared(current, key, drawn);
+    }
 }

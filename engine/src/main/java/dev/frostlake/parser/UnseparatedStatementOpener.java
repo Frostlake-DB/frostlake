@@ -260,7 +260,25 @@ public final class UnseparatedStatementOpener {
         }
         final FrostlakeParser.StatementContext last = runOnStatement(parser, reported);
         return last == null || endsInQuotedRoutineBody(last) || !readsWordAsProperty(last)
+            || opener.getType() == FrostlakeLexer.TAG && altersTable(last)
             || !RESERVED_PROPERTY_WORDS.contains(opener.getType()) && takesWord(last, opener) ? null : opener;
+    }
+
+    /**
+     * Whether the statement is an ALTER TABLE, whose SET reads no TAG after a property's value: the TAG is refused
+     * where it stands (live-verified).
+     *
+     * @param statement the statement
+     * @return whether it alters a table
+     */
+    static boolean altersTable(final FrostlakeParser.StatementContext statement) {
+        ParseTree alter = statement;
+        while (!(alter instanceof FrostlakeParser.AlterStatementContext) && alter.getChildCount() > 0) {
+            alter = alter.getChild(0);
+        }
+        return alter instanceof FrostlakeParser.AlterStatementContext && alter.getChildCount() > 1
+            && alter.getChild(1) instanceof TerminalNode
+            && ((TerminalNode) alter.getChild(1)).getSymbol().getType() == FrostlakeLexer.TABLE;
     }
 
     /**

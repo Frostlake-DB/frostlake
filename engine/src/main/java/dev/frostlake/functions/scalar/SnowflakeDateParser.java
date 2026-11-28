@@ -42,9 +42,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>The account's reader is a backtracking scan, not a pattern match (live-verified throughout):
  * <ul>
- *   <li>a numeric element takes its natural width first and gives digits back when the rest cannot
- *       match — '1152020' under MMDDYYYY is November 5th 2020, and so is '2020115' under YYYYMMDD —
- *       while a four-digit year also reads three or five digits when a separator follows
+ *   <li>a two-digit element reads two digits when its field holds them and one otherwise, and gives no
+ *       digit back when the rest cannot match — '1152020' under MMDDYYYY is November 5th 2020, and so is
+ *       '2020115' under YYYYMMDD, where '1234' under HH24MISS and '2020-01-15' under YYYY-MM-DD HH24 are
+ *       refused — while a four-digit year also reads three or five digits when a separator follows
  *       ('202-01-15' is 0202-01-15, '20201-01-15' is 20201-01-15); a two-digit year is 1970–2069;</li>
  *   <li>the elements match case-insensitively ('yyyy-mm-dd' is 'YYYY-MM-DD'), and so do the texts:
  *       'jAN' and 'January' under MON, 'Jan' under MMMM, 'pm';</li>
@@ -59,7 +60,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *       HH24:MI:SS.FF), where a colon may not;</li>
  *   <li>a day name under DY is read and ignored ('Mon 2020-01-15' is a Wednesday);</li>
  *   <li>TZH / TZHTZM / TZH:TZM read a signed offset or Z; TZD reads a standard-time abbreviation;</li>
- *   <li>a space in the model is optional in the input except at the very end, where it is required;
+ *   <li>a space in the model is optional in the input except at the very end, where it is required,
+ *       and where leaving it out would split a run of digits ('1000' is no HH24 MI);
  *       the input's own leading and trailing spaces are forgiven, inner ones are not;</li>
  *   <li>a repeated element keeps the last value.</li>
  * </ul>
@@ -222,6 +224,9 @@ public final class SnowflakeDateParser {
             if (expected == ' ' && !trailing) {
                 if (at < input.length() && input.charAt(at) == ' ') {
                     at++;
+                } else if (splitsDigits(at)) {
+                    // A space left out never splits a run of digits: '1000' is no HH24 MI.
+                    return false;
                 }
                 continue;
             }
@@ -241,11 +246,24 @@ public final class SnowflakeDateParser {
                 continue;
             }
             final int value = Integer.parseInt(input.substring(pos, pos + width));
-            if (value >= min && value <= max && tryField(key, value, index, pos + width)) {
-                return true;
+            if (value >= min && value <= max) {
+                if (tryField(key, value, index, pos + width)) {
+                    return true;
+                }
+                if (widths == TWO_DIGIT_WIDTHS) {
+                    // A two-digit element keeps the first reading its field holds and gives no digit back to
+                    // what follows: '1234' is no HH24MISS, '2020-01-15' no YYYY-MM-DD HH24.
+                    return false;
+                }
             }
         }
         return false;
+    }
+
+    /** Whether the input's characters either side of a position are both digits. */
+    private boolean splitsDigits(final int pos) {
+        return pos > 0 && pos < input.length() && Character.isDigit(input.charAt(pos - 1))
+            && Character.isDigit(input.charAt(pos));
     }
 
     /**

@@ -17,10 +17,16 @@
 package dev.frostlake.executor;
 
 import dev.frostlake.executor.expressions.BinaryOperationExpression;
+import dev.frostlake.executor.expressions.CaseExpression;
 import dev.frostlake.executor.expressions.CastExpression;
 import dev.frostlake.executor.expressions.Expression;
+import dev.frostlake.executor.expressions.ExpressionSource;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
+import dev.frostlake.executor.expressions.LiteralExpression;
+import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.UnaryOperationExpression;
+import dev.frostlake.executor.expressions.WhenClause;
+import org.antlr.v4.runtime.Token;
 
 import java.util.Locale;
 import java.util.Set;
@@ -58,6 +64,24 @@ final class ValuesRefusedFunctions {
     }
 
     /**
+     * Judge the argument types of a refused item's calls, which come ahead of the VALUES refusal:
+     * {@code VALUES (DECRYPT('a', 'key'))} is refused for its VARCHAR ciphertext, at the call (live-verified).
+     *
+     * @param typer the evaluator that types the item
+     * @param item  the item, parsed
+     * @param start the item's first token in the statement
+     */
+    static void judgeArgumentTypes(final ExpressionEvaluator typer, final Expression item, final Token start) {
+        final SourcePosition displaced = ExpressionSource.begin(start == null ? null
+            : new SourcePosition(start.getLine(), start.getCharPositionInLine()));
+        try {
+            typer.validateStrict(item);
+        } finally {
+            ExpressionSource.end(displaced);
+        }
+    }
+
+    /**
      * Whether a refused function appears anywhere under {@code node}: as a call, or inside a call's arguments, a
      * cast or an operator.
      *
@@ -69,6 +93,12 @@ final class ValuesRefusedFunctions {
             final FunctionCallExpression call = (FunctionCallExpression) node;
             if (call.getNameExpression() == null && refuses(call.getFunctionName())) {
                 return true;
+            }
+            final Boolean settled = call.getNameExpression() == null && "IFF".equalsIgnoreCase(call.getFunctionName())
+                && call.getArguments().size() == 3 ? literalCondition(call.getArguments().get(0)) : null;
+            if (settled != null) {
+                // A constant condition folds the IFF to its branch: IFF(FALSE, RANDOM(), 1) is taken.
+                return holdsOne(call.getArguments().get(settled.booleanValue() ? 1 : 2));
             }
             for (final Expression argument : call.getArguments()) {
                 if (holdsOne(argument)) {
@@ -87,6 +117,36 @@ final class ValuesRefusedFunctions {
         if (node instanceof UnaryOperationExpression) {
             return holdsOne(((UnaryOperationExpression) node).getOperand());
         }
+        if (node instanceof CaseExpression) {
+            return caseHoldsOne((CaseExpression) node);
+        }
         return false;
+    }
+
+    /**
+     * Whether a CASE holds a refused call in a branch it may take: a WHEN whose condition is the constant FALSE is
+     * dropped and one that is TRUE ends the CASE, so {@code CASE WHEN FALSE THEN RANDOM() END} is taken while
+     * {@code CASE WHEN TRUE THEN RANDOM() END} is refused (live-verified).
+     */
+    private static boolean caseHoldsOne(final CaseExpression node) {
+        for (final WhenClause clause : node.getWhenClauses()) {
+            final Boolean settled = clause.isOperandMatch() ? null : literalCondition(clause.getCondition());
+            if (settled != null && !settled.booleanValue()) {
+                continue;
+            }
+            if (settled == null && holdsOne(clause.getCondition()) || holdsOne(clause.getResult())) {
+                return true;
+            }
+            if (settled != null) {
+                return false;
+            }
+        }
+        return node.getElseExpression() != null && holdsOne(node.getElseExpression());
+    }
+
+    /** The value of a condition written as the literal TRUE or FALSE, or null for any other condition. */
+    private static Boolean literalCondition(final Expression condition) {
+        return condition instanceof LiteralExpression && ((LiteralExpression) condition).getValue() instanceof Boolean
+            ? (Boolean) ((LiteralExpression) condition).getValue() : null;
     }
 }

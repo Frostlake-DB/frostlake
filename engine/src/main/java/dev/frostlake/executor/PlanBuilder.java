@@ -128,6 +128,8 @@ final class PlanBuilder {
 
     /** What each SELECT gathers while it is planned. */
     private final Map<FrostlakeParser.SelectClauseContext, PlanSelect> selects = new IdentityHashMap<>();
+    /** The rows of the Generator a select of constants over catalog tables reads (see #constantRows). */
+    private final Map<FrostlakeParser.SelectClauseContext, Long> constantReads = new IdentityHashMap<>();
 
     /** The scans whose columns the plan resolves names to. */
     private final Set<PlanNode> resolvedScans = Collections.newSetFromMap(new IdentityHashMap<PlanNode, Boolean>());
@@ -398,7 +400,12 @@ final class PlanBuilder {
                 continue;
             }
             final List<PlanColumn> starred = starred(item, state.getScope());
-            if (starred != null) {
+            if (starred != null && state.getScope().isNulled()) {
+                for (final PlanColumn column : starred) {
+                    columns.add(new PlanColumn(column.getName(), "null", column.getType(),
+                        Collections.<PlanRead>emptyList(), Collections.<String>emptyList(), true));
+                }
+            } else if (starred != null) {
                 columns.addAll(starred);
             } else {
                 columns.add(writtenColumn(item, null));
@@ -435,8 +442,10 @@ final class PlanBuilder {
             // SCALED_ROUND_INT_DIVIDE over a view's column of one too (live-verified).
             type = new NumericType("NUMBER", 38, printer.decimalsOf(expression).intValue());
         }
+        // A column read as null is the bare NULL too (see PlanScope#nullColumns).
         final PlanColumn column = new PlanColumn(name, text, type, printer.getReads(), printer.getWindows(),
-            expression instanceof LiteralExpression && ((LiteralExpression) expression).getType() == LiteralType.NULL);
+            expression instanceof LiteralExpression && ((LiteralExpression) expression).getType() == LiteralType.NULL
+                || expression instanceof ColumnReferenceExpression && "null".equals(text));
         if (printer.isConstant(expression)) {
             column.markConstant();
         }
@@ -555,6 +564,11 @@ final class PlanBuilder {
             @Override
             public Expression inlinedItem(final SubqueryExpression subquery) {
                 return PlanConstantFold.inlinedItem(executor, subquery);
+            }
+
+            @Override
+            public ExternalFunctionCall external(final FunctionCallExpression call) {
+                return PlanConstantFold.external(executor, call);
             }
 
             @Override
@@ -788,9 +802,17 @@ final class PlanBuilder {
                 named.put(cte.nameStartPart().getText().toUpperCase(Locale.ROOT), cte.selectStatement());
             }
         }
-        final PlanNode plan = setPlan(query, named);
         final FrostlakeParser.SelectClauseContext only =
             query.selectOperand().size() == 1 ? query.selectOperand(0).selectClause() : null;
+        final Long constantRows = only == null || only.FROM() == null ? null : constantRows(query, only);
+        if (constantRows != null) {
+            constantReads.put(only, constantRows);
+        }
+        final PlanNode plan = setPlan(query, named);
+        if (constantRows != null) {
+            // The Generator holds the rows the LIMIT keeps, and rows of constants are sorted by nothing.
+            return plan;
+        }
         if (only != null && only.FROM() == null && !limitsRow(query, only, plan)) {
             return plan;
         }
@@ -801,7 +823,8 @@ final class PlanBuilder {
         final List<String> limits = limited ? limitTexts(count, offsetOf(query)) : NONE;
         // A query limited to no row reads nothing, a Generator of none (live-verified).
         final boolean empty = count != null && count.longValue() == 0;
-        if (query.orderByClause() != null) {
+        // A select that reads no row, a condition being false, is sorted by nothing (live-verified).
+        if (query.orderByClause() != null && !(only != null && !limited && readsNoRow(plan))) {
             final PlanNode sorted = "Sort".equals(plan.getOperation()) ? plan.getChildren().get(0) : plan;
             final List<String> keys = sortKeys(query.orderByClause(), only, plan.getAnswered());
             final List<String> texts = new ArrayList<>();
@@ -974,6 +997,11 @@ final class PlanBuilder {
         }
         return read.getChildren().isEmpty() && "ValuesClause".equals(read.getOperation())
             && Arrays.asList("()").equals(read.getExpressions());
+    }
+
+    /** Whether a plan is a Generator of no rows. */
+    private static boolean readsNoRow(final PlanNode plan) {
+        return "Generator".equals(plan.getOperation()) && Long.valueOf(0).equals(plan.getRows());
     }
 
     /** What a query limited to no row reads: a Generator of none. */
@@ -1186,13 +1214,24 @@ final class PlanBuilder {
         selects.put(select, state);
         // A sequence read is a Getnextval of its own under the Result, over the rows the FROM and the WHERE leave, or
         // over an empty ValuesClause in place of the Generator a select with no FROM reads (live-verified).
+        // A WHERE that reads one is a Filter over the Getnextvals, its reads named after the select list's.
         final List<String> sequences = new ArrayList<>();
         sequenceReads(select.selectList(), sequences);
+        final List<String> filteredSequences = new ArrayList<>();
+        if (select.whereClause() != null) {
+            sequenceReads(select.whereClause(), filteredSequences);
+        }
         if (select.tableExpression() != null) {
             sequences.removeAll(drawnNames(select.tableExpression()));
+            filteredSequences.removeAll(drawnNames(select.tableExpression()));
         }
-        state.getScope().readSequences(sequences);
+        final List<String> allSequences = new ArrayList<>(sequences);
+        allSequences.addAll(filteredSequences);
+        state.getScope().readSequences(allSequences);
         final boolean fromless = select.FROM() == null;
+        if (fromless && !filteredSequences.isEmpty()) {
+            return sequenceFilterPlan(select, state, allSequences);
+        }
         if (fromless && !sequences.isEmpty()) {
             return nextvals(sequences, new PlanNode("ValuesClause", NONE, null, Arrays.asList("()")))
                 .answering(selected(select, state));
@@ -1203,28 +1242,58 @@ final class PlanBuilder {
         final List<FrostlakeParser.BooleanExprContext> conditions = new ArrayList<>();
         PlanNode plan;
         final List<PlanColumn> answered;
+        final boolean grouped = select.groupByClause() != null || select.DISTINCT() != null;
+        boolean none = false;
         if (fromless) {
             plan = rowPlan(select, rowHaving, conditions);
+            answered = selected(select, state);
+        } else if (constantReads.containsKey(select)) {
+            // A select of constants over catalog tables reads a Generator of as many rows as they hold together
+            // (live-verified).
+            final Long rows = constantReads.get(select);
+            none = rows.longValue() == 0;
+            plan = new PlanNode("Generator", NONE, null, Arrays.asList(rows.toString())).holding(rows);
             answered = selected(select, state);
         } else {
             awaitItems(select.tableExpression(), state.getScope());
             if (select.whereClause() != null) {
-                conjuncts(select.whereClause().booleanExpr(), conditions);
+                final List<FrostlakeParser.BooleanExprContext> where = new ArrayList<>();
+                conjuncts(select.whereClause().booleanExpr(), where);
+                none = keptConditions(where, conditions) && select.havingClause() == null
+                    && select.qualifyClause() == null && !(grouped && aggregates(select.selectList()));
             }
             final boolean outerStars = starsEveryRelation;
             starsEveryRelation = writesUnqualifiedStar(select);
             try {
-                plan = listPlan(null, select.tableExpression(), conditions, named, state.getScope());
+                plan = listPlan(null, select.tableExpression(),
+                    none ? new ArrayList<FrostlakeParser.BooleanExprContext>() : conditions, named,
+                    state.getScope());
             } finally {
                 starsEveryRelation = outerStars;
             }
+            if (none) {
+                // A condition folded to false or null leaves no row to read: a Generator of none, and a select of one
+                // relation that computes no window reads each of its columns as null (live-verified).
+                conditions.clear();
+                plan = nothingRead();
+                if (state.getScope().getItems().size() == 1 && !computesAWindow(select.selectList())) {
+                    state.getScope().nullColumns();
+                }
+            }
             answered = selected(select, state);
         }
-        if (!conditions.isEmpty()) {
-            plan = filtered(plan, texts(conditions, state));
+        if (!filteredSequences.isEmpty() && !none) {
+            plan = nextvals(allSequences, plan);
+            if (!conditions.isEmpty()) {
+                plan = filtered(plan, texts(conditions, state));
+            }
+        } else {
+            if (!conditions.isEmpty()) {
+                plan = filtered(plan, texts(conditions, state));
+            }
+            plan = nextvals(sequences, plan);
         }
-        plan = nextvals(sequences, plan);
-        final List<FrostlakeParser.BooleanExprContext> grouped = new ArrayList<>();
+        final List<FrostlakeParser.BooleanExprContext> groupedConditions = new ArrayList<>();
         final List<FrostlakeParser.BooleanExprContext> plain = new ArrayList<>();
         if (select.havingClause() != null && !rowHaving) {
             final List<FrostlakeParser.BooleanExprContext> having = new ArrayList<>();
@@ -1233,20 +1302,21 @@ final class PlanBuilder {
             for (final FrostlakeParser.BooleanExprContext condition : having) {
                 final Set<String> read = new LinkedHashSet<>();
                 columnsOf(condition, read);
-                (aggregates(condition) || meets(read, aggregated) ? grouped : plain).add(condition);
+                (aggregates(condition) || meets(read, aggregated) ? groupedConditions : plain).add(condition);
             }
         }
         if (!plain.isEmpty()) {
             plan = filtered(plan, texts(plain, state));
         }
-        if (select.groupByClause() != null || select.DISTINCT() != null || !grouped.isEmpty()
-                || aggregates(select.selectList()) || aggregates(select.qualifyClause())) {
+        if (!(none && grouped) && (select.groupByClause() != null || select.DISTINCT() != null
+                || !groupedConditions.isEmpty() || aggregates(select.selectList())
+                || aggregates(select.qualifyClause()))) {
             plan = operator(groupsBySets(select.groupByClause()) ? "GroupingSets" : "Aggregate").over(plan);
             state.aggregatedBy(plan);
             groupKeys(select, state, answered);
         }
-        if (!grouped.isEmpty()) {
-            plan = operator("Filter").filtering(texts(grouped, state)).over(plan);
+        if (!groupedConditions.isEmpty()) {
+            plan = operator("Filter").filtering(texts(groupedConditions, state)).over(plan);
         }
         PlanNode windowedScan = null;
         if (computesAWindow(select.selectList()) || computesAWindow(select.qualifyClause())) {
@@ -1260,6 +1330,8 @@ final class PlanBuilder {
             plan = operator("Filter").filtering(texts(qualifying, state)).over(plan);
         }
         state.render();
+        // The keys an ORDER BY sorts by read the columns as they stand (live-verified).
+        state.getScope().readColumns();
         if (windowedScan != null) {
             readTwiceForWindows(select, windowedScan);
         }
@@ -1318,6 +1390,148 @@ final class PlanBuilder {
     }
 
     /**
+     * The rows a query of one select reads where it selects only constants over catalog tables (live-verified): a
+     * FROM list of tables with no join condition, a WHERE whose conditions all fold to true, no grouping, aggregate or
+     * window, and items that read no column and call no function answering anew. It reads a Generator of as many rows
+     * as the tables hold together, or as its LIMIT keeps where that is fewer, whatever its OFFSET; its ORDER BY and its
+     * LIMIT are left out. Null for any other query.
+     */
+    private Long constantRows(final FrostlakeParser.SelectStatementContext query,
+                              final FrostlakeParser.SelectClauseContext select) {
+        final boolean distinct = select.DISTINCT() != null;
+        final boolean limited = query.limitClause() != null || query.fetchClause() != null
+            || select.topClause() != null;
+        if (select.groupByClause() != null
+                || select.havingClause() != null || select.qualifyClause() != null
+                || aggregates(select.selectList()) || computesAWindow(select.selectList())
+                || answersAnew(select.selectList()) || select.tableExpression() == null) {
+            return null;
+        }
+        for (final FrostlakeParser.SelectItemContext item : select.selectList().selectItem()) {
+            if (!(item instanceof FrostlakeParser.ExprItemContext)) {
+                return null;
+            }
+            final Expression expression = parsed(SelectItemAccessors.getItemExpression(item));
+            if (expression == null) {
+                return null;
+            }
+            final PlanFreshCallWalk walk = new PlanFreshCallWalk(executor);
+            expression.accept(walk);
+            if (walk.readsColumn() || walk.readsQuery()) {
+                return null;
+            }
+        }
+        if (select.whereClause() != null) {
+            final List<FrostlakeParser.BooleanExprContext> where = new ArrayList<>();
+            conjuncts(select.whereClause().booleanExpr(), where);
+            for (final FrostlakeParser.BooleanExprContext condition : where) {
+                if (!Boolean.TRUE.equals(rowTruth(condition))) {
+                    return null;
+                }
+            }
+        }
+        long rows = 1;
+        for (int i = 0; i < select.tableExpression().getChildCount(); i++) {
+            final ParseTree child = select.tableExpression().getChild(i);
+            FrostlakeParser.TableReferenceContext reference = null;
+            if (child instanceof FrostlakeParser.JoinClauseContext) {
+                final FrostlakeParser.JoinClauseContext join = (FrostlakeParser.JoinClauseContext) child;
+                if (join.CROSS() == null || join.NATURAL() != null || join.LATERAL() != null
+                        || join.DIRECTED() != null || join.ASOF() != null || join.booleanExpr() != null
+                        || join.usingColumnList() != null) {
+                    return null;
+                }
+                reference = join.tableReference();
+            } else if (child instanceof FrostlakeParser.TableReferenceContext) {
+                reference = (FrostlakeParser.TableReferenceContext) child;
+            }
+            if (reference != null) {
+                final Long held = storedRows(reference);
+                if (held == null) {
+                    return null;
+                }
+                rows *= held.longValue();
+            }
+        }
+        if (limited) {
+            final Long count = limitOf(query, select);
+            if (count == null) {
+                return null;
+            }
+            rows = Math.min(rows, count.longValue());
+        }
+        return Long.valueOf(rows);
+    }
+
+    /** The rows a FROM item that names a catalog table, and nothing more, holds; null for any other item. */
+    private Long storedRows(final FrostlakeParser.TableReferenceContext reference) {
+        final FrostlakeParser.TableSourceContext source = reference.tableSource();
+        if (reference.LATERAL() != null || reference.pivotClause() != null || reference.unpivotClause() != null
+                || reference.matchRecognizeClause() != null || reference.sampleClause() != null
+                || reference.identifierList() != null || source == null || source.tableQualifiedName() == null
+                || source.timeTravelClause() != null || source.getChildCount() != 1) {
+            return null;
+        }
+        final String[] parts = ParseTreeText.qualifiedNameParts(source.tableQualifiedName());
+        if (parts.length == 1 && DerivedRelationPins.cteNamed(reference, parts[0]) != null) {
+            return null;
+        }
+        try {
+            final Table table = executor.getCatalog().resolveTable(
+                ParseTreeText.getQualifiedName(source.tableQualifiedName()));
+            if (table == null || !table.isCatalogResident()) {
+                return null;
+            }
+            return Long.valueOf(executor.statisticsRowsFor(table.residentSource().getQualifiedName()).size());
+        } catch (final RuntimeException noTable) {
+            return null;
+        }
+    }
+
+    /**
+     * What a select with no FROM whose WHERE reads a sequence's next value reads (live-verified): a Filter of the
+     * conditions not folded to true over a Getnextval for each read, the select list's first, over an empty
+     * ValuesClause; a Generator of no rows where a condition is false.
+     */
+    private PlanNode sequenceFilterPlan(final FrostlakeParser.SelectClauseContext select, final PlanSelect state,
+                                        final List<String> sequences) {
+        final List<FrostlakeParser.BooleanExprContext> where = new ArrayList<>();
+        conjuncts(select.whereClause().booleanExpr(), where);
+        final List<FrostlakeParser.BooleanExprContext> kept = new ArrayList<>();
+        final boolean none = keptConditions(where, kept);
+        final List<PlanColumn> answered = selected(select, state);
+        if (none) {
+            return nothingRead().answering(answered);
+        }
+        final PlanNode read = nextvals(sequences, new PlanNode("ValuesClause", NONE, null, Arrays.asList("()")));
+        return (kept.isEmpty() ? read : filtered(read, texts(kept, state))).answering(answered);
+    }
+
+    /**
+     * Gathers the conditions of a WHERE over a FROM list that the plan keeps: one computed from constants is folded,
+     * a true one dropped (live-verified); of an OR, the sides left beside false ones.
+     *
+     * @param where the WHERE's conditions
+     * @param kept  receives the conditions kept
+     * @return whether a condition is false or null, so that the select reads no row
+     */
+    private boolean keptConditions(final List<FrostlakeParser.BooleanExprContext> where,
+                                   final List<FrostlakeParser.BooleanExprContext> kept) {
+        boolean none = false;
+        for (final FrostlakeParser.BooleanExprContext condition : where) {
+            final Object truth = rowTruth(condition);
+            if (Boolean.FALSE.equals(truth)) {
+                none = true;
+            } else if (truth instanceof FrostlakeParser.BooleanExprContext) {
+                kept.add((FrostlakeParser.BooleanExprContext) truth);
+            } else if (truth == null) {
+                kept.add(condition);
+            }
+        }
+        return none;
+    }
+
+    /**
      * What a WHERE condition of a select with no FROM comes to: {@code Boolean.TRUE} or {@code Boolean.FALSE} where
      * it is computed from constants (null counting as false), the condition the Filter keeps where it calls a function
      * answering anew — of an OR, the one such side left beside sides that are false — or null where the plan leaves
@@ -1353,7 +1567,7 @@ final class PlanBuilder {
         }
         final PlanFreshCallWalk walk = new PlanFreshCallWalk(executor);
         expression.accept(walk);
-        if (walk.readsQuery()) {
+        if (walk.readsQuery() || walk.readsColumn()) {
             return null;
         }
         final Object value;

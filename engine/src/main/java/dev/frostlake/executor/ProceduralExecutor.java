@@ -1640,6 +1640,7 @@ public class ProceduralExecutor {
             if (source instanceof String && "VARIANT".equals(targetName)) {
                 return ValueCaster.castValue(source, "VARIANT");
             }
+            source = castForReturn(source, target);
             // A value that is not an array becomes the one element of an ARRAY result: a DATE, a
             // timestamp, a text and an OBJECT alike (live: a DATE 2020-01-15 under RETURNS ARRAY is
             // ["2020-01-15"], an OBJECT {"a":1} is [{"a":1}], a VARCHAR 'ab' is ["ab"]).
@@ -1649,7 +1650,10 @@ public class ProceduralExecutor {
             // A whole number under a TIMESTAMP is a seconds epoch, as TO_TIMESTAMP reads one
             // (live: RETURN 1631711999 under TIMESTAMP_NTZ is 2021-09-15 13:19:59).
             if (source instanceof Number && !(source instanceof Double) && targetName.startsWith("TIMESTAMP")) {
-                source = SharedFunctionHelpers.epochToLocalDateTime(((Number) source).longValue());
+                // A fraction is kept: a NUMBER(10,2) holding 1.50 under TIMESTAMP_NTZ is 1970-01-01 00:00:01.500.
+                source = source instanceof BigDecimal && ((BigDecimal) source).scale() > 0
+                    ? ValueCaster.castValue(source, targetName)
+                    : SharedFunctionHelpers.epochToLocalDateTime(((Number) source).longValue());
             }
             // A semi-structured result is the JSON of the value, as a variable of that type holds it.
             return heldUnder(source, target);
@@ -1659,6 +1663,43 @@ public class ProceduralExecutor {
             }
             throw failed;
         }
+    }
+
+    /**
+     * A RETURNed value converted as the cast to the declared type converts it (live-verified): a date, a time or a
+     * timestamp under a text type is its text in the session's output format ({@code 10:00:00} of a TIME,
+     * {@code 2020-01-15 10:11:12.000} of a TIMESTAMP_NTZ), its width then checked against the declared one, and a
+     * VARIANT under a BOOLEAN, a number, a BINARY, a DATE, a TIME or a timestamp is the variant's cast, refused as
+     * {@code Failed to cast variant value [1,2] to BOOLEAN} where it holds no such value, a JSON null is NULL, and a
+     * VARIANT under an OBJECT holds an object or is refused, {@code Failed to cast variant value [1,2] to OBJECT}.
+     * Any other value is handed back as it is, for the assignment conversion to read.
+     */
+    private static Object castForReturn(final Object source, final DataType target) {
+        if (target instanceof StringType) {
+            return SharedFunctionHelpers.isNativeTemporal(source) ? ValueCaster.castValue(source, "VARCHAR") : source;
+        }
+        if (!(source instanceof VariantValue)) {
+            return source;
+        }
+        if (target instanceof ObjectType) {
+            return variantIntoContainer(source, target);
+        }
+        if (VariantJsonText.isSemiStructured(target)) {
+            return source;
+        }
+        if (((VariantValue) source).isJsonNull()) {
+            // A JSON null is no value of a scalar type.
+            return null;
+        }
+        final String targetName = target.getName() == null ? "" : target.getName().toUpperCase(Locale.ROOT);
+        if (targetName.startsWith("TIMESTAMP") || "DATE".equals(targetName) || "TIME".equals(targetName)
+                || "DATETIME".equals(targetName)) {
+            return variantTemporal((VariantValue) source, targetName);
+        }
+        if (target instanceof BooleanType || target instanceof NumericType || target instanceof BinaryType) {
+            return ValueCaster.castValue(source, SqlTypeNames.canonical(target));
+        }
+        return source;
     }
 
     /**

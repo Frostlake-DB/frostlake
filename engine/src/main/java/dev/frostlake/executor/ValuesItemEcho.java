@@ -16,6 +16,7 @@
 
 package dev.frostlake.executor;
 
+import dev.frostlake.executor.expressions.BinaryOperationExpression;
 import dev.frostlake.executor.expressions.CallEcho;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.FunctionCallExpression;
@@ -37,7 +38,7 @@ import java.util.Set;
  * VARCHAR(134217728))}; and a call that reads a VARIANT converts an argument of any other type to one,
  * {@code TYPEOF([1])} as {@code TYPEOF(CAST(ARRAY_CONSTRUCT(1) AS VARIANT))} and {@code TO_JSON(1)} as
  * {@code TO_JSON(CAST(1 AS VARIANT))}. What a structured element converts is spelled as {@link StructuredElementEcho}
- * spells it.
+ * spells it, and what a drawing function's plan rewrites as {@link ValuesDrawEcho} spells it.
  */
 final class ValuesItemEcho implements CallEcho {
 
@@ -47,19 +48,33 @@ final class ValuesItemEcho implements CallEcho {
 
     private final StructuredElementEcho structured = new StructuredElementEcho();
 
+    private final ValuesDrawEcho draws;
+
     private final ExpressionEvaluator typer;
 
     ValuesItemEcho(final ExpressionEvaluator typer) {
         this.typer = typer;
+        this.draws = new ValuesDrawEcho(typer);
     }
 
     @Override
     public String spellConstant(final Expression expression, final ParsedEchoPrinter printer) {
-        return structured.spellConstant(expression, printer);
+        final String drawn = draws.spellConstant(expression, printer);
+        return drawn != null ? drawn : structured.spellConstant(expression, printer);
+    }
+
+    @Override
+    public String spellOperand(final BinaryOperationExpression operation, final Expression operand,
+                               final ParsedEchoPrinter printer) {
+        return draws.spellOperand(operation, operand, printer);
     }
 
     @Override
     public String spell(final FunctionCallExpression call, final ParsedEchoPrinter printer) {
+        final String drawn = draws.spell(call, printer);
+        if (drawn != null) {
+            return drawn;
+        }
         final String spelled = structured.spell(call, printer);
         if (spelled != null || call.getFunctionName() == null || call.getArguments().size() != 1
                 || call.getNameParts() != null && call.getNameParts().size() > 1) {

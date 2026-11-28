@@ -100,6 +100,7 @@ final class AlterStageHandler {
         if (action.REFRESH() != null) {
             requireOptionValues(action);
         }
+        requireLocations(action.stageSetting());
         requireCredentials(action.stageSetting(), null);
         judgeListsBeforeLookup(action.stageSetting());
         if (ifExists && action.REFRESH() == null && !exists(stageName)) {
@@ -225,6 +226,19 @@ final class AlterStageHandler {
             } else if (setting.parenOptionList() != null && setting.identifier() != null
                     && "DIRECTORY".equalsIgnoreCase(setting.identifier().getText())) {
                 StageDirectoryOptions.read(setting.parenOptionList(), false);
+            }
+        }
+    }
+
+    /** Every URL a SET writes, judged by its shape before the stage is looked up, an Azure endpoint after (see
+     * CloudStageUrls). */
+    private void requireLocations(final List<FrostlakeParser.StageSettingContext> settings) {
+        final boolean localFiles = queryExecutor.getEngineConfig() == null
+            || queryExecutor.getEngineConfig().isStageFileUrlEnabled();
+        for (final FrostlakeParser.StageSettingContext setting : settings) {
+            if (setting.URL() != null && setting.STRING_LITERAL() != null) {
+                CloudStageUrls.requireLocation(visitor.extractStringLiteral(setting.STRING_LITERAL()), localFiles,
+                    false);
             }
         }
     }

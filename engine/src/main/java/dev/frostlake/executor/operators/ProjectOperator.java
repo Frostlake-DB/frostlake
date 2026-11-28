@@ -23,6 +23,7 @@ import dev.frostlake.executor.RelationBody;
 import dev.frostlake.executor.ViewBodyRows;
 import dev.frostlake.executor.expressions.Expression;
 import dev.frostlake.executor.expressions.ExpressionSource;
+import dev.frostlake.executor.expressions.OuterFilters;
 import dev.frostlake.executor.expressions.RowOrdinal;
 import dev.frostlake.executor.expressions.SourcePosition;
 import dev.frostlake.executor.expressions.UnsupportedSubqueryException;
@@ -47,6 +48,9 @@ import java.util.Map;
 public class ProjectOperator implements Operator {
     private static final Logger logger = LoggerFactory.getLogger(ProjectOperator.class);
 
+    /** The rows the account computes one select item over before the next (see firstFaultInItemOrder). */
+    private static final int BATCH_ROWS = 256;
+
     private final List<String> projectionExpressions;
     private List<SourcePosition> expressionOrigins;
     private List<Integer> sourceSlots;
@@ -57,6 +61,9 @@ public class ProjectOperator implements Operator {
     private WhereAliasValues whereAliasValues;
     /** Index-aligned with the expressions: the select item each one is, or -1 for a column a star expands to. */
     private List<Integer> selectItems;
+    /** The WHERE of the query this select list belongs to, where {@link #queryFilterKnown}; null for none. */
+    private Expression queryFilter;
+    private boolean queryFilterKnown;
 
     /**
      * Create a PROJECT operator.
@@ -159,6 +166,17 @@ public class ProjectOperator implements Operator {
         this.selectItems = selectItems;
     }
 
+    /**
+     * Names the WHERE of the query this select list belongs to, which a correlated subquery among its items reads
+     * (see OuterFilters).
+     *
+     * @param queryFilter the query's WHERE condition, or null where it has none
+     */
+    public void setQueryFilter(final Expression queryFilter) {
+        this.queryFilter = queryFilter;
+        this.queryFilterKnown = true;
+    }
+
     /** The input-row slot item {@code index} reads, or -1 when it evaluates its expression. */
     private int slotOf(final int index) {
         return sourceSlots != null && index < sourceSlots.size() ? sourceSlots.get(index) : -1;
@@ -188,68 +206,27 @@ public class ProjectOperator implements Operator {
             // than one per call. Restored after each row because a scalar subquery inside the
             // projection runs its own operators, which number their own rows.
             final Long displacedOrdinal = RowOrdinal.begin(rowIndex);
+            final Object[] displacedFilters = queryFilterKnown ? OuterFilters.beginSelectList(queryFilter) : null;
             try {
             final List<Object> projectedValues = new ArrayList<>();
-            // The running map of this row's already-computed aliases. When a shared sink was provided it IS
-            // that map (the evaluator reads it as its lateral context, so a later item's expression can
-            // reference an earlier alias, e.g. `x + 1 AS y` after `... AS x`); otherwise a private map that
-            // still powers the exact-whole-item-is-an-alias shortcut. Reset per row so aliases don't leak.
-            final Map<String, Object> rowAliasValues = lateralAliasSink != null ? lateralAliasSink : new HashMap<>();
-            rowAliasValues.clear();
-            if (baseBindings != null) {
-                rowAliasValues.putAll(baseBindings);
-            }
+            final Map<String, Object> rowAliasValues = beginRowAliases();
 
             for (int i = 0; i < projectionExpressions.size(); i++) {
-                final String expr = projectionExpressions.get(i).trim();
-                final Object value;
-                final int slot = slotOf(i);
-                // A star column that reads its own slot: its name is shared with a sibling, so only the
-                // position tells the two apart.
-                if (slot >= 0 && slot < row.getValues().size()) {
-                    value = row.getValue(slot);
-                // If the expression is exactly a previously-defined alias, reuse that value — but only
-                // when no FROM-source column has that name: the real column takes precedence over a
-                // same-named sibling alias (what makes a swap projection `SELECT t AS s, s AS t` read
-                // both values from the input row instead of collapsing to t, t).
-                } else if (rowAliasValues.containsKey(expr.toUpperCase(Locale.ROOT)) && !isInputColumn(expr, context)
-                        && !readsOuterRow(i, expr.toUpperCase(Locale.ROOT))) {
-                    value = rowAliasValues.get(expr.toUpperCase(Locale.ROOT));
-                // The WHERE computed this item for the row: the value it tested is the value shown.
-                } else if (whereAliasValues != null && columnAliases != null && columnAliases.get(i) != null
-                        && whereAliasValues.holds(row, columnAliases.get(i).toUpperCase(Locale.ROOT))) {
-                    value = whereAliasValues.valueOf(row, columnAliases.get(i).toUpperCase(Locale.ROOT));
-                // A stage kept this item's value for the row by its place: the value it read is the value shown.
-                } else if (whereAliasValues != null && selectItems != null && selectItems.get(i).intValue() >= 0
-                        && whereAliasValues.holdsItem(row, selectItems.get(i).intValue())) {
-                    value = whereAliasValues.itemValueOf(row, selectItems.get(i).intValue());
-                } else {
-                    // Note where this item began in the statement, so a message about an unresolvable
-                    // column inside it can carry the position live always reports. A star-expanded
-                    // item has no origin — nobody wrote it — and reports none.
-                    final SourcePosition displaced = ExpressionSource.beginNested(originOf(i));
-                    Object computed;
-                    try {
-                        computed = evaluateExpression(parsedExpressions.get(i), row);
-                    } catch (final RuntimeException failed) {
-                        if (RelationBody.isActive() && ViewBodyRows.current() != null
-                                && failed instanceof UnsupportedSubqueryException) {
-                            // A view's subquery the account cannot evaluate waits for its reader too, and is
-                            // refused in the view's name (see ViewBodyRows).
-                            computed = ViewBodyRows.hold((UnsupportedSubqueryException) failed);
-                        } else if (!RelationBody.isActive() || !DeferredFault.deferrable(failed)) {
-                            // Note which item this was on the way out, so a DML wrapping this query can
-                            // name the target column the projection was feeding — see ProjectionSlot.
-                            ProjectionSlot.failedAt(i);
-                            throw failed;
-                        } else {
-                            // A relation's item waits for its reader: the fault stays in the cell.
-                            computed = new DeferredFault(failed);
-                        }
-                    } finally {
-                        ExpressionSource.end(displaced);
+                Object value;
+                try {
+                    value = cellValue(i, row, rowAliasValues, parsedExpressions, context);
+                } catch (final RuntimeException failed) {
+                    if (RelationBody.isActive() && ViewBodyRows.current() != null
+                            && failed instanceof UnsupportedSubqueryException) {
+                        // A view's subquery the account cannot evaluate waits for its reader too, and is
+                        // refused in the view's name (see ViewBodyRows).
+                        value = ViewBodyRows.hold((UnsupportedSubqueryException) failed);
+                    } else if (!RelationBody.isActive() || !DeferredFault.deferrable(failed)) {
+                        throw firstFaultInItemOrder(failed, i, input, rowIndex, parsedExpressions, context);
+                    } else {
+                        // A relation's item waits for its reader: the fault stays in the cell.
+                        value = new DeferredFault(failed);
                     }
-                    value = computed;
                 }
                 projectedValues.add(value);
                 if (columnAliases != null && columnAliases.get(i) != null) {
@@ -260,6 +237,9 @@ public class ProjectOperator implements Operator {
             projectedRows.add(Row.of(projectedValues));
             } finally {
                 RowOrdinal.end(displacedOrdinal);
+                if (displacedFilters != null) {
+                    OuterFilters.endSelectList(displacedFilters);
+                }
             }
         }
 
@@ -267,6 +247,117 @@ public class ProjectOperator implements Operator {
             input.size(), projectedRows.size(), projectionExpressions.size());
 
         return projectedRows;
+    }
+
+    /**
+     * The running map of a row's already-computed aliases, emptied for the row. When a shared sink was provided it IS
+     * that map (the evaluator reads it as its lateral context, so a later item's expression can reference an earlier
+     * alias, e.g. `x + 1 AS y` after `... AS x`); otherwise a private map that still powers the
+     * exact-whole-item-is-an-alias shortcut. Reset per row so aliases don't leak.
+     */
+    private Map<String, Object> beginRowAliases() {
+        final Map<String, Object> rowAliasValues = lateralAliasSink != null ? lateralAliasSink : new HashMap<>();
+        rowAliasValues.clear();
+        if (baseBindings != null) {
+            rowAliasValues.putAll(baseBindings);
+        }
+        return rowAliasValues;
+    }
+
+    /** The value item {@code i} shows for a row, computed or read; what its computation raises is thrown. */
+    private Object cellValue(final int i, final Row row, final Map<String, Object> rowAliasValues,
+                             final List<Expression> parsedExpressions, final OperatorContext context) {
+        final String expr = projectionExpressions.get(i).trim();
+        final int slot = slotOf(i);
+        // A star column that reads its own slot: its name is shared with a sibling, so only the
+        // position tells the two apart.
+        if (slot >= 0 && slot < row.getValues().size()) {
+            return row.getValue(slot);
+        }
+        // If the expression is exactly a previously-defined alias, reuse that value — but only
+        // when no FROM-source column has that name: the real column takes precedence over a
+        // same-named sibling alias (what makes a swap projection `SELECT t AS s, s AS t` read
+        // both values from the input row instead of collapsing to t, t).
+        if (rowAliasValues.containsKey(expr.toUpperCase(Locale.ROOT)) && !isInputColumn(expr, context)
+                && !readsOuterRow(i, expr.toUpperCase(Locale.ROOT))) {
+            return rowAliasValues.get(expr.toUpperCase(Locale.ROOT));
+        }
+        // The WHERE computed this item for the row: the value it tested is the value shown.
+        if (whereAliasValues != null && columnAliases != null && columnAliases.get(i) != null
+                && whereAliasValues.holds(row, columnAliases.get(i).toUpperCase(Locale.ROOT))) {
+            return whereAliasValues.valueOf(row, columnAliases.get(i).toUpperCase(Locale.ROOT));
+        }
+        // A stage kept this item's value for the row by its place: the value it read is the value shown.
+        if (whereAliasValues != null && selectItems != null && selectItems.get(i).intValue() >= 0
+                && whereAliasValues.holdsItem(row, selectItems.get(i).intValue())) {
+            return whereAliasValues.itemValueOf(row, selectItems.get(i).intValue());
+        }
+        // Note where this item began in the statement, so a message about an unresolvable
+        // column inside it can carry the position live always reports. A star-expanded
+        // item has no origin — nobody wrote it — and reports none.
+        final SourcePosition displaced = ExpressionSource.beginNested(originOf(i));
+        try {
+            return evaluateExpression(parsedExpressions.get(i), row);
+        } finally {
+            ExpressionSource.end(displaced);
+        }
+    }
+
+    /**
+     * The fault the projection reports, item by item rather than row by row: the account computes one select item
+     * over a batch of {@value #BATCH_ROWS} rows before the next, so of the faults a batch's rows raise the first
+     * item's first row's is reported — {@code SELECT column1::NUMBER(10,4), column2::NUMBER(10,4) FROM VALUES
+     * (1, 7654321.4321), (1234567.1234, 1)} names 1234567.1234, and a division by zero in a later item gives way to
+     * it, while over a table whose row 10 faults the second item and row 256 the first the second item's fault is
+     * reported (live-verified). Rows are still computed row by row, so only once a row fault has fired are the
+     * earlier items of the batch's later rows computed, to find one that faults first in that order. A fault that is
+     * no row fault is reported as it is.
+     *
+     * @param failed            the fault item {@code item} raised for row {@code rowIndex}
+     * @param item              the item that raised it
+     * @param input             the rows projected
+     * @param rowIndex          the row it raised it for
+     * @param parsedExpressions the items' expressions
+     * @param context           the operator's context
+     * @return the fault to report, its item noted (see ProjectionSlot)
+     */
+    private RuntimeException firstFaultInItemOrder(final RuntimeException failed, final int item,
+                                                   final List<Row> input, final int rowIndex,
+                                                   final List<Expression> parsedExpressions,
+                                                   final OperatorContext context) {
+        RuntimeException first = failed;
+        int firstItem = item;
+        if (DeferredFault.deferrable(failed)) {
+            final int batchEnd = Math.min(input.size(), (rowIndex / BATCH_ROWS + 1) * BATCH_ROWS);
+            for (int r = rowIndex + 1; r < batchEnd && firstItem > 0; r++) {
+                final Row row = input.get(r);
+                final Long displacedOrdinal = RowOrdinal.begin(r);
+                try {
+                    final Map<String, Object> rowAliasValues = beginRowAliases();
+                    for (int i = 0; i < firstItem; i++) {
+                        final Object value;
+                        try {
+                            value = cellValue(i, row, rowAliasValues, parsedExpressions, context);
+                        } catch (final RuntimeException earlier) {
+                            if (DeferredFault.deferrable(earlier)) {
+                                first = earlier;
+                                firstItem = i;
+                            }
+                            break;
+                        }
+                        if (columnAliases != null && columnAliases.get(i) != null) {
+                            rowAliasValues.put(columnAliases.get(i).toUpperCase(Locale.ROOT), value);
+                        }
+                    }
+                } finally {
+                    RowOrdinal.end(displacedOrdinal);
+                }
+            }
+        }
+        // Note which item this was on the way out, so a DML wrapping this query can
+        // name the target column the projection was feeding — see ProjectionSlot.
+        ProjectionSlot.failedAt(firstItem);
+        return first;
     }
 
     @Override

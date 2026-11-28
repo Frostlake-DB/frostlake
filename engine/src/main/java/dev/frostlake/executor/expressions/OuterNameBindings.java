@@ -62,6 +62,9 @@ public final class OuterNameBindings {
     /** The key the collated outer columns are recorded under, by the keys their values are bound by. */
     private static final String COLLATED = "\u0000outer collated columns";
 
+    /** The key under which a binding map records that its rows' aliases are bound. */
+    private static final String ALIASES_BOUND = "\u0000outer aliases bound";
+
     private OuterNameBindings() {
     }
 
@@ -140,6 +143,33 @@ public final class OuterNameBindings {
             }
         }
         bindings.put(SPELLINGS, recorded);
+    }
+
+    /**
+     * Records whether the row bound last named its relations by their FROM-clause aliases. A row so bound holds
+     * every qualifier a reference to it may carry, so {@code ZZ.ARR}, a qualifier it does not hold, is no
+     * reference to its {@code ARR}; a row bound by its relation's name alone answers the column to any.
+     *
+     * @param bindings the binding map
+     * @param bound    whether the aliases are among its keys
+     */
+    static void recordAliasesBound(final Map<String, Object> bindings, final boolean bound) {
+        if (bound) {
+            bindings.put(ALIASES_BOUND, Boolean.TRUE);
+        } else {
+            bindings.remove(ALIASES_BOUND);
+        }
+    }
+
+    /**
+     * Whether the bindings hold every qualifier a reference to their rows may carry (see
+     * {@link #recordAliasesBound}).
+     *
+     * @param bindings the binding map
+     * @return true where a qualifier they miss names nothing of theirs
+     */
+    static boolean aliasesBound(final Map<String, Object> bindings) {
+        return bindings.containsKey(ALIASES_BOUND);
     }
 
     /**

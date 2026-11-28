@@ -222,6 +222,10 @@ public class AlterCommandHandler implements CommandHandler {
                 // A missing database or schema is refused, IF EXISTS or not.
                 branchHandlesIfExists = true;
                 final UnmodelledAlteration alteration = new UnmodelledAlteration(queryExecutor);
+                if (ctx.unmodelledAlterAction().VERSION() != null) {
+                    throw alteration.missingDataset(ctx.unmodelledAlterAction(),
+                        queryExecutor.resolveObjectNameParts(ctx.objectName()));
+                }
                 alteration.judge(ctx.unmodelledCommentKind(), ctx.unmodelledAlterAction());
                 new KindComments(catalog, queryExecutor, visitor).refuseUnmodelled(ctx.unmodelledCommentKind(),
                     queryExecutor.resolveObjectNameParts(ctx.objectName()),

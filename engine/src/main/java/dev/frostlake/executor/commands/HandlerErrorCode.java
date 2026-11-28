@@ -289,6 +289,15 @@ final class HandlerErrorCode {
         if (message.contains("invalid URL prefix found in: '")) {
             return new HandlerErrorCode(1011, "42601");
         }
+        if (message.startsWith("Dataset ") && message.endsWith(" does not exist.") && !message.contains("'")) {
+            return new HandlerErrorCode(399019, "02000");
+        }
+        if (message.startsWith("Invalid dataset property ")) {
+            return new HandlerErrorCode(399015, "22023");
+        }
+        if (message.contains("Invalid location format or value '")) {
+            return new HandlerErrorCode(3059, "42601");
+        }
         if (message.startsWith("Bucket name '") && message.contains("' in the stage location is not supported.")) {
             return new HandlerErrorCode(91006, "22000");
         }
@@ -393,7 +402,9 @@ final class HandlerErrorCode {
      * (live-verified, by a handler and a client's driver alike): a property written twice 1424 / 22023, a NOORDER
      * sequence altered to ORDER and a dynamic table cloned from a table 2008 / 55000, a block variable declared twice
      * 92210 / P0000, one whose initialiser gives it no type 92228 / P0000 and one declared with neither a type nor an
-     * initialiser 92229 / P0000; named arguments that match no signature 944, one named twice 942, a positional argument after a named one 953 and named arguments
+     * initialiser 92229 / P0000, a RETURN of a type the declared RETURNS type does not take 92225 / P0000 (a table
+     * function's column of another type 90210 / 42601) and a Snowscript function's RETURNS type no block body answers
+     * 602001 / 0A000; named arguments that match no signature 944, one named twice 942, a positional argument after a named one 953 and named arguments
      * to a function that takes none 945, all 42601; a clustering function over a table without clustering keys
      * 5 / XX000; an unsupported feature 2 / 0A000, and 4 / 0A000 where the sentence names the form to use instead.
      *
@@ -435,6 +446,13 @@ final class HandlerErrorCode {
         if (message.contains(" variable '")
                 && message.endsWith("' must have either a type or an initializer to infer a type from")) {
             return new HandlerErrorCode(92229, "P0000");
+        }
+        if (message.contains("Declared return type '") && message.contains("' is incompatible with actual return type '")) {
+            return message.contains("' for column '") ? new HandlerErrorCode(90210, "42601")
+                : new HandlerErrorCode(92225, "P0000");
+        }
+        if (message.startsWith("Unsupported return type for Snowscript UDF: ")) {
+            return new HandlerErrorCode(602001, "0A000");
         }
         if (message.contains("named arguments [") && message.contains("] do not match any signature for function ")) {
             return new HandlerErrorCode(944, "42601");

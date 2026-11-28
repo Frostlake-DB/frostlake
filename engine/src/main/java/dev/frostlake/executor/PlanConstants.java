@@ -48,6 +48,12 @@ interface PlanConstants {
     Expression inlinedItem(SubqueryExpression subquery);
 
     /**
+     * @param call a call the plan writes
+     * @return the JavaScript function it calls, as the plan names it in place of the call, or null for any other call
+     */
+    ExternalFunctionCall external(FunctionCallExpression call);
+
+    /**
      * @param column a column the plan reads
      * @return the least and the greatest whole number the column of a catalog table holds, or null where it holds
      *         none, or holds another value, or is no such column

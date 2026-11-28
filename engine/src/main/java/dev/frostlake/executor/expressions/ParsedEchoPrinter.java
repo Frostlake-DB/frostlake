@@ -516,6 +516,10 @@ public final class ParsedEchoPrinter extends AstPrinterVisitor {
 
     @Override
     public String visitCaseExpression(final CaseExpression expr) {
+        final String folded = spelled == null ? null : spelled.spellConstant(expr, this);
+        if (folded != null) {
+            return folded;
+        }
         final Expression subject = subjectOf(expr);
         final StringBuilder text = new StringBuilder(named("CASE")).append('(');
         if (subject != null) {

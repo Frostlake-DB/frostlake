@@ -2014,6 +2014,18 @@ public class QueryExecutor implements ImportLocalizer {
     }
 
     /**
+     * Whether a subquery's one select reads a VALUES clause of one row alone, directly or through derived tables: each
+     * of its columns is one value.
+     *
+     * @param sql the subquery's text
+     * @return whether it reads one such row
+     */
+    public boolean readsOneValuesRow(final String sql) {
+        final FrostlakeParser.SelectStatementContext statement = subqueryStatement(sql);
+        return statement != null && new NullableAntiJoins(this, null, null).readsOneValuesRow(statement);
+    }
+
+    /**
      * Enters the mode in which a catalog column answers NULL by what its rows hold, as the account's statistics
      * tell it, rather than by its declaration (see HeldNullReading).
      *
@@ -6136,7 +6148,7 @@ public class QueryExecutor implements ImportLocalizer {
                             subqueryRefusal = firstRefusal(subqueryRefusal, compileLateralSubquery(itemRef, null, table,
                                 aliasToTable, allTables, lateralContext, ctx));
                             final PlannedRelation lateralData =
-                                planLateralJoin(table, itemRef, null, aliasToTable, allTables, ctx);
+                                planLateralJoin(table, itemRef, null, aliasToTable, allTables, ctx, lateralContext);
                             plan.add(lateralData.stage);
                             table = mergeTableMetadata(table, lateralData.table);
                             aliasToTable.putRelation(lateralData.alias, lateralData.table);
@@ -6216,7 +6228,7 @@ public class QueryExecutor implements ImportLocalizer {
                         subqueryRefusal = firstRefusal(subqueryRefusal,
                     compileLateralSubquery(rightTableRef, null, table, aliasToTable, allTables, lateralContext, ctx));
                         final PlannedRelation lateralData = planLateralJoin(table, rightTableRef, null, aliasToTable,
-                            allTables, ctx);
+                            allTables, ctx, lateralContext);
                         plan.add(lateralData.stage);
                         // Update table metadata after lateral join
                         table = mergeTableMetadata(table, lateralData.table);
@@ -6353,7 +6365,7 @@ public class QueryExecutor implements ImportLocalizer {
                     subqueryRefusal = firstRefusal(subqueryRefusal,
                     compileLateralSubquery(rightTableRef, joinCtx, table, aliasToTable, allTables, lateralContext, ctx));
                     final PlannedRelation lateralData = planLateralJoin(table, rightTableRef, joinCtx, aliasToTable,
-                        allTables, ctx);
+                        allTables, ctx, lateralContext);
                     final RuntimeException keyRefusal = keyed == null ? null
                         : TableFunctionKeyJoin.refusal(joinCtx, table, lateralData.table);
                     // Update table metadata after lateral join
@@ -7085,7 +7097,8 @@ public class QueryExecutor implements ImportLocalizer {
                         windowOrderKeyExprs, windowOrderKeyTrees, windowOrderKeyValues,
                         pushJoinAliasContext ? aliasToTable : null, allTables, projectedAliasValues, freshAliasValues,
                         rowsAreProjected ? null : aheadOfNoRows(ctx, table, aliasToTable, allTables, lateralContext,
-                            !hasGroupBy && !hasAggregates), lateralContext));
+                            !hasGroupBy && !hasAggregates), lateralContext,
+                        lateralContext == null ? null : aliasToTable));
                 } else if (ctx.qualifyClause() != null) {
                     // A QUALIFY with no window in the select list filters the rows as they are: SELECT-shape over
                     // grouped rows, FROM-shape otherwise. Its inline windows are computed by the stage itself.
@@ -7272,8 +7285,9 @@ public class QueryExecutor implements ImportLocalizer {
                         // A name two columns of the star share reads one of them by that name: each keeps its own
                         // type, as the joined relation declares it (live-verified).
                         columns.add(!sharedNames.contains(sc.getExpression())
-                            ? projectedColumn(sc.getOutputName(), sc.getDataType(), tableName,
-                                sc.getExpression(), projectionTypes, starNullable, sc.isNullabilityKnown())
+                            ? withStarNullability(projectedColumn(sc.getOutputName(), sc.getDataType(), tableName,
+                                sc.getExpression(), projectionTypes, starNullable, sc.isNullabilityKnown()),
+                                sc.getExpression(), table, aliasToTable, rolledKeys)
                             : new ResultSetColumn(sc.getOutputName(), sc.getDataType(), tableName, sc.getDataType(),
                                 starNullable, sc.isNullabilityKnown(), null, null));
                         columnSources.add(sc.getExpression());
@@ -7658,6 +7672,7 @@ public class QueryExecutor implements ImportLocalizer {
      *
      * @param aliasContext the FROM-clause keys to publish, or null when a relation's own name serves
      * @param ahead        what computes the select list's subqueries ahead of no rows (see aheadOfNoRows), or null
+     * @param fromRelations the FROM clause's relations of a query computed for an outer row, or null
      */
     private Operator windowStage(final FrostlakeParser.SelectClauseContext ctx, final Table table,
                                  final Table windowShape, final boolean rowsAreProjected,
@@ -7667,7 +7682,8 @@ public class QueryExecutor implements ImportLocalizer {
                                  final Map<Row, Object[]> orderKeyValues,
                                  final Map<String, Table> aliasContext, final List<Table> allTables,
                                  final WhereAliasValues whereAliasValues, final boolean freshAliasValues,
-                                 final Runnable ahead, final Map<String, Object> lateralContext) {
+                                 final Runnable ahead, final Map<String, Object> lateralContext,
+                                 final Map<String, Table> fromRelations) {
         // Over the FROM rows a window that reads a select alias reads the value the projection shows.
         final WhereAliasValues readAliasValues = rowsAreProjected ? null : whereAliasValues;
         return new StageOperator("WINDOW") {
@@ -7688,9 +7704,13 @@ public class QueryExecutor implements ImportLocalizer {
                     final GroupedExpressionValues savedGroupValues = windowEvaluator.beginGroupedValues(groupValues);
                     final WhereAliasValues savedAliasValues = windowEvaluator.beginAliasValues(readAliasValues);
                     final Map<String, Object> savedOuterRow = windowEvaluator.beginOuterRow(lateralContext);
+                    final Map<String, Table> savedFromRelations = windowEvaluator.fromRelations();
+                    final List<Table> savedFromTables = windowEvaluator.fromTables();
+                    windowEvaluator.beginFromRelations(fromRelations, fromRelations == null ? null : allTables);
                     try {
                         results = windowEvaluator.computeWindowFunctions(input, ctx, windowShape, rowsAreProjected, table);
                     } finally {
+                        windowEvaluator.beginFromRelations(savedFromRelations, savedFromTables);
                         windowEvaluator.endOuterRow(savedOuterRow);
                         windowEvaluator.endAliasValues(savedAliasValues);
                         windowEvaluator.endGroupedValues(savedGroupValues);
@@ -11527,6 +11547,28 @@ public class QueryExecutor implements ImportLocalizer {
         try {
             parsed = ExpressionEvaluator.parse(ParseTreeText.getOriginalText(item));
         } catch (final RuntimeException unparsed) {
+            return column;
+        }
+        return column.withDerivedNullable(new ResultNullability(table, aliasToTable, rolled).of(parsed))
+            .withReportedNullable(ResultNullability.reporting(table, aliasToTable, rolled, this).reported(parsed));
+    }
+
+    /**
+     * A column a star projects, carrying whether it can answer NULL as the same column named alone would (see
+     * {@link #withDerivedNullability}): COLUMN1 of {@code (SELECT * FROM VALUES (1234567.1234))} is {@code {not null}}
+     * in a range refusal, as it is read from {@code (SELECT column1 FROM VALUES …)} (live-verified). A star item
+     * that is no plain column, a REPLACE's expression, is left as it is.
+     */
+    private ResultSetColumn withStarNullability(final ResultSetColumn column, final String expression,
+                                                final Table table, final Map<String, Table> aliasToTable,
+                                                final RolledKeys rolled) {
+        final Expression parsed;
+        try {
+            parsed = ExpressionEvaluator.parse(expression);
+        } catch (final RuntimeException unparsed) {
+            return column;
+        }
+        if (!(parsed instanceof ColumnReferenceExpression)) {
             return column;
         }
         return column.withDerivedNullable(new ResultNullability(table, aliasToTable, rolled).of(parsed))
@@ -18563,6 +18605,15 @@ public class QueryExecutor implements ImportLocalizer {
         projectOp.setSourceSlots(projectionSlots);
         projectOp.carryWhereAliasValues(whereAliasValues);
         projectOp.setSelectItems(projectionItems);
+        if (ctx.whereClause() == null) {
+            projectOp.setQueryFilter(null);
+        } else {
+            try {
+                projectOp.setQueryFilter(ExpressionEvaluator.parse(getOriginalText(ctx.whereClause().booleanExpr())));
+            } catch (final RuntimeException unparsed) {
+                // A WHERE the expression parser does not read leaves the select list's filter unnamed.
+            }
+        }
         return new PipelineStage(projectOp, context);
     }
 
@@ -20666,6 +20717,8 @@ public class QueryExecutor implements ImportLocalizer {
         final List<Table> relations = new ArrayList<>();
         relations.add(table);
         evaluator.setDeclaredTypeBase(table, aliasToTable, relations);
+        // A value's subquery reads the target's row by the name the statement gives the target.
+        evaluator.setMultiTableContext(aliasToTable, relations);
         return evaluator;
     }
 
@@ -21889,6 +21942,11 @@ public class QueryExecutor implements ImportLocalizer {
                     }
                     final RuntimeException semiStructured =
                         ValuesSemiStructuredParts.refusalOf(parsed, valuesTyper, functionRegistry);
+                    // A refused call's argument types are judged first, as in an INSERT's VALUES: ENCRYPT_RAW answers
+                    // an OBJECT, and its VARCHAR arguments are refused ahead of it.
+                    if (ValuesRefusedFunctions.holdsOne(parsed)) {
+                        ValuesRefusedFunctions.judgeArgumentTypes(valuesTyper, parsed, expr.getStart());
+                    }
                     if (semiStructured != null) {
                         throw semiStructured;
                     }
@@ -22010,6 +22068,25 @@ public class QueryExecutor implements ImportLocalizer {
                     heldNull |= i >= row.getValues().size() || row.getValue(i) == null;
                 }
                 columns.get(i).setHeldNull(Boolean.valueOf(heldNull));
+            }
+            // A value read from the clause may be NULL where a row's expression may be, as a refusal spells the
+            // type: COLUMN1 of VALUES (1234567.1234), (7654321.4321) cast to NUMBER(10,4) is {not null}, and with a
+            // row (NULL), (NULLIF(…)) or (1 + NULL) {nullable} (live-verified). A name a row reads is an outer
+            // query's column, which may.
+            final ResultNullability cellNullability = ResultNullability.judgingReferences(new ReferenceNullability() {
+                @Override
+                public boolean nullable(final ColumnReferenceExpression reference) {
+                    return true;
+                }
+            });
+            for (int i = 0; i < columns.size(); i++) {
+                boolean cellNullable = i >= columnCells.size();
+                for (int r = 0; !cellNullable && r < columnCells.get(i).size(); r++) {
+                    final Expression cell = columnCells.get(i).get(r);
+                    cellNullable = cell == null || cellNullability.of(cell);
+                }
+                cellNullable |= columnCells.size() > i && columnCells.get(i).size() < rows.size();
+                columns.get(i).setValuesNullable(Boolean.valueOf(cellNullable));
             }
 
             // Create virtual table
@@ -27528,15 +27605,42 @@ public class QueryExecutor implements ImportLocalizer {
 
         // Resolve end point (default = now)
         long endMillis = System.currentTimeMillis();
+        FrostlakeParser.TimeTravelPointContext endPoint = null;
         if (ctx.END() != null && ctx.timeTravelPoint().size() > 1) {
-            endMillis = resolveTimeTravelPoint(ctx.timeTravelPoint(ctx.timeTravelPoint().size() - 1));
+            endPoint = ctx.timeTravelPoint(ctx.timeTravelPoint().size() - 1);
+            endMillis = resolveTimeTravelPoint(endPoint);
         } else if (ctx.timeTravelPoint().size() == 2) {
-            endMillis = resolveTimeTravelPoint(ctx.timeTravelPoint(1));
+            endPoint = ctx.timeTravelPoint(1);
+            endMillis = resolveTimeTravelPoint(endPoint);
         }
 
-        final TableSnapshot startSnap = storage.snapshotAt(startMillis);
-        final TableSnapshot endSnap   = storage.snapshotAt(endMillis);
+        final boolean startsAtAPoint = (ctx.AT_KEYWORD() != null || ctx.BEFORE() != null)
+            && ctx.timeTravelPoint(0) != null;
+        final TableSnapshot startSnap = changesSnapshot(storage, startsAtAPoint ? ctx.timeTravelPoint(0) : null,
+            ctx.BEFORE() != null, startMillis);
+        final TableSnapshot endSnap = changesSnapshot(storage, endPoint, false, endMillis);
         return changesBetween(storage, startSnap, endSnap, changesAppendOnly(ctx));
+    }
+
+    /**
+     * The table as one end of a CHANGES clause reads it. A statement names its place in the order the snapshots
+     * were taken in, as a plain AT or BEFORE reads it, since two statements may share a millisecond: the change
+     * made right after the statement is then a change since it. Any other point is read by its instant.
+     *
+     * @param point  the point as written, or null where the clause gives none
+     * @param before whether the point is read just before it
+     * @param millis the point's instant
+     */
+    private TableSnapshot changesSnapshot(final TableStorage storage,
+                                          final FrostlakeParser.TimeTravelPointContext point, final boolean before,
+                                          final long millis) {
+        if (point != null && point.STATEMENT() != null) {
+            final long sequence = statementSequence(point, before);
+            if (sequence >= 0) {
+                return storage.snapshotUpTo(sequence);
+            }
+        }
+        return storage.snapshotAt(millis);
     }
 
     /**
@@ -30276,6 +30380,7 @@ public class QueryExecutor implements ImportLocalizer {
      * @param aliasToTable  the FROM-clause keys in scope, as they stand here
      * @param allTables     every relation in scope, in combined-row order
      * @param selectCtx     the select clause, whose aliases the item may reference
+     * @param enclosingRow  the names of the row the query is run for, or null where it is run for none
      * @return the stage and the right side's shape and alias
      */
     private PlannedRelation planLateralJoin(final Table leftTable,
@@ -30283,7 +30388,8 @@ public class QueryExecutor implements ImportLocalizer {
                                             final FrostlakeParser.JoinClauseContext joinCtx,
                                             final Map<String, Table> aliasToTable,
                                             final List<Table> allTables,
-                                            final FrostlakeParser.SelectClauseContext selectCtx) {
+                                            final FrostlakeParser.SelectClauseContext selectCtx,
+                                            final Map<String, Object> enclosingRow) {
         // Snowflake lets a LATERAL in the FROM reference a SELECT-list alias of the same query — the shape
         // `SELECT ARRAY_CONSTRUCT(…) obs, … FROM t, TABLE(FLATTEN(obs))`. Those aliases are not columns of any
         // FROM table, so without them the lateral failed with "Column not found". Resolved per left row below,
@@ -30301,7 +30407,7 @@ public class QueryExecutor implements ImportLocalizer {
             return handlerJoin;
         }
         // The right side's shape, read with every name it may reference bound to NULL and no row produced.
-        final Map<String, Object> nullContext = new HashMap<>();
+        final LeftRowNames nullContext = new LeftRowNames();
         for (final Map.Entry<String, Table> entry : scope.entrySet()) {
             final String alias = entry.getKey();
             final Table t = entry.getValue();
@@ -30317,6 +30423,9 @@ public class QueryExecutor implements ImportLocalizer {
                 nullContext.put(alias, null);
             }
         }
+        // The row around the query is in scope beneath the relations to the left: a table function after a
+        // relation reads it as the first item of a FROM does.
+        nullContext.underlay(enclosingRow);
         // A table function written as this item's source has its ARGUMENT TYPES judged here, before the
         // shape pass, with the relations to the left in scope. The shape pass runs with NULL inputs and
         // answers a 0-column relation for anything it cannot read, which would swallow this refusal and
@@ -30342,6 +30451,9 @@ public class QueryExecutor implements ImportLocalizer {
         final ExpressionEvaluator leftScope = new ExpressionEvaluator(leftTable, functionRegistry, catalog, this);
         leftScope.setMultiTableContext(scope, scopeTables);
         final ExpressionEvaluatorVisitor enclosingScope = SubqueryCompilation.beginScope(leftScope.scopeVisitor());
+        // The names around the item are the relations to its left, not those around a subquery this FROM
+        // clause is written in: they are bound per row, as they are for an item of the statement's own FROM.
+        final Map<String, Object> enclosingNames = SubqueryCompilation.begin(null);
         try {
             final TableData shape = executeTableReference(rightTableRef, nullContext, null);
             rightTable = shape.table;
@@ -30362,6 +30474,7 @@ public class QueryExecutor implements ImportLocalizer {
             rightTable = told != null ? told.table : new Table("lateral", new ArrayList<>(), false);
             rightAlias = told != null ? told.alias : null;
         } finally {
+            SubqueryCompilation.end(enclosingNames);
             SubqueryCompilation.endScope(enclosingScope);
             RelationShapeOnly.end(previous);
         }
@@ -30425,8 +30538,9 @@ public class QueryExecutor implements ImportLocalizer {
                     }
                     inputRecord++;
                     // Create context with left row values accessible by column name
-                    final Map<String, Object> lateralContext = lateralContextOf(leftRow, scope, scopeTables,
+                    final LeftRowNames lateralContext = lateralContextOf(leftRow, scope, scopeTables,
                         leftTable.getJoinKeyNames());
+                    lateralContext.underlay(enclosingRow);
                     // A real column of the same name always wins, so the aliases go in only where nothing is
                     // bound. Aliases chain (an alias defined over another alias), so resolve iteratively: each
                     // pass offers everything computed so far and retries the rest, until a pass makes no
@@ -30459,6 +30573,7 @@ public class QueryExecutor implements ImportLocalizer {
                     final TableData rightData;
                     lateralArgumentTypes.begin(scope, scopeTables);
                     final Long displacedRecord = InputRecordSequence.begin(numbersInputRecords ? inputRecord : 1L);
+                    final Map<String, Object> namesAround = SubqueryCompilation.begin(null);
                     try {
                         try {
                             rightData = executeTableReference(rightTableRef, lateralContext, null);
@@ -30468,6 +30583,7 @@ public class QueryExecutor implements ImportLocalizer {
                         // The rows are produced when first read: read them while this record's number stands.
                         rightData.source.rows();
                     } finally {
+                        SubqueryCompilation.end(namesAround);
                         InputRecordSequence.end(displacedRecord);
                     }
                     if (callRanges != null) {
@@ -30553,10 +30669,10 @@ public class QueryExecutor implements ImportLocalizer {
      *
      * @param mergedKeys the left relation's USING or NATURAL keys, or null for none
      */
-    private static Map<String, Object> lateralContextOf(final Row leftRow, final Map<String, Table> scope,
+    private static LeftRowNames lateralContextOf(final Row leftRow, final Map<String, Table> scope,
                                                         final List<Table> scopeTables,
                                                         final List<String> mergedKeys) {
-        final Map<String, Object> lateralContext = new HashMap<>();
+        final LeftRowNames lateralContext = new LeftRowNames();
         final Map<String, TableColumn> collated = new HashMap<>();
         for (int pass = 0; pass < 2; pass++) {
             int offset = 0;
@@ -32168,6 +32284,9 @@ public class QueryExecutor implements ImportLocalizer {
             // …and a VALUES clause's column is one still: the plan has no statistics of it under any name.
             newCol.setWithoutStatistics(originalCol.isWithoutStatistics());
             newCol.setVolatileDraw(originalCol.isVolatileDraw());
+            // …and may hold NULL as it did: COLUMN1 of VALUES (1234567.1234) t(x) is {not null} as x (live-verified).
+            newCol.setValuesNullable(originalCol.getValuesNullable());
+            newCol.setHeldNull(originalCol.getHeldNull());
             newColumns.add(newCol);
         }
 
@@ -32957,23 +33076,36 @@ public class QueryExecutor implements ImportLocalizer {
      * Evaluate expression with lateral context - simplified version for table function arguments
      * Tries to resolve column references from lateralContext first, then falls back to standard evaluation
      */
+    /**
+     * Counts a table-function argument's read of the row around its query, so a subquery calling the function
+     * with an enclosing row's value is run again for every such row instead of answering the first one's.
+     */
+    private static void noteEnclosingRead(final Map<String, Object> names, final String name) {
+        if (LeftRowNames.readsEnclosing(names, name)) {
+            ExpressionEvaluatorVisitor.noteOuterRowRead();
+        }
+    }
+
     private Object evaluateExpressionWithLateralContextSimple(String expr, final Map<String, Object> lateralContext) {
         expr = expr.trim();
 
         // Try direct lookup in lateral context (e.g., "n" or "N")
         final String upperExpr = expr.toUpperCase(Locale.ROOT);
         if (lateralContext.containsKey(upperExpr)) {
+            noteEnclosingRead(lateralContext, upperExpr);
             return lateralContext.get(upperExpr);
         }
 
         // Try qualified name lookup (e.g., "n.n" or "N.N")
         if (lateralContext.containsKey(expr)) {
+            noteEnclosingRead(lateralContext, expr);
             return lateralContext.get(expr);
         }
 
         // Check all keys in lateral context for case-insensitive match
         for (final Map.Entry<String, Object> entry : lateralContext.entrySet()) {
             if (entry.getKey().equalsIgnoreCase(expr)) {
+                noteEnclosingRead(lateralContext, entry.getKey());
                 return entry.getValue();
             }
         }

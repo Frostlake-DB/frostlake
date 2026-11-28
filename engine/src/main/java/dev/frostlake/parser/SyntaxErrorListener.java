@@ -2337,6 +2337,8 @@ public class SyntaxErrorListener extends BaseErrorListener {
         // AlertConditionLines.
         // ★ A FAULT IN AN ALTER SCHEMA'S, DATABASE'S OR VIEW'S PROPERTY LIST is told from the list's first name — see
         // AlterPropertyListLines.
+        // ★ A FAULT IN AN ALTER OF A MATERIALIZED VIEW'S, A DYNAMIC, AN EXTERNAL OR A PLAIN TABLE'S SET, AND AN ALTER
+        // OF HYBRID OR DATA, is told by one line — see AlterKindTrailLines.
         // ★ A TIME-ZONE PHRASE A TYPE CANNOT TAKE, and a COMMENT target of two words — see WordedTypeFaultLines.
         // ★ A LATER SHOW'S KEYWORD SCOPE, and the end of input after IF NOT's semicolon — see LaterReadingLines.
         // ★ A WORD AFTER A STRING INSIDE BRACKETS ends the report — see BracketedStringWordLines.
@@ -2367,11 +2369,12 @@ public class SyntaxErrorListener extends BaseErrorListener {
             StarModifierContextLines.lines(spoken, offendingIndexes,
             TaskClauseLines.lines(spoken, offendingIndexes, BracketedStringWordLines.lines(spoken,
             LaterReadingLines.lines(spoken, WordedTypeFaultLines.lines(spoken, offendingIndexes.get(0).intValue(),
+            AlterKindTrailLines.lines(spoken, offendingIndexes.get(0).intValue(),
             AlterPropertyListLines.lines(spoken, offendingIndexes.get(0).intValue(),
                 AlertConditionLines.lines(spoken, offendingIndexes.get(0).intValue(),
                     MissingOperandLines.readOn(sql, spoken, offendingIndexes.get(0).intValue(),
                         RowLimitWordLines.withBothReadings(sql, spoken, offendingIndexes.get(0).intValue(),
-                            lines))))))))))))));
+                            lines)))))))))))))));
     }
 
     private List<String> reportedLinesOfTheParse(final boolean firstOnly) {

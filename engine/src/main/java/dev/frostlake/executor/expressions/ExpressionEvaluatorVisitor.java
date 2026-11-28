@@ -31,6 +31,7 @@ import dev.frostlake.executor.FromClauseRelations;
 import dev.frostlake.executor.FromlessDual;
 import dev.frostlake.executor.InvalidQualifierException;
 import dev.frostlake.executor.LateralShapeArguments;
+import dev.frostlake.executor.LeftRowNames;
 import dev.frostlake.executor.NamedArguments;
 import dev.frostlake.executor.NumericConversionException;
 import dev.frostlake.executor.NumericRangeRefusal;
@@ -40,7 +41,9 @@ import dev.frostlake.executor.ProceduralExecutor;
 import dev.frostlake.executor.ProcedureTokenCalls;
 import dev.frostlake.executor.QueryExecutor;
 import dev.frostlake.executor.ReadOnlyRequest;
+import dev.frostlake.executor.ReferenceNullability;
 import dev.frostlake.executor.RelationShapeOnly;
+import dev.frostlake.executor.ResultNullability;
 import dev.frostlake.executor.SearchPath;
 import dev.frostlake.executor.SelectItemAccessors;
 import dev.frostlake.executor.SessionVariableUse;
@@ -215,6 +218,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     private final Table table;
     private Row row;
     private final FunctionRegistry functionRegistry;
+    /** The judge of whether a value may be NULL, made on first use (see mayBeNull). */
+    private ResultNullability valueNullability;
     /** Whether each operation read so far is one the plan folds to NULL beside a subquery (see NullFoldedOperation). */
     private final Map<BinaryOperationExpression, Boolean> nullFoldedOperations =
         new IdentityHashMap<BinaryOperationExpression, Boolean>();
@@ -247,6 +252,31 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     private final SharedRowDraws sharedRowDraws = new SharedRowDraws();
     /** Per scalar subquery, the item {@link #bareSharedDrawItem} folds it to, or FALSE where it folds to none. */
     private final Map<SubqueryExpression, Object> bareSharedDrawItems = new IdentityHashMap<>();
+    /**
+     * Whether the relation a reference reads is read once in its FROM clause: a CTE the query reads under two names is
+     * computed once for both, so its draws are its own rows' (live-verified).
+     */
+    private boolean readOnce(final ColumnReferenceExpression expr) {
+        Table owner = declaredOwner(expr);
+        if (owner == null) {
+            owner = joinedOwner(expr);
+        }
+        if (owner == null || owner.getRelationStatistics() == null || multiTableAllTables == null) {
+            return true;
+        }
+        int reads = 0;
+        for (final Table candidate : multiTableAllTables) {
+            if (candidate.getRelationStatistics() == owner.getRelationStatistics()) {
+                reads++;
+            }
+        }
+        return reads <= 1;
+    }
+
+    /** Per column reference, the relation it was judged over and its merged drawing item, or null for none. */
+    private final Map<ColumnReferenceExpression, Object[]> mergedDrawItems = new IdentityHashMap<>();
+    /** Per quantified comparison over a query folded to its item, that comparison with the item. */
+    private final Map<QuantifiedComparisonExpression, Expression> foldedQuantified = new IdentityHashMap<>();
     /** The intervals scalar subqueries' items were planned to lie in, keyed by the subquery node. */
     private final Map<SubqueryExpression, ValueRange> subqueryRanges = new HashMap<>();
     private final ValueRangeInferencer valueRangeInferencer = new ValueRangeInferencer(this);
@@ -481,6 +511,18 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      */
     public static void noteOuterRowRead() {
         LATERAL_READS.get()[0]++;
+    }
+
+    /**
+     * Counts a read of a name the row around the query gave. A lateral item's read of the row to its left is no
+     * such read: the query holding the item answers alike for every row around it.
+     *
+     * @param held the name as the names in force hold it
+     */
+    private void countOuterRead(final String held) {
+        if (LeftRowNames.readsEnclosing(lateralContext, held)) {
+            LATERAL_READS.get()[0]++;
+        }
     }
 
     /** Current per-thread lateral (outer) value read count; see {@link SubqueryMemo}. */
@@ -2062,7 +2104,51 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         // offset in force when it was written, so it is re-expressed here — live, an LTZ written under UTC
         // reads 16:04 +0530 under Asia/Kolkata, and HOUR, a cast to NTZ or TIME and TO_CHAR follow.
         // A cell a relation deferred raises its fault here, where a statement reads it (see DeferredFault).
-        return SharedFunctionHelpers.inSessionZone(DeferredFault.read(columnReferenceValue(expr)));
+        final Object read = SharedFunctionHelpers.inSessionZone(DeferredFault.read(columnReferenceValue(expr)));
+        final Expression drawn = mergedDrawItem(expr);
+        if (drawn == null) {
+            return read;
+        }
+        if (readOnce(expr)) {
+            return drawn.accept(this);
+        }
+        // A relation read under two names is computed once, its rows' draws its own, which an equal call of the
+        // query over it then reads: c1.a = ENCRYPT('msg', 'key') over a CTE read as c1 and c2 (live-verified).
+        sharedRowDraws.offer(table instanceof FromlessDual ? table : row, sharedDrawKey((FunctionCallExpression) drawn),
+            read);
+        return read;
+    }
+
+    /**
+     * The item of a merged relation's column (see {@link MergedDerivedColumn}) that draws a value equal calls share
+     * from constant arguments, or null. The plan computes such an item in the query over the relation, once for each
+     * of its rows: {@code COUNT_IF(a = ENCRYPT('msg', 'key'))} over {@code (SELECT ENCRYPT('msg', 'key') a FROM t)}
+     * counts every row, and a join of two such relations draws once for each joined row (live-verified).
+     */
+    private Expression mergedDrawItem(final ColumnReferenceExpression expr) {
+        final Object[] known = mergedDrawItems.get(expr);
+        if (known != null && known[0] == table) {
+            return (Expression) known[1];
+        }
+        Expression item = null;
+        try {
+            final MergedDerivedColumn merged = MergedDerivedColumn.of(expr, this);
+            item = merged == null ? null : merged.getItem();
+        } catch (final RuntimeException unmerged) {
+            item = null;
+        }
+        if (!(item instanceof FunctionCallExpression) || !SharedRowDraws.shares((FunctionCallExpression) item)) {
+            item = null;
+        } else {
+            for (final Expression argument : ((FunctionCallExpression) item).getArguments()) {
+                if (!ConstantArgumentWalk.isConstant(argument, functionRegistry)) {
+                    item = null;
+                    break;
+                }
+            }
+        }
+        mergedDrawItems.put(expr, new Object[] {table, item});
+        return item;
     }
 
     /** The value a column reference reads, before an LTZ instant is re-expressed in the session's zone. */
@@ -2271,12 +2357,12 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             // fallback below, which could otherwise shadow it with a same-named local column.
             if (lateralContext != null) {
                 if (lateralContext.containsKey(qualifiedName)) {
-                    LATERAL_READS.get()[0]++;
+                    countOuterRead(qualifiedName);
                     return lateralContext.get(qualifiedName);
                 }
                 if (lateralContext.containsKey(qualifiedName.toUpperCase(Locale.ROOT))
                         && !OuterNameBindings.foldMisses(lateralContext, qualifiedName)) {
-                    LATERAL_READS.get()[0]++;
+                    countOuterRead(qualifiedName.toUpperCase(Locale.ROOT));
                     return lateralContext.get(qualifiedName.toUpperCase(Locale.ROOT));
                 }
             }
@@ -2338,15 +2424,32 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
 
         // Check lateral context. A sequence read is never an earlier item's name, though an unaliased one is
         // named NEXTVAL: in SELECT s1.NEXTVAL, s2.NEXTVAL each item hands out its own sequence's next value.
+        // A qualified reference the relation did not answer reads the outer row's column under that qualifier.
+        if (lateralContext != null && expr.isQualified() && expr.getTableName().indexOf('.') < 0
+                && OuterNameBindings.aliasesBound(lateralContext)) {
+            final String qualified = (expr.getTableName() + "." + columnName).toUpperCase(Locale.ROOT);
+            if (lateralContext.containsKey(expr.getTableName() + "." + columnName)) {
+                countOuterRead(expr.getTableName() + "." + columnName);
+                return lateralContext.get(expr.getTableName() + "." + columnName);
+            }
+            if (lateralContext.containsKey(qualified)
+                    && !OuterNameBindings.foldMisses(lateralContext, expr.getTableName() + "." + columnName)) {
+                countOuterRead(qualified);
+                return lateralContext.get(qualified);
+            }
+        }
+        // A qualifier the outer rows do not hold names none of their columns, where their aliases are bound.
         if (lateralContext != null && !(expr.isQualified() && "NEXTVAL".equalsIgnoreCase(columnName)
-                && resolveSequence(expr.getTableName()) != null)) {
+                && resolveSequence(expr.getTableName()) != null)
+                && !(expr.isQualified() && expr.getTableName().indexOf('.') < 0
+                    && OuterNameBindings.aliasesBound(lateralContext))) {
             if (lateralContext.containsKey(columnName)) {
-                LATERAL_READS.get()[0]++;
+                countOuterRead(columnName);
                 return OuterNameBindings.read(lateralContext.get(columnName), columnName);
             }
             if (lateralContext.containsKey(columnName.toUpperCase(Locale.ROOT))
                     && !OuterNameBindings.foldMisses(lateralContext, columnName)) {
-                LATERAL_READS.get()[0]++;
+                countOuterRead(columnName.toUpperCase(Locale.ROOT));
                 return OuterNameBindings.read(lateralContext.get(columnName.toUpperCase(Locale.ROOT)), columnName.toUpperCase(Locale.ROOT));
             }
         }
@@ -2410,6 +2513,12 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                 && expr.getWrittenName().startsWith("\"") ? expr.getWrittenName()
             : expr.isQualified() && expr.getWrittenName() != null && expr.getWrittenName().indexOf('`') >= 0
                 ? expr.getWrittenName() : String.valueOf(expr);
+        if (lateralContext != null && expr.isQualified() && expr.getTableName().indexOf('.') < 0
+                && !sequenceRead && OuterNameBindings.aliasesBound(lateralContext)) {
+            // A qualifier the outer rows do not hold, where they hold every one they answer to: definitive, so
+            // no evaluation that reads the row by its relation's name alone may answer it afterwards.
+            throw at != null ? new InvalidQualifierException(spelled, at) : new InvalidQualifierException(spelled);
+        }
         throw new RuntimeException(at != null
             ? SqlCompilationError.invalidIdentifier(at.getLine(), at.getCharPositionInLine(), spelled)
             : SqlCompilationError.invalidIdentifier(spelled));
@@ -2883,31 +2992,19 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     return true;
             }
         }
-        return operandMaybeNull(operand);
+        return mayBeNull(operand);
     }
 
     /** Whether the sentence of {@code overflow} spells nullable, from the operands' declarations. */
     private boolean overflowNullability(final BinaryOperationExpression expr, final RawRangeOverflow overflow) {
         switch (overflow.getKind()) {
             case RESCALE_LEFT:
-                return operandMaybeNull(expr.getLeft());
+                return mayBeNull(expr.getLeft());
             case RESCALE_RIGHT:
-                return operandMaybeNull(expr.getRight());
+                return mayBeNull(expr.getRight());
             default:
-                return operandMaybeNull(expr.getLeft()) || operandMaybeNull(expr.getRight());
+                return mayBeNull(expr.getLeft()) || mayBeNull(expr.getRight());
         }
-    }
-
-    /** A literal and a column declared NOT NULL are not null; every other operand may be. */
-    private boolean operandMaybeNull(final Expression operand) {
-        if (operand instanceof LiteralExpression) {
-            return false;
-        }
-        if (operand instanceof ColumnReferenceExpression) {
-            final TableColumn declared = resolveDeclaredColumn((ColumnReferenceExpression) operand);
-            return declared == null || declared.isNullable();
-        }
-        return true;
     }
 
     /** Whether either operand of an operation is a DECFLOAT, which makes the operation one (see decfloatOperation). */
@@ -4782,7 +4879,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                     && !(argValues.get(1) instanceof Float)) {
                 // The product's type is read off the count's declared one, which the call's values cannot say.
                 Repeat.requireProductFits(argValues, declaredPrecision(expr.getArguments().get(1)),
-                    isNullableArgument(expr.getArguments().get(1)));
+                    mayBeNull(expr.getArguments().get(1)));
             }
             if (DECFLOAT_NARROWING_CALLS.contains(funcName) && !argValues.isEmpty()
                     && argValues.get(0) instanceof BigDecimal && isDecfloatTyped(expr.getArguments().get(0))) {
@@ -4819,7 +4916,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
             }
             // A TO_NUMBER of a column that can be NULL prints its type {nullable} in a range refusal (see ToNumber).
             final BuiltInFunction called = func instanceof ToNumber && !argValues.isEmpty()
-                && isNullableArgument(expr.getArguments().get(0)) ? ((ToNumber) func).overNullableSource() : func;
+                && mayBeNull(expr.getArguments().get(0)) ? ((ToNumber) func).overNullableSource() : func;
             // A temporal the call renders as text - TO_VARCHAR's, a VARIANT's member - prints a bare FF of the
             // session's output format at the scale of its own type (see FractionScale).
             final IdentityHashMap<Object, Integer> scales = temporalArgumentScales(expr, argValues);
@@ -6948,54 +7045,60 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
     }
 
     /**
-     * Whether an argument may be NULL, as a refusal's type spells it, {@code {nullable}} or {@code {not null}}: a
-     * literal other than NULL and a column declared NOT NULL may not, a cast or a sign may as what it reads does, an
-     * arithmetic operation as either operand does, and COALESCE, NVL and IFNULL only as every argument does; anything
-     * else may (live-verified for a cast literal, the columns, an addition and COALESCE).
+     * Whether a value may be NULL, as a refusal's type spells it, {@code {nullable}} or {@code {not null}}: the
+     * judgement a select item's nullability takes (see {@link ResultNullability}), a column read as this evaluator
+     * resolves it. A literal other than NULL, a column declared NOT NULL, a VALUES column no row of which can be
+     * NULL and a derived relation's column judged so may not; a block's variable or a routine's argument is no
+     * column and may not either (live-verified: {@code x::INT} of a FLOAT variable holding inf is {@code {not null}}).
      *
-     * @param argument the argument
+     * @param argument the expression the value came from
      * @return whether it may be NULL
      */
     private boolean mayBeNull(final Expression argument) {
-        if (argument instanceof LiteralExpression) {
-            return ((LiteralExpression) argument).getType() == LiteralType.NULL;
-        }
-        if (argument instanceof ColumnReferenceExpression) {
-            // A derived relation's column may be NULL as the projection that made it judged its item, so a column of
-            // (SELECT 'inf'::FLOAT n) is {not null} (live-verified).
-            final TableColumn declared = resolveDeclaredColumn((ColumnReferenceExpression) argument);
-            if (declared != null && declared.getValuesNullable() != null) {
-                return declared.getValuesNullable().booleanValue();
-            }
-            return declared == null || declared.isNullable();
-        }
-        if (argument instanceof CastExpression) {
-            return ((CastExpression) argument).isTryMode() || mayBeNull(((CastExpression) argument).getExpression());
-        }
-        if (argument instanceof UnaryOperationExpression) {
-            final UnaryOperationExpression unary = (UnaryOperationExpression) argument;
-            return unary.getOperator() != UnaryOperator.NEGATE && unary.getOperator() != UnaryOperator.PLUS
-                || mayBeNull(unary.getOperand());
-        }
-        if (argument instanceof BinaryOperationExpression) {
-            final BinaryOperationExpression binary = (BinaryOperationExpression) argument;
-            final BinaryOperator operator = binary.getOperator();
-            final boolean arithmetic = operator == BinaryOperator.ADD || operator == BinaryOperator.SUBTRACT
-                || operator == BinaryOperator.MULTIPLY || operator == BinaryOperator.DIVIDE
-                || operator == BinaryOperator.MODULO;
-            return !arithmetic || mayBeNull(binary.getLeft()) || mayBeNull(binary.getRight());
-        }
-        if (argument instanceof FunctionCallExpression) {
-            final String name = ((FunctionCallExpression) argument).getFunctionName().toUpperCase(Locale.ROOT);
-            if ("COALESCE".equals(name) || "NVL".equals(name) || "IFNULL".equals(name)) {
-                for (final Expression each : ((FunctionCallExpression) argument).getArguments()) {
-                    if (!mayBeNull(each)) {
-                        return false;
-                    }
+        if (valueNullability == null) {
+            valueNullability = ResultNullability.judgingReferences(new ReferenceNullability() {
+                @Override
+                public boolean nullable(final ColumnReferenceExpression reference) {
+                    return referenceMayBeNull(reference);
                 }
-            }
+            });
         }
-        return true;
+        return valueNullability.of(argument);
+    }
+
+    /** Whether the column a reference reads may hold NULL (see {@link #mayBeNull}). */
+    private boolean referenceMayBeNull(final ColumnReferenceExpression reference) {
+        if (scriptVariableType(reference) != null) {
+            return false;
+        }
+        final TableColumn column = nullabilityColumn(reference);
+        if (column == null) {
+            return true;
+        }
+        // A side an outer join extends with NULLs may be NULL whatever its column holds: t.column1 of
+        // VALUES (1) u LEFT JOIN VALUES (1234567.1234) t ON TRUE is {nullable} (live-verified).
+        final Table joined = joinedRelation();
+        if (joined != null && joined.getJoinedRelations().isNullExtendedColumn(column)) {
+            return true;
+        }
+        // A derived relation's column may be NULL as the projection that made it judged its item, so a column of
+        // (SELECT 'inf'::FLOAT n) is {not null} (live-verified); a VALUES clause's as its rows' expressions may be.
+        return column.getValuesNullable() != null ? column.getValuesNullable().booleanValue() : column.isNullable();
+    }
+
+    /**
+     * The column a reference reads, for what it tells of NULL: the declared column (see
+     * {@link #resolveDeclaredColumn}), else the column of that name of the relation the reference names or of this
+     * evaluator's own relation, whose type the plan may not know but whose nullability it does; null where none is.
+     */
+    private TableColumn nullabilityColumn(final ColumnReferenceExpression reference) {
+        final TableColumn declared = resolveDeclaredColumn(reference);
+        if (declared != null || reference.getPositionalOrdinal() > 0) {
+            return declared;
+        }
+        final String name = reference.getColumnName();
+        final Table owner = reference.getTableName() != null ? tableForAlias(reference.getTableName()) : table;
+        return owner != null && owner.hasColumn(name) ? owner.getColumn(name) : null;
     }
 
     /**
@@ -7117,7 +7220,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
      */
     private Object convertToDeclaredTarget(final CastExpression expr, final Object value) {
         if (IntervalCasts.isIntervalType(expr.getDeclaredTarget())) {
-            return IntervalCasts.convert(value, expr.getDeclaredTarget(), isNullableArgument(expr.getExpression()));
+            return IntervalCasts.convert(value, expr.getDeclaredTarget(), mayBeNull(expr.getExpression()));
         }
         if (value instanceof LocalDate && "VARIANT".equalsIgnoreCase(String.valueOf(expr.getTargetType()).trim())) {
             SharedFunctionHelpers.variantDate((LocalDate) value);
@@ -7236,7 +7339,7 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         // The source's nullability travels with the value: an out-of-range number prints it as part of
         // the type it could not fit, and this is the only frame that still holds the source expression.
         final Object converted = ValueCaster.castValue(value, expr.getTargetType(),
-            isNullableArgument(expr.getExpression()), recursiveStepPrecision(expr.getExpression()));
+            mayBeNull(expr.getExpression()), recursiveStepPrecision(expr.getExpression()));
         // A cast to a width-declared BINARY holds the bytes to it as the string cast holds its text:
         // TO_BINARY('ABCDEF', 'HEX')::BINARY(2) is "Binary value 'ABCDEF' is too long and would be truncated", where
         // TO_BINARY('ABCD', 'HEX')::BINARY(2) passes (live-verified). The width was never read.
@@ -9081,6 +9184,18 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         // DECRYPT_RAW(v, k, iv, tag) / DECRYPT_RAW(v, k, iv, aad, method, tag).
         BINARY_STRICT_ARGS.put("ENCRYPT_RAW", new int[]{0, 1, 2, 3});
         BINARY_STRICT_ARGS.put("DECRYPT_RAW", new int[]{0, 1, 2, 3, 5});
+        BINARY_STRICT_ARGS.put("TRY_DECRYPT_RAW", new int[]{0, 1, 2, 3, 5});
+    }
+
+    /**
+     * The passphrase pair reads a BINARY ciphertext beside a VARCHAR passphrase, AAD and method, and takes no VARIANT
+     * for it either: {@code DECRYPT('a', 'key')} and {@code TRY_DECRYPT('a', 'key')} are "(VARCHAR(1), VARCHAR(3))",
+     * {@code DECRYPT(PARSE_JSON('1'), 'key')} "(VARIANT, VARCHAR(3))" (live-verified).
+     */
+    private static final Map<String, int[]> PASSPHRASE_CIPHERTEXT_ARGS = new HashMap<>();
+    static {
+        PASSPHRASE_CIPHERTEXT_ARGS.put("DECRYPT", new int[]{0});
+        PASSPHRASE_CIPHERTEXT_ARGS.put("TRY_DECRYPT", new int[]{0});
     }
 
     /**
@@ -9473,7 +9588,9 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
                                               final Expression call) {
         rejectArgumentTypes(funcName, args, BOOLEAN_REJECTING_ARGS, new Class<?>[] {BooleanType.class}, call);
         rejectArgumentTypes(funcName, args, BINARY_STRICT_ARGS,
-            new Class<?>[] {StringType.class, NumericType.class, BooleanType.class, DateTimeType.class}, null);
+            new Class<?>[] {StringType.class, NumericType.class, BooleanType.class, DateTimeType.class}, call);
+        rejectArgumentTypes(funcName, args, PASSPHRASE_CIPHERTEXT_ARGS, new Class<?>[] {StringType.class,
+            NumericType.class, BooleanType.class, DateTimeType.class, VariantType.class}, call);
         rejectNonNumberBitAggregateArgument(funcName, args, call);
         rejectNonMapArgumentInStrictFunction(funcName, args);
         rejectObjectInArrayPosition(funcName, args, call);
@@ -12667,38 +12784,8 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         }
         throw new RuntimeException(NumericRangeRefusal.typed(
             SignedStorageWidth.tagOf(result, declared.getScale()), declared.getPrecision(),
-            declared.getScale(), isNullableArgument(argument), result));
+            declared.getScale(), mayBeNull(argument), result));
     }
-
-    /**
-     * Whether the value the refusal above is about could have been NULL — live spells the answer into
-     * the message, {@code {nullable}} or {@code {not null}}, and takes it from the COLUMN. Anything
-     * that is not a column reference reads as not-null.
-     *
-     * @param argument the expression the value came from
-     * @return whether it is nullable
-     */
-    private boolean isNullableArgument(final Expression argument) {
-        // A minus keeps its operand's nullability: ROUND(-a, -1) refuses as {nullable} over a nullable
-        // column, exactly as ROUND(a, -1) does (live-verified).
-        Expression source = argument;
-        while (source instanceof UnaryOperationExpression
-                && (((UnaryOperationExpression) source).getOperator() == UnaryOperator.NEGATE
-                    || ((UnaryOperationExpression) source).getOperator() == UnaryOperator.PLUS)) {
-            source = ((UnaryOperationExpression) source).getOperand();
-        }
-        if (!(source instanceof ColumnReferenceExpression)) {
-            return false;
-        }
-        // A block's variable or a routine's argument is no column: x::INT of a FLOAT variable holding inf is
-        // {not null} (live-verified).
-        if (scriptVariableType(source) != null) {
-            return false;
-        }
-        final TableColumn resolved = resolveDeclaredColumn((ColumnReferenceExpression) source);
-        return resolved == null || resolved.isNullable();
-    }
-
 
     /** The functions whose DECLARED type decides how their result is presented. */
     private static boolean isRoundingFamily(final String funcName) {
@@ -20173,6 +20260,13 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         final Object value = expr.getValue().accept(this);
 
         if (expr.hasSubquery()) {
+            final Expression drawn = bareSharedDrawItem(expr.getSubquery());
+            if (drawn != null) {
+                // The plan folds the query into the test, so its draw is the row's: ENCRYPT('msg', 'key') IN
+                // (SELECT ENCRYPT('msg', 'key')) is TRUE (live-verified).
+                final Object member = drawn.accept(this);
+                return value == null || member == null ? null : equals(value, member) != expr.isNot();
+            }
             // IN with subquery
             return evaluateInSubquery(value, expr.getSubquery(), expr.isNot(), collationOf(expr.getValue()),
                 expr.getValue());
@@ -20256,6 +20350,18 @@ public class ExpressionEvaluatorVisitor implements ExpressionVisitor<Object> {
         if (expr.getLeft() instanceof RowExpression && expr.getSubquery() instanceof SubqueryExpression
                 && queryExecutor != null) {
             return quantifiedOverRows(expr);
+        }
+        final Expression drawn = expr.getSubquery() instanceof SubqueryExpression
+            ? bareSharedDrawItem((SubqueryExpression) expr.getSubquery()) : null;
+        if (drawn != null) {
+            // A query folded into the comparison is its one row's item: = ANY (SELECT ENCRYPT('msg', 'key')) compares
+            // with the row's draw (live-verified).
+            Expression folded = foldedQuantified.get(expr);
+            if (folded == null) {
+                folded = new BinaryOperationExpression(expr.getLeft(), expr.getOperator(), drawn);
+                foldedQuantified.put(expr, folded);
+            }
+            return folded.accept(this);
         }
         final Object leftValue = expr.getLeft().accept(this);
         // The subject's collation drives the comparison against every row the subquery answers, the

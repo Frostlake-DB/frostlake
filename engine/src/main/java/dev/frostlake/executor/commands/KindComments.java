@@ -79,6 +79,10 @@ final class KindComments {
                 // A snapshot takes its comment from ALTER SNAPSHOT alone (live-verified).
                 throw new RuntimeException("Unsupported feature 'TOK_SERVICE_SNAPSHOT'.");
             }
+            if (!namesClass(unmodelled) && unmodelledKind(unmodelled) == UnmodelledDropKind.APPLICATION) {
+                // An application takes its comment from ALTER APPLICATION alone (live-verified).
+                throw new RuntimeException("Unsupported feature 'APPLICATION'.");
+            }
             refuseUnmodelled(unmodelled, name, comment, null, ifExists);
         } else if (kind.ALERT() != null) {
             new AlertCommandHandler(queryExecutor).comment(name, comment, ifExists);
@@ -129,7 +133,8 @@ final class KindComments {
      * the way any schema object's does and is missing; a kind's object resolves the same way and is missing, which
      * IF EXISTS forgives. A connection is an account's object: a qualified name finds nothing, IF EXISTS or not,
      * and one that is there takes the comment, or loses it, or the new name of a RENAME. A semantic view is modelled: one that is there takes the comment, or loses it, or takes the tags the ALTER sets
-     * or unsets, and a relation of another kind holding the name is refused as that kind (live-verified).
+     * or unsets, and a relation of another kind holding the name is refused as that kind; an application package's
+     * ALTER IF EXISTS still looks for the tags it names (live-verified).
      *
      * @param kind     the kind's words
      * @param parts    the object's name, its canonical parts
@@ -166,6 +171,10 @@ final class KindComments {
                 throw new RuntimeException(SqlCompilationError.objectDoesNotExist());
             }
             if (ifExists) {
+                if (unmodelled == UnmodelledDropKind.APPLICATION_PACKAGE && action != null) {
+                    // The tags an application package's guarded ALTER names are looked for all the same.
+                    new AlteredTags(queryExecutor, visitor).requireNamed(action.tagSet(), action.tagUnset());
+                }
                 return;
             }
             throw new RuntimeException(SqlCompilationError.doesNotExist(unmodelled.noun(), parts[0]));
@@ -216,7 +225,7 @@ final class KindComments {
      * @return whether they name a class
      */
     static boolean namesClass(final FrostlakeParser.UnmodelledCommentKindContext kind) {
-        if (kind.GIT() != null || kind.SEMANTIC() != null || kind.DBT() != null) {
+        if (kind.GIT() != null || kind.SEMANTIC() != null || kind.DBT() != null || kind.APPLICATION() != null) {
             return false;
         }
         if (kind.model == null) {
@@ -268,6 +277,9 @@ final class KindComments {
         }
         if (kind.DBT() != null) {
             return UnmodelledDropKind.DBT_PROJECT;
+        }
+        if (kind.APPLICATION() != null) {
+            return kind.PACKAGE() != null ? UnmodelledDropKind.APPLICATION_PACKAGE : UnmodelledDropKind.APPLICATION;
         }
         final UnmodelledDropKind named = UnmodelledDropKind.of(kind.model);
         return named != null ? named : UnmodelledDropKind.MODEL;

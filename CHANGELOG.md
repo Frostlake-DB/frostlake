@@ -12,6 +12,44 @@ for exactly that reason.
 
 ### Now refused (SQL that earlier versions accepted)
 
+- **A subquery whose FROM joins a `LATERAL (query)` is refused where the account cannot plan it as a join.** Over
+  `FROM u y, LATERAL (SELECT y.k v) l` (a comma or a JOIN, with no ON) the subquery is answered where it runs once
+  or stands as a join of the query around it, and refused with `Unsupported subquery type cannot be evaluated`
+  elsewhere (live-verified). Reading nothing of the outer row, a value and an EXISTS are answered anywhere, while
+  an IN, a NOT IN, an ANY and an ALL are answered only as a filter of the WHERE — `SELECT id, n IN (SELECT l.v
+  FROM u y, LATERAL (SELECT y.k v) l) FROM t` is refused, in a CASE, a HAVING and an ORDER BY too. Reading the
+  outer row, every kind is refused outside a WHERE filter; there an EXISTS, an IN and an ANY are answered, a
+  NOT IN and an ALL refused, and a value is answered only as the operand of a comparison, a BETWEEN or an IS NULL,
+  with an item that is no COUNT and no `COALESCE` over its aggregate, filtered by equalities:
+  `WHERE (SELECT MAX(l.v) … WHERE l.v = x.n) > 0` is answered, `WHERE COALESCE((SELECT MAX(l.v) …), 0) > 0` and
+  `WHERE (SELECT COUNT(*) …) > 0` are refused. A lateral query that reads the outer row beside the relation to
+  its left is refused but under an EXISTS reading none of its columns in a filter.
+- **A table function's argument under a qualifier nothing answers to is refused in every clause, as the statement
+  compiles.** `SELECT x.id FROM t x WHERE EXISTS (SELECT 1 FROM TABLE(FLATTEN(INPUT => zz.arr)) f)` read the outer
+  `arr`; it is now `invalid identifier 'ZZ.ARR'` at the argument, in a select list, a WHERE, a HAVING, a QUALIFY
+  and an ORDER BY,
+  over a `WHERE FALSE` too, and so is the table's own name where the statement gave the table an alias
+  (`FLATTEN(INPUT => t.arr)` over `FROM t x`).
+- **A NOT IN or an ALL over a fed query is refused where neither side can be NULL, and a fed table function joined
+  with an ON is refused while the statement compiles** (live-verified). Over a subject the statistics hold no NULL
+  of — a column with none, `COALESCE(n, 0)` — an item that is never NULL either (`ROW_NUMBER() OVER (…)`, `RANK()`,
+  `COUNT(*)`, `COUNT(*) OVER ()`, `COALESCE(SUM(f.value) OVER (), 0)`, the same through a derived table) is
+  `Unsupported subquery type cannot be evaluated` (2031 / 42601); a subject or an item that may be NULL, and a
+  literal item, are still computed for every row. `… WHERE EXISTS (SELECT 1 FROM u JOIN TABLE(FLATTEN(INPUT =>
+  x.arr)) f ON u.k = f.value)` is `Unsupported feature 'lateral table function called with OUTER JOIN syntax or a
+  join predicate (ON clause)'.` over an outer table of no row and under `WHERE FALSE AND …` too; it used to answer
+  no row there.
+
+- **A value, an EXISTS and an IN over a derived table or a CTE that a table function feeds the outer row are
+  refused** (live-verified): `SELECT x.id FROM t x WHERE EXISTS (SELECT 1 FROM (SELECT f.value v FROM
+  TABLE(FLATTEN(INPUT => x.arr)) f) q WHERE q.v = 3)`, the same query as a scalar `(SELECT COUNT(*) FROM (…) q)`, under
+  IN and written as `WITH q AS (…)` inside the subquery are `Unsupported subquery type cannot be evaluated`
+  (2031 / 42601) at the subquery, as the table function standing directly in the subquery's FROM already was. They
+  used to run, and before this release read the function's argument from the first outer row alone, so every row got
+  that row's answer. Over a table of exactly one row the read is spared only for a column whose statistics hold its
+  one value — a number, a text, a date: `(SELECT COUNT(*) FROM TABLE(FLATTEN(INPUT => ARRAY_CONSTRUCT(e.a))))` is
+  still answered there, where `FLATTEN(INPUT => e.arr)` over an ARRAY, an OBJECT or a VARIANT column is now refused.
+
 - **An UPDATE's or a MERGE's SET value holding a keyed NOT IN over a query that may answer NULL is refused**
   (live-verified): `UPDATE t SET k = IFF(t.id NOT IN (SELECT val FROM i WHERE i.k = t.k), 1, 0)`, a CASE, a
   `<> ALL` and a MERGE's `WHEN MATCHED THEN UPDATE SET` alike, over an `i.val` holding a NULL, is `Unsupported
@@ -93,6 +131,30 @@ for exactly that reason.
   `'2e308'::FLOAT`, `TO_DOUBLE('1e400')`, `1.0::FLOAT + '2e308'`, `x::FLOAT` over `(SELECT '2e308' AS x)`
   and `CREATE TABLE t (f FLOAT) AS SELECT '2e308'`. A text that spells no number written into a FLOAT
   column is echoed trimmed and without one leading plus sign: `'+abc'` and `' abc '` are `Numeric value 'abc' is not recognized`.
+
+- **A block-bodied function's or procedure's RETURN of a typed name is converted as the cast to the RETURNS type
+  converts it** (live-verified): a TIME, DATE or timestamp under a text type is its text in the session's output
+  format (`10:00:00`, `2020-01-15 10:11:12.000`, `2020-01-15 10:11:12.000 +0200`) and is refused as too long for a
+  VARCHAR(5); a VARIANT under a BINARY, BOOLEAN, number, DATE, TIME or timestamp is the variant's cast, so
+  `Failed to cast variant value [1,2] to BINARY` (100071 / 22000) where it was returned as it is, and `… to BOOLEAN`,
+  `… to REAL` and `… to FIXED` where a Boolean or Numeric value sentence was; a VARIANT `true` under a number is 1.
+  A NUMBER with a fraction under a timestamp keeps it (1.50 is `1970-01-01 00:00:01.500`).
+  `PARSE_JSON('"abc"')::BINARY` is refused with the same variant sentence.
+
+- **A date or time format's two-digit element gives no digit back to what follows** (live-verified):
+  `TO_DATE('2020-01-15', 'YYYY-MM-DD HH24')` is `Can't parse '2020-01-15' as date with format 'YYYY-MM-DD HH24'`
+  where it answered 2020-01-01, and so are `TO_TIME('1234', 'HH24MISS')` and `TO_DATE('202011', 'YYYYMMDD')`; a
+  space of the format left out of the input never splits a run of digits (`TO_TIME('1000', 'HH24 MI')` is refused).
+
+- **TRY_DECRYPT, and a CASE that settles on a drawing function in VALUES, are refused while the statement compiles**
+  (live-verified): `TRY_DECRYPT('a', 'key')` answered NULL and is now `Invalid argument types for function
+  'TRY_DECRYPT': (VARCHAR(1), VARCHAR(3))` like DECRYPT, a VARIANT ciphertext included (`(VARIANT, VARCHAR(3))`), and
+  `VALUES (CASE WHEN TRUE THEN RANDOM() END)` answered a row and is now `Invalid expression
+  [ENSURE_NULLABLE(RANDOM())] in VALUES clause`.
+
+- **A stage location whose scheme names no storage is refused** (live-verified): `CREATE STAGE s URL =
+  'xyz://bucket/p'` and an `http://` location answer `invalid URL prefix found in: '<url>'` (1011 / 42601), as the
+  empty location now does too, where it answered `invalid URL: ` (1021).
 
 - **A constant arithmetic tree its type cannot hold is refused while the statement compiles** (live-verified): a
   sum, difference, product or negation of numeric literals and casts of them is folded exactly and converted once,
@@ -429,6 +491,52 @@ for exactly that reason.
 
 ### Fixed
 
+- **A `LATERAL (query)`'s columns are in scope inside a subquery.** `SELECT id, (SELECT MAX(l.v) FROM u y,
+  LATERAL (SELECT y.k v) l) FROM t`, the same FROM under EXISTS or IN in a WHERE, and a statement with no FROM
+  holding it failed with `invalid identifier 'L.V'`: the lateral query was read with the names of the query
+  around the subquery in place of the relations to its left. A LATERAL query that is the first relation of its
+  FROM has nothing to its left and is judged as the derived table it is: `(SELECT l.v FROM LATERAL (SELECT x.n v)
+  l)` is answered where it was refused.
+- **An IN over a query joining a lateral item answers NULL or FALSE as the account does.** A lateral item's read
+  of the row to its left no longer makes the query one computed for every outer row: over a lateral table
+  function `NULL IN (…)` is NULL again where it answered FALSE, and over a `LATERAL (query)` it is FALSE, in a
+  derived table or a common table expression too (live-verified).
+- **An UPDATE's SET subquery reads the target by its alias.** `UPDATE t x SET n = (SELECT MAX(y.k) FROM u y WHERE
+  y.k = x.n)` failed with `invalid identifier 'X.N'`; the table's own name stays refused beside the alias, as on
+  the account.
+- **A NOT IN and an ALL over a query a table function feeds the outer row are answered** (live-verified):
+  `SELECT x.id FROM t x WHERE x.n NOT IN (SELECT f.value FROM TABLE(FLATTEN(INPUT => x.arr)) f)`, `LATERAL
+  FLATTEN(…)`, `TABLE(SPLIT_TO_TABLE(x.id, 'p'))`, `<> ALL`, `> ALL`, `= ALL`, a row NOT IN, in a WHERE, a select
+  list, a CASE, a HAVING, an ORDER BY, a join's ON and a DELETE's WHERE used to be `Unsupported subquery type cannot
+  be evaluated`. The query is computed for every outer row and compared three-valued, a NULL probe over no row being
+  TRUE; its filter, grouping, HAVING, QUALIFY, windows, DISTINCT, LIMIT, TOP and ORDER BY may read the outer row, and
+  so may a derived table or a CTE it reads. Still refused, as on the account: a set operation; after the first fed
+  item of the FROM, anything but a table function reading a column (`… f, t y`, `… f JOIN t y ON …`, `… f,
+  TABLE(GENERATOR(ROWCOUNT => 2))`, where `t y, … f` and a second `FLATTEN` reading the outer row or the first one's
+  columns are answered); a nested IN, NOT IN, ANY or ALL over a query, and a nested value or EXISTS that reads another
+  query; and a select item reading the outer row beside a column of its own, an aggregate or a window (`f.value +
+  x.n`, `MAX(f.value) + x.n`, where `MAX(f.value + x.n)` and `x.n + 1` are answered). The positive forms — a value,
+  EXISTS, IN, ANY, `NOT (… IN …)` and NOT EXISTS — stay refused.
+
+- **A CHANGES clause reads a `STATEMENT` point by the statement's place among the table's changes**: `SELECT …
+  FROM t CHANGES(INFORMATION => DEFAULT) AT(STATEMENT => $q)`, `BEFORE(STATEMENT => …)`, an `END(STATEMENT => …)`
+  and a MERGE's `USING t CHANGES(…) AT(STATEMENT => …)` read the point by its millisecond, so a row inserted in the
+  same millisecond as the statement was no change since it, and the clause answered nothing — or a row too many.
+  The point is now the statement's own, as a plain `AT(STATEMENT => …)` already read it.
+
+- **A window call inside a subquery reads the subquery's own relations** (live-verified): `SELECT id, (SELECT
+  SUM(y.n) OVER () FROM t y LIMIT 1) FROM t x`, `n IN (SELECT SUM(y.n) OVER () FROM t y)`, an EXISTS, a NOT IN, an
+  ANY, a `LAG(y.n) OVER (ORDER BY y.id)`, a join's or a derived table's alias and the relation's own name were
+  `invalid identifier 'Y.N'` whenever the window's argument was qualified; only the unqualified name was read. A
+  qualifier or a column the subquery's FROM does not hold — `SUM(zz.n) OVER ()`, `SUM(y.nosuch) OVER ()`, the
+  relation's name beside its alias — is still refused at the argument.
+
+- **A table function after another relation of a subquery's FROM reads the outer row**: in `… WHERE EXISTS (SELECT 1
+  FROM u, TABLE(FLATTEN(INPUT => x.arr)) f)` the argument `x.arr` was `invalid identifier 'X.ARR'`; it is now the
+  outer row's, so the subquery is refused as `Unsupported subquery type cannot be evaluated` at the EXISTS and, under
+  NOT IN or ALL, answered (live-verified). A subquery calling a table function with an outer row's value is run again
+  for every such row; it used to keep the first row's rows.
+
 - **Unsupported-subquery refusals are placed where the account places them** (live-verified): a Snowflake Scripting
   expression refusing a NOT IN or `<> ALL` now counts each variable written before the subquery as the account
   rewrites it (`n` over an INT as `(:n)::NUMBER(38,0)`, a text as `(:s)`, a bind `:n` as `:n::NUMBER(38,0)`) and
@@ -549,6 +657,84 @@ for exactly that reason.
   5) AS NUMBER(24,11)[UNKNOWN])) / U.C AS DATE)`, `(s + c)::DATE` as `CAST((TO_NUMBER(U.S, 38, 5)) +
   (FIXED_TO_FIXED(U.C AS NUMBER(38,5)[UNKNOWN])) AS DATE)` and a text beside a FLOAT or another text through
   `TO_DOUBLE`, where the operands were quoted bare.
+
+- **A range refusal spells the refused value's nullability as live does, and names the fault live reaches first**
+  (live-verified): `{not null}` or `{nullable}` in `Number out of representable range: type FIXED[SB8](10,4){not
+  null}, value …` is now the value's own judgement — a literal, a cast of one, an operation over such values, `ABS`,
+  `ROUND`, `GREATEST` or `COALESCE` of them is `{not null}`; `NULLIF`, `TRY_CAST`, `TRY_TO_NUMBER`, an `IFF` or `CASE`
+  that can answer NULL, a scalar subquery, an aggregate and a window function are `{nullable}`. That holds for a cast,
+  a rounding function and a constant operand an addition rescales (`1e37::NUMBER(38,0) + 1::NUMBER(38,6)` is
+  `FIXED[SB16](38,6){not null}`). A VALUES clause's column is `{not null}` unless a row's expression can be NULL, and
+  so is a derived relation's column read through a star; a side an outer join extends is `{nullable}`. A select list
+  reports its first fault item by item over each batch of 256 rows, as live does: `SELECT column1::NUMBER(10,4),
+  column2::NUMBER(10,4) FROM VALUES (1, 7654321.4321), (1234567.1234, 1)` names 1234567.1234, not the first row's
+  second item.
+
+- **The incompatible-RETURN refusals carry their codes** (live-verified): `Declared return type 'DATE' is
+  incompatible with actual return type 'NUMBER(10,0)'` is 92225 / P0000 (it carried none, and a handler read
+  100351), a table function's column of another type 90210 / 42601, and `Unsupported return type for Snowscript UDF:
+  OBJECT` 602001 / 0A000.
+
+- **ENCRYPT draws through merged relations and folded subqueries, VALUES echoes of drawing functions, and the
+  decryption argument refusals follow the account** (live-verified). A derived table, CTE or view over one table
+  whose column is a constant-argument ENCRYPT or ENCRYPT_RAW is computed in the query over it, once for each of its
+  rows: a join of two such relations over three rows each draws nine values, the two columns equal on every joined
+  row, while a CTE read under two names keeps its own three. `ENCRYPT('msg', 'key') IN (SELECT ENCRYPT('msg',
+  'key'))` and `= ANY (…)` are TRUE. A VALUES item refused for RANDOM, UNIFORM, NORMAL or ZIPF is echoed as the plan
+  rewrites it: `(CAST(RANDOM() AS NUMBER(19,0))) + 1`, `CONCAT('p', CAST(RANDOM() AS VARCHAR(134217728)))`,
+  `NORMAL(0.0, 1.0, 5)`, `(CAST(UNIFORM(1, 10, 5) AS NUMBER(2,0))) + 1`, and `RANDOM()` for `IFF(TRUE, RANDOM(), 1)`,
+  `NVL(RANDOM(), 1)` and a settled CASE; `IFF(FALSE, RANDOM(), 1)` and `CASE WHEN FALSE THEN RANDOM() END` are taken.
+  A VALUES item whose DECRYPT, TRY_DECRYPT, ENCRYPT_RAW, DECRYPT_RAW or TRY_DECRYPT_RAW call takes the wrong
+  argument types is refused for them, at the call, ahead of the VALUES refusal, and `TRY_DECRYPT_RAW('a', 'b')` names
+  its argument types (`(VARCHAR(1), VARCHAR(1))`) as DECRYPT_RAW does; the raw functions' refusal now carries its
+  place in the statement.
+
+- **ALTER STAGE … SET URL judges the location before it looks for the stage, and ALTER APPLICATION [PACKAGE] and
+  ALTER DATASET … ADD / DROP VERSION are read** (live-verified): `SET URL = 'foo'` is `invalid URL: foo` (1021),
+  `'s3://'` the bucket-name refusal (91006), `'azure://'` `Invalid location format or value` (now 3059 / 42601, where
+  it carried no code) and an unknown scheme 1011, all ahead of the missing stage, IF EXISTS, and the internal-stage
+  refusal; an Azure endpoint is still judged once the stage is found. `ALTER APPLICATION PACKAGE x SET …` / `UNSET …`
+  / `SET TAG` / `RENAME TO` answer the package's does-not-exist sentence after its property list is judged (`invalid
+  property 'FOO' for 'APPLICATION_PACKAGE'`, a duplicate, a comment or day count of the wrong kind); written with IF
+  EXISTS only its tags are read, and looked for. `ALTER APPLICATION x …` reads the same way as an application, whose
+  COMMENT ON is an unsupported feature. `ALTER DATASET x ADD VERSION 'v' FROM (<query>) [PARTITION BY e] [COMMENT =
+  …] [METADATA = …]` and `DROP VERSION 'v'` answer `Dataset X does not exist.` (399019 / 02000), IF EXISTS or not,
+  after any other property is refused as `Invalid dataset property FOO.` (399015 / 22023).
+
+- **ALTER … SET with a trailing clause is refused where the account refuses it** (live-verified): a materialized view's
+  or a dynamic table's SET list that does not read whole at the list's first name (after a lone SECURE, at the word
+  after it), an external table's at its SET, a table's TAG after a property's value at the TAG, `ALTER HYBRID …` at
+  HYBRID alone and `ALTER DATA …` at the word after DATA, each in one line.
+
+- **EXPLAIN folds context functions and constant conditions, and reads constant selects as Generators**
+  (live-verified): `CURRENT_TIMESTAMP()`, `SYSDATE()`, `GETDATE()`, `LOCALTIMESTAMP`, `SYSTIMESTAMP()` and a
+  timestamp cast of a constant are written as their instant in UTC, `'2026-11-23 05:05:44.029000000Z'` (a
+  TIMESTAMP_TZ with its offset, `...Ztz=1560`), `CURRENT_TIME()` as `'05:05:44.029000000'`, and `CURRENT_USER()`,
+  `CURRENT_ROLE()`, `CURRENT_DATABASE()` and the other session functions as their value in quotes; a comparison, AND,
+  OR, NOT, IS NULL and a searched CASE of constants are written as their value, `NULLIF(1, 1)` as `null`, and
+  `RANDOM() IS NULL` / `SEQ4() IS NULL` (and of their sums, products and absolute values) as `FALSE` while
+  `UNIFORM(...) IS NULL` stays, written without parentheses. A WHERE over a FROM list drops a condition that folds to
+  true and reads a `Generator 0` for one that folds to false or null, a select of one table reading its columns as
+  `null` (`SELECT n, n + 1 FROM t WHERE 1 = 2` is `Result null + 1` over `Generator 0`, its ORDER BY left out). A
+  select of constants over tables reads a Generator of their rows together (`SELECT DISTINCT 1 FROM t` over two
+  rows is `Aggregate` over `Generator 2`, a LIMIT capping it). A WHERE reading `seq.NEXTVAL` with no FROM is a
+  Filter over its Getnextval rather than `Generator 1`, its read named after the select list's. `NORMAL`'s mean and
+  deviation and `ZIPF`'s exponent are written as FLOATs (`NORMAL(0.0, 1.0, RANDOM())`, `TO_DOUBLE(T.N)`), a number
+  beside them as a FLOAT literal, a JavaScript function's call as its parameters (`FNJ(X FLOAT, S VARCHAR)`), and a
+  FROM-less subquery or a query-bodied SQL function that answers anew as its item (`(SELECT RANDOM())` as
+  `RANDOM()`).
+
+- **A correlated subquery's row faults follow the inner rows the account computes for it** (live-verified). An IN
+  beside a residual condition (`w IN (SELECT 10 / b.z FROM kz b WHERE b.k = a.id AND b.j > a.v)`) computes its
+  members over every inner row, so a division by zero in a key no outer row holds refuses the statement, from a select
+  item and over a derived outer relation too; only a filter on the outer key by constants beside it in the WHERE
+  bounds them. A residual's columns and an aggregate's arguments (`SELECT MAX(10 / b.z) …`) are computed over every
+  inner row where the outer table has more rows than the inner relation and over the keys it holds where it has
+  fewer, and a filter on the outer key by constants in the query's WHERE (`WHERE a.id = 1 AND w IN (…)`, or the WHERE
+  of the query whose select item holds the subquery) bounds them, as it now does for an equality-only IN and
+  aggregate as well; a NOT IN's member is computed only for the rows whose residual holds. A NULL outer key no longer
+  meets a residual's fault, and a residual conjunct that no inner row satisfies beside any row of the outer table
+  (`b.j > a.v + 100`) reads no inner row, so none of these faults is met.
 
 - **A folded constant arithmetic tree is converted at its root** (live-verified): `(<product>) + 1` is refused in
   the text of the whole sum (`'10000000000000000000000000000000001' is not recognized`), `2 * 3 * <product>`,

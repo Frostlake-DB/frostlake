@@ -74,6 +74,20 @@ public final class PlannedCorrelations {
         return refused != null && refused.contains("answered " + key);
     }
 
+    /**
+     * The key of a NOT IN's or an ALL's subquery that a table function feeds the outer row, which the plan
+     * computes for every outer row; it stands in the same record as the refused keys.
+     */
+    public static String fedKey(final String subquery) {
+        return "fed " + membershipKey(subquery);
+    }
+
+    /** Whether the running statement's plan computes the subquery for every outer row (see fedKey). */
+    static boolean fed(final String subquery) {
+        final Set<String> refused = REFUSED.get();
+        return refused != null && refused.contains(fedKey(subquery));
+    }
+
     /** Whether the running statement's plan refused the subquery under {@code key}. */
     static boolean refused(final String key) {
         final Set<String> refused = REFUSED.get();

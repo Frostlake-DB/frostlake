@@ -1250,6 +1250,27 @@ final class WindowFunctionEvaluator {
     }
 
     /**
+     * Install the FROM clause's relations of a query computed for an outer row: a window's argument there is
+     * judged by the query's own relations, so {@code (SELECT SUM(y.n) OVER () FROM t y)} reads {@code y}, and
+     * {@code SUM(zz.n) OVER ()} and {@code SUM(y.nosuch) OVER ()} name nothing.
+     *
+     * @param relations the relations by their FROM-clause keys, or null for a query computed for no outer row
+     * @param tables    the relations in combined-row order, or null
+     */
+    Map<String, Table> fromRelations() {
+        return state().fromRelations;
+    }
+
+    List<Table> fromTables() {
+        return state().fromTables;
+    }
+
+    void beginFromRelations(final Map<String, Table> relations, final List<Table> tables) {
+        state().fromRelations = relations;
+        state().fromTables = tables;
+    }
+
+    /**
      * Restore the row saved by {@link #beginOuterRow}.
      *
      * @param saved the row to put back
@@ -2059,6 +2080,12 @@ final class WindowFunctionEvaluator {
         // A window argument may reference a SELECT alias (SUM(w) OVER () beside v AS w works
         // live), so the output aliases are exempt from the walk's scope rejection.
         checker.setScopeExemptNames(outputAliasNames);
+        if (state().fromRelations != null) {
+            checker.setFromClauseKeys(state().fromRelations.keySet());
+            if (state().fromTables != null && !state().fromTables.isEmpty()) {
+                checker.setMultiTableContext(state().fromRelations, state().fromTables);
+            }
+        }
         rejectWindowArguments(windowCalls, checker);
     }
 

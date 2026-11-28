@@ -227,6 +227,9 @@ public final class ValueCaster {
                 if (value instanceof byte[]) {
                     return BinaryValue.of((byte[]) value);
                 }
+                if (value instanceof VariantValue) {
+                    return variantBinary((VariantValue) value);
+                }
                 return SessionInputFormats.binary(value.toString());
 
             default:
@@ -486,6 +489,26 @@ public final class ValueCaster {
         return value.toString().trim();
     }
 
+
+    /**
+     * A VARIANT cast to BINARY: a string it holds read as the session's BINARY_INPUT_FORMAT says, and any other
+     * value, or a string that format refuses, refused as the variant it is - {@code Failed to cast variant value
+     * "abc" to BINARY}, {@code … [1,2] to BINARY} (live-verified).
+     */
+    private static Object variantBinary(final VariantValue variant) {
+        if (variant.isJsonNull()) {
+            return null;
+        }
+        final String text = SemiStructuredCasts.quotedJsonStringText(variant);
+        if (text != null) {
+            try {
+                return SessionInputFormats.binary(text);
+            } catch (final RuntimeException notBinary) {
+                // Refused as the variant it is, below.
+            }
+        }
+        throw new RuntimeException("Failed to cast variant value " + variant.text() + " to BINARY");
+    }
 
     /**
      * A VARIANT source prepared for the cast it is about to feed.
